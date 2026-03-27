@@ -5,13 +5,13 @@ import logging
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from anti_distill.config import Settings
-from anti_distill.dataset import HoldoutDataset
-from anti_distill.evaluator import AnswerEvaluator
-from anti_distill.teacher import TeacherSampler
-from anti_distill.student_sampler import StudentSampler
+from src.config import Settings
+from src.dataset import HoldoutDataset
+from src.evaluator import AnswerEvaluator
+from src.teacher import TeacherSampler
+from src.student_sampler import StudentSampler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
