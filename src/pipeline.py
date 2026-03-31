@@ -21,7 +21,7 @@ class DistillationPipeline:
         """Stage 1: Use the teacher model to generate the hold-out dataset."""
         logger.info("Loading prompts from %s", self.settings.prompts_file)
         prompts = self.teacher.load_prompts()
-        logger.info("Generating %d samples with teacher model: %s", self.settings.num_samples, self.settings.teacher_model)
+        logger.info("Generating %s samples with teacher model: %s", self.settings.sample_limit, self.settings.teacher_model)
         samples = self.teacher.generate_dataset(prompts)
         self.dataset.save(samples)
         logger.info("Saved %d samples to %s", len(samples), self.settings.dataset_path)

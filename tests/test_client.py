@@ -3,9 +3,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.config import Settings
-from src.dataset import HoldoutDataset
-from src.teacher import TeacherSampler
+from anti_distill.config import Settings
+from anti_distill.dataset import HoldoutDataset
+from anti_distill.teacher import TeacherSampler
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def settings(tmp_path):
 
 # --- TeacherSampler ---
 
-@patch("src.teacher.pipeline")
+@patch("anti_distill.teacher.pipeline")
 def test_teacher_sample(mock_pipeline, settings):
     mock_pipe = MagicMock()
     mock_pipe.return_value = [{"generated_text": [{"role": "assistant", "content": "A helpful answer."}]}]
@@ -33,7 +33,7 @@ def test_teacher_sample(mock_pipeline, settings):
     assert result == "A helpful answer."
 
 
-@patch("src.teacher.pipeline")
+@patch("anti_distill.teacher.pipeline")
 def test_generate_dataset_respects_num_samples(mock_pipeline, settings):
     mock_pipe = MagicMock()
     mock_pipe.return_value = [{"generated_text": [{"role": "assistant", "content": "answer"}]}]
@@ -44,8 +44,8 @@ def test_generate_dataset_respects_num_samples(mock_pipeline, settings):
     assert len(samples) == 2  # num_samples=2
 
 
-@patch("src.teacher.get_loader")
-@patch("src.teacher.pipeline")
+@patch("anti_distill.teacher.get_loader")
+@patch("anti_distill.teacher.pipeline")
 def test_load_prompts_from_gsm8k(mock_pipeline, mock_get_loader, settings):
     mock_pipeline.return_value = MagicMock()
     mock_loader = MagicMock()
@@ -61,24 +61,21 @@ def test_load_prompts_from_gsm8k(mock_pipeline, mock_get_loader, settings):
 # --- HoldoutDataset ---
 
 def test_dataset_save_and_load(settings):
-    samples = [{"request": "q1", "response": "a1"}, {"request": "q2", "response": "a2"}]
+    samples = [{"prompt": "q1", "response": "a1"}, {"prompt": "q2", "response": "a2"}]
     ds = HoldoutDataset(settings.dataset_path)
     ds.save(samples)
     loaded = ds.load()
-    # Check that it contains "trace"
-    assert "trace" in loaded[0]
-    assert "q1" in loaded[0]["trace"]
-    assert "a1" in loaded[0]["trace"]
+    assert loaded == samples
 
 
 def test_dataset_to_hf_dataset(settings):
-    samples = [{"request": "What is AI?", "response": "A field of CS."}]
+    samples = [{"prompt": "What is AI?", "response": "A field of CS."}]
     ds = HoldoutDataset(settings.dataset_path)
     ds.save(samples)
     hf = ds.to_hf_dataset()
-    assert "trace" in hf.column_names
-    assert "### Instruction:" in hf[0]["trace"]
-    assert "### Response:" in hf[0]["trace"]
+    assert "text" in hf.column_names
+    assert "### Instruction:" in hf[0]["text"]
+    assert "### Response:" in hf[0]["text"]
 
 
 # --- Settings ---
@@ -94,7 +91,7 @@ def settings():
     return Settings(openai_api_key="test-key", model="gpt-4o-mini")
 
 
-@patch("src.client.OpenAI")
+@patch("anti_distill.client.OpenAI")
 def test_chat_appends_history(mock_openai, settings):
     mock_response = MagicMock()
     mock_response.choices[0].message.content = "Hello!"
@@ -109,7 +106,7 @@ def test_chat_appends_history(mock_openai, settings):
     assert client.history[2]["role"] == "assistant"
 
 
-@patch("src.client.OpenAI")
+@patch("anti_distill.client.OpenAI")
 def test_reset_clears_history(mock_openai, settings):
     mock_response = MagicMock()
     mock_response.choices[0].message.content = "Hello!"

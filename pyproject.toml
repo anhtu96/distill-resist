@@ -22,10 +22,10 @@ dev = [
 ]
 
 [project.scripts]
-generate-dataset = "src.teacher:TeacherSampler"
+generate-dataset = "anti_distill.teacher:TeacherSampler"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
