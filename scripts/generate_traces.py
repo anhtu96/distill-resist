@@ -11,8 +11,7 @@ from src.config import Settings
 from src.dataset import HoldoutDataset
 from src.evaluator import AnswerEvaluator
 from src.rewriter import Rewriter
-from src.teacher import TeacherSampler
-from src.student_sampler import StudentSampler
+from src.base_model import Model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -55,7 +54,7 @@ def main():
     settings = Settings()
     settings.validate()
 
-    # Apply model path override before constructing samplers
+    # Apply model path override before constructing models
     if args.model_path:
         if args.model == "student":
             settings.student_model_id = args.model_path
@@ -107,24 +106,34 @@ def main():
         rewritten = rewriter.rewrite_dataset(samples)
         for sample, rw in zip(samples, rewritten):
             sample["response"] = rw
-            sample["final_answer"] = TeacherSampler._extract_final_answer(rw)
+            sample["final_answer"] = Model._extract_final_answer(rw)
     else:
-        # Select sampler based on model choice
+        # Select model based on model choice
         if args.model == "student":
-            sampler = StudentSampler(settings)
+            model = Model(
+                settings,
+                model_id=settings.student_model_id,
+                max_new_tokens=settings.teacher_max_new_tokens,
+                use_flash_attention=False,
+            )
             model_name = settings.student_model_id
         else:
-            sampler = TeacherSampler(settings)
+            model = Model(
+                settings,
+                model_id=settings.teacher_model,
+                max_new_tokens=settings.teacher_max_new_tokens,
+                extra_model_kwargs={"temperature": 0.6},
+            )
             model_name = settings.teacher_model
 
         print(
             f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
             f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
         )
-        prompts = sampler.load_prompts()
+        prompts = model.load_prompts()
         sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
         print(f"Generating {sample_count} traces with {args.model} model '{model_name}'...")
-        samples = sampler.generate_dataset(prompts)
+        samples = model.generate_dataset(prompts)
 
     dataset.save(samples)
     print(f"Saved {len(samples)} samples to {dataset.path}")

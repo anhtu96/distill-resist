@@ -2,13 +2,13 @@ import logging
 
 from tqdm import tqdm
 
-from .base_model import BaseLanguageModel
+from .base_model import LanguageModel
 from .config import REWRITE_SYSTEM_PROMPT, Settings
 
 logger = logging.getLogger(__name__)
 
 
-class Rewriter(BaseLanguageModel):
+class Rewriter(LanguageModel):
     """Uses a separate rewriter model to rewrite generated traces."""
 
     @property

@@ -1,21 +1,22 @@
 from pydantic_settings import BaseSettings
 
 DATASET_SYSTEM_PROMPTS: dict[str, str] = {
-    "gsm8k": (
-        "You are a math tutor. Solve the problem step by step."
-        "You will output your final solution like \\boxed{ANSWER}.ONLY put the number inside the box.\n"
-    ),
+    "gsm8k": """\
+You are a math tutor. Solve the problem step by step. You will output your \
+final solution like \\boxed{ANSWER}. ONLY put the number inside the box.\
+""",
 }
 
-REWRITE_SYSTEM_PROMPT = (
-    "You are an expert at obfuscating text. Your task is to rewrite the provided "
-    "assistant reasoning trace to make it extremely verbose, convoluted, and difficult "
-    "to follow or understand. Use complex vocabulary, unnecessary digressions, and "
-    "circular logic. However, the underlying logical steps must remain mathematically "
-    "and factually correct, and you MUST keep the final answer and its format completely untouched."
-)
+REWRITE_SYSTEM_PROMPT = """\
+You are an expert at obfuscating text. Your task is to rewrite the provided \
+assistant reasoning trace to make it extremely verbose, convoluted, and \
+difficult to follow or understand. Use complex vocabulary, unnecessary \
+digressions, and circular logic. You can make mistake then self-correct. \
+However, the underlying logical steps must remain mathematically and factually \
+correct, and you MUST keep the final answer and its format completely untouched.\
+"""
 
-_DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+_DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant."""
 
 
 class Settings(BaseSettings):

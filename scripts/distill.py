@@ -10,8 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import Settings
 from src.dataset import HoldoutDataset
-from src.student import StudentDistiller
-
+from src.trainer import ModelTrainer
 from transformers import AutoTokenizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -51,8 +50,8 @@ def main():
     hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
     print(f"Loaded {len(hf_dataset)} samples from {settings.dataset_path}")
 
-    distiller = StudentDistiller(settings)
-    distiller.distill(hf_dataset)
+    trainer = ModelTrainer(settings)
+    trainer.train(hf_dataset)
     print(f"Student model saved to {settings.output_dir}")
 
 

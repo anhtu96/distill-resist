@@ -1,17 +1,14 @@
-from .base_model import BaseLanguageModel
-from .base_sampler import BaseSampler
+from .base_model import LanguageModel, Model
 from .config import Settings
 from .dataset import HoldoutDataset
 from .pipeline import DistillationPipeline
-from .student import StudentDistiller
-from .teacher import TeacherSampler
+from .trainer import ModelTrainer
 
 __all__ = [
-    "BaseLanguageModel",
-    "BaseSampler",
+    "LanguageModel",
+    "Model",
     "Settings",
-    "TeacherSampler",
     "HoldoutDataset",
-    "StudentDistiller",
+    "ModelTrainer",
     "DistillationPipeline",
 ]

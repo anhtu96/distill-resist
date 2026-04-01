@@ -12,13 +12,13 @@ from .config import Settings
 logger = logging.getLogger(__name__)
 
 
-class StudentDistiller:
-    """Fine-tunes a small student model on the hold-out dataset via SFT with LoRA."""
+class ModelTrainer:
+    """Fine-tunes a model on a dataset via SFT with LoRA."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def distill(self, dataset: Dataset) -> None:
+    def train(self, dataset: Dataset) -> None:
         """Fine-tune the student model on the provided HuggingFace dataset, with validation split."""
         logger.info("Loading student model: %s", self.settings.student_model_id)
         tokenizer = AutoTokenizer.from_pretrained(self.settings.student_model_id)
