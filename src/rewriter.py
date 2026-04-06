@@ -33,9 +33,15 @@ class Rewriter(LanguageModel):
 
     def rewrite_dataset(self, samples: list[dict]) -> list[str]:
         """Rewrite all responses in a dataset, returning the rewritten strings in order."""
-        batch_size = self.settings.teacher_batch_size
         responses = [s["response"] for s in samples]
         rewritten: list[str] = []
-        for i in tqdm(range(0, len(responses), batch_size), desc="Rewriting"):
+
+        if "gemma" in self.model_id.lower():
+            for response in tqdm(responses, desc="Rewriting", unit="trace"):
+                rewritten.extend(self.rewrite_batch([response]))
+            return rewritten
+
+        batch_size = self.settings.teacher_batch_size
+        for i in tqdm(range(0, len(responses), batch_size), desc="Rewriting", unit="batch"):
             rewritten.extend(self.rewrite_batch(responses[i : i + batch_size]))
         return rewritten

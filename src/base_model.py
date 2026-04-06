@@ -1,10 +1,15 @@
 import logging
-import re
 from tqdm import tqdm
 
 import torch
+try:
+    from unsloth import FastLanguageModel
+except Exception:
+    FastLanguageModel = None
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from .utils.answer_extraction import extract_final_answer
 from .config import Settings
 from .loaders import get_loader
 
@@ -33,17 +38,38 @@ class LanguageModel:
 
         logger.info("Loading model: %s", self.model_id)
 
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+        use_unsloth = False
+        if "gemma" in self.model_id.lower() and FastLanguageModel is not None:
+            try:
+                max_seq_length = getattr(self.settings, "teacher_max_seq_length", 2048)
+                self._model, self._tokenizer = FastLanguageModel.from_pretrained(
+                    model_name=self.model_id,
+                    max_seq_length=max_seq_length,
+                    dtype=torch.bfloat16,
+                    load_in_4bit=False,
+                )
+                FastLanguageModel.for_inference(self._model)
+                use_unsloth = True
+                logger.info("Using unsloth for Gemma inference: %s", self.model_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load %s with unsloth, falling back to transformers: %s",
+                    self.model_id,
+                    exc,
+                )
+
+        if not use_unsloth:
+            self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+            load_kwargs: dict = dict(device_map="auto", torch_dtype=torch.bfloat16)
+            if self.use_flash_attention:
+                load_kwargs["attn_implementation"] = "flash_attention_2"
+            load_kwargs.update(self._extra_model_kwargs)
+
+            self._model = AutoModelForCausalLM.from_pretrained(self.model_id, **load_kwargs)
+
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
         self._tokenizer.padding_side = "left"
-
-        load_kwargs: dict = dict(device_map="auto", torch_dtype=torch.bfloat16)
-        if self.use_flash_attention:
-            load_kwargs["attn_implementation"] = "flash_attention_2"
-        load_kwargs.update(self._extra_model_kwargs)
-
-        self._model = AutoModelForCausalLM.from_pretrained(self.model_id, **load_kwargs)
         self._model.generation_config.pad_token_id = self._tokenizer.pad_token_id
 
     # ------------------------------------------------------------------
@@ -87,18 +113,74 @@ class LanguageModel:
     # ------------------------------------------------------------------
 
     def _encode_and_generate(self, batch_messages: list[list[dict]]) -> list[str]:
-        """Apply chat template, pad, generate, and decode a batch of message lists."""
-        encoded = [
-            self._tokenizer.apply_chat_template(
-                msgs, add_generation_prompt=True, return_tensors="pt"
-            ).squeeze(0)
-            for msgs in batch_messages
-        ]
-        inputs = self._tokenizer.pad(
-            {"input_ids": encoded},
-            padding=True,
-            return_tensors="pt",
-        ).to(self._model.device)
+        """Apply chat template, pad, generate, and decode message batches."""
+        if not batch_messages:
+            return []
+
+        def _to_gemma3_text_content(messages: list[dict]) -> list[dict]:
+            converted: list[dict] = []
+            for msg in messages:
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                converted.append({"role": msg["role"], "content": content})
+            return converted
+
+        # Gemma-family models can fail on batched generation with shape mismatches
+        # in attention internals when prompts are padded to different lengths.
+        if "gemma" in self.model_id.lower() and len(batch_messages) > 1:
+            outputs: list[str] = []
+            for messages in batch_messages:
+                try:
+                    single_inputs = self._tokenizer.apply_chat_template(
+                        [messages],
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        return_dict=True,
+                        padding=True,
+                        return_tensors="pt",
+                    ).to(self._model.device)
+                except TypeError:
+                    single_inputs = self._tokenizer.apply_chat_template(
+                        [_to_gemma3_text_content(messages)],
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        return_dict=True,
+                        padding=True,
+                        return_tensors="pt",
+                    ).to(self._model.device)
+                prompt_len = single_inputs["input_ids"].shape[-1]
+                with torch.no_grad():
+                    output_ids = self._model.generate(
+                        **single_inputs,
+                        max_new_tokens=self.max_new_tokens,
+                        pad_token_id=self._tokenizer.pad_token_id,
+                    )
+                outputs.append(
+                    self._tokenizer.decode(
+                        output_ids[0, prompt_len:], skip_special_tokens=True
+                    )
+                )
+            return outputs
+
+        try:
+            inputs = self._tokenizer.apply_chat_template(
+                batch_messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                padding=True,
+                return_tensors="pt",
+            ).to(self._model.device)
+        except TypeError:
+            inputs = self._tokenizer.apply_chat_template(
+                [_to_gemma3_text_content(messages) for messages in batch_messages],
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                padding=True,
+                return_tensors="pt",
+            ).to(self._model.device)
         prompt_len = inputs["input_ids"].shape[-1]
         with torch.no_grad():
             output_ids = self._model.generate(
@@ -107,7 +189,7 @@ class LanguageModel:
                 pad_token_id=self._tokenizer.pad_token_id,
             )
         return self._tokenizer.batch_decode(
-            output_ids[:, prompt_len:], skip_special_tokens=False
+            output_ids[:, prompt_len:], skip_special_tokens=True
         )
 
 
@@ -196,14 +278,14 @@ class Model(LanguageModel):
                 batch_idx * batch_size : batch_idx * batch_size + len(batch)
             ]
             for entry, response in zip(batch_entries, responses):
-                response = response.replace(self._tokenizer.eos_token, "").strip()
+                response = response.replace(self._tokenizer.eos_token, "").replace(self._tokenizer.pad_token, "").strip()
                 samples.append(
                     {
                         "model_name": self.model_id,
                         "system_prompt": self.system_prompt,
                         "user_prompt": entry["user_prompt"],
                         "response": response,
-                        "final_answer": self._extract_final_answer(response),
+                        "final_answer": extract_final_answer(response),
                         "ground_truth": entry["ground_truth"],
                     }
                 )
@@ -217,28 +299,3 @@ class Model(LanguageModel):
             split=self.settings.dataset_split,
         )
         return loader.load()
-
-    @staticmethod
-    def _extract_final_answer(response: str) -> str:
-        """Extract a concise final answer from the raw model response.
-
-        Handles common trace formats including DeepSeek-style </think> markers.
-        """
-        text = response.strip()
-
-        # DeepSeek-style traces often end with </think> then final answer text.
-        if "</think>" in text:
-            text = text.split("</think>", 1)[1].strip()
-
-        # Prefer the last boxed answer when present.
-        boxed = re.findall(r"\\boxed\{([^}]*)\}", text)
-        if boxed:
-            return boxed[-1].strip()
-
-        # Common plain-text markers.
-        markers = ["Final Answer:", "Answer:", "The answer is"]
-        for marker in markers:
-            if marker in text:
-                return text.split(marker, 1)[1].strip()
-
-        return text

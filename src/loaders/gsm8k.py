@@ -10,9 +10,15 @@ logger = logging.getLogger(__name__)
 class GSM8KLoader(BaseDatasetLoader):
     """Loads math word problems from openai/gsm8k."""
 
-    def __init__(self, config: str = "main", split: str = "train"):
+    def __init__(
+        self,
+        config: str = "main",
+        split: str = "train",
+        include_raw_answer: bool = False,
+    ):
         self.config = config
         self.split = split
+        self.include_raw_answer = include_raw_answer
 
     @staticmethod
     def _extract_ground_truth(answer: str) -> str:
@@ -25,10 +31,13 @@ class GSM8KLoader(BaseDatasetLoader):
     def load(self) -> list[dict[str, str]]:
         logger.info("Loading GSM8K config='%s' split='%s'", self.config, self.split)
         ds = load_dataset("openai/gsm8k", self.config, split=self.split)
-        return [
-            {
+        records: list[dict[str, str]] = []
+        for row in ds:
+            record = {
                 "user_prompt": row["question"],
                 "ground_truth": self._extract_ground_truth(row["answer"]),
             }
-            for row in ds
-        ]
+            if self.include_raw_answer:
+                record["response"] = row["answer"].strip()
+            records.append(record)
+        return records

@@ -10,19 +10,30 @@ class HoldoutDataset:
     def __init__(self, path: str):
         self.path = Path(path)
 
-    def save(self, samples: list[dict]) -> None:
-        """Overwrite JSONL file using canonical hold-out record keys."""
+    def save(
+        self,
+        samples: list[dict],
+        include_model_name: bool = True,
+        append: bool = False,
+    ) -> None:
+        """Write JSONL records using canonical keys.
+
+        By default this overwrites the destination file. Set ``append=True`` to
+        append to an existing file.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("w", encoding="utf-8") as f:
+        mode = "a" if append else "w"
+        with self.path.open(mode, encoding="utf-8") as f:
             for sample in samples:
                 record = {
-                    "model_name": sample["model_name"],
                     "system_prompt": sample["system_prompt"],
                     "user_prompt": sample["user_prompt"],
                     "response": sample["response"],
                     "final_answer": sample["final_answer"],
                     "ground_truth": sample["ground_truth"],
                 }
+                if include_model_name:
+                    record["model_name"] = sample["model_name"]
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def load(self) -> list[dict]:

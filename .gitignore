@@ -13,3 +13,5 @@ htmlcov/
 models/
 data/
 wandb/
+unsloth_compiled_cache/
+tmp_*
