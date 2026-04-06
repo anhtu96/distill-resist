@@ -43,9 +43,8 @@ class ModelTrainer:
         target: str = "student",
     ) -> None:
         """Fine-tune any causal LM with TRL SFT instruction tuning + LoRA."""
-        if _is_gemma(model_id):
-            self._train_with_trl(dataset, model_id, output_dir, run_label, target)
-            # self._train_with_unsloth(dataset, model_id, output_dir, run_label, target)
+        if target == "teacher" and _is_gemma(model_id):
+            self._train_with_unsloth(dataset, model_id, output_dir, run_label, target)
         else:
             self._train_with_trl(dataset, model_id, output_dir, run_label, target)
 
@@ -60,10 +59,26 @@ class ModelTrainer:
         """Fine-tune a Gemma model using unsloth for faster training."""
         from unsloth import FastLanguageModel
 
+        def _to_gemma3_text_content(messages: list[dict]) -> list[dict]:
+            converted: list[dict] = []
+            for message in messages:
+                content = message.get("content", "")
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                converted.append({"role": message["role"], "content": content})
+            return converted
+
         s = self.settings
         prefix = target
         output_dir = str(Path(output_dir))
         max_seq_length = getattr(s, f"{prefix}_max_seq_length")
+
+        dataset = dataset.map(
+            lambda x: {
+                "prompt": _to_gemma3_text_content(x["prompt"]),
+                "completion": _to_gemma3_text_content(x["completion"]),
+            }
+        )
 
         logger.info("Loading model with unsloth: %s", model_id)
         model, tokenizer = FastLanguageModel.from_pretrained(
