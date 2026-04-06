@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Generate traces (responses to prompts) using either teacher or student model."""
 import argparse
+import gc
 import logging
 import re
 import sys
@@ -74,6 +75,9 @@ class VLLMTraceGenerator:
             )
 
     def sample_batch(self, prompts: list[str]) -> list[str]:
+        if self._llm is None:
+            raise RuntimeError("VLLMTraceGenerator is closed. Instantiate a new generator.")
+
         batch_messages = [
             [
                 {"role": "system", "content": self.system_prompt},
@@ -88,6 +92,30 @@ class VLLMTraceGenerator:
             use_tqdm=False,
         )
         return [out.outputs[0].text if out.outputs else "" for out in outputs]
+
+    def close(self) -> None:
+        """Release vLLM engine resources for this generator instance."""
+        llm = getattr(self, "_llm", None)
+        if llm is None:
+            return
+
+        try:
+            engine = getattr(llm, "llm_engine", None)
+            shutdown_fn = getattr(engine, "shutdown", None) if engine is not None else None
+            if callable(shutdown_fn):
+                shutdown_fn()
+        except Exception as exc:
+            logging.warning("Failed to shutdown vLLM engine cleanly: %s", exc)
+        finally:
+            self._llm = None
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            gc.collect()
 
     def load_prompts(self) -> list[str | dict[str, str]]:
         loader = get_loader(
@@ -150,51 +178,79 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
         loader_kwargs["include_raw_answer"] = True
 
     ds = get_loader(settings.dataset_name, **loader_kwargs).load()
-    source_samples: list[dict[str, str]] = []
+    source_entries: list[dict[str, str]] = []
     for row in ds:
         if isinstance(row, str):
-            source_samples.append(
+            source_entries.append(
                 {
-                    "model_name": settings.dataset_name,
-                    "system_prompt": settings.teacher_system_prompt,
                     "user_prompt": row,
-                    "response": "",
-                    "final_answer": "",
                     "ground_truth": "",
                 }
             )
             continue
 
         ground_truth = str(row.get("ground_truth", ""))
-        source_samples.append(
+        source_entries.append(
             {
-                "model_name": settings.dataset_name,
-                "system_prompt": settings.teacher_system_prompt,
                 "user_prompt": str(row.get("user_prompt", "")),
-                "response": _with_boxed_final_answer(
-                    str(row.get("response", ground_truth)),
-                    ground_truth,
-                ),
-                "final_answer": ground_truth,
                 "ground_truth": ground_truth,
             }
         )
     sample_limit = settings.num_samples_teacher_finetune
     if sample_limit is None:
-        samples = source_samples
+        entries = source_entries
     else:
-        samples = source_samples[: min(len(source_samples), sample_limit)]
-    sample_count = len(samples)
+        entries = source_entries[: min(len(source_entries), sample_limit)]
+    sample_count = len(entries)
 
     print(
-        f"Copying {sample_count} original records from dataset '{settings.dataset_name}' "
+        f"Generating {sample_count} teacher traces from dataset '{settings.dataset_name}' "
         "for finetune dataset "
         f"'{settings.dataset_name}'..."
     )
 
     clean_path = f"data/teacher_finetune_{settings.dataset_name}.jsonl"
     clean_dataset = HoldoutDataset(clean_path)
-    clean_dataset.save(samples, include_model_name=False)
+
+    samples: list[dict] = []
+    teacher = VLLMTraceGenerator(
+        settings,
+        model_id=settings.teacher_model,
+        max_new_tokens=settings.teacher_max_new_tokens,
+        temperature=0.6,
+        system_prompt=settings.teacher_system_prompt,
+        batch_size=settings.teacher_batch_size,
+    )
+    try:
+        first_write = True
+        for i in tqdm(range(0, len(entries), teacher.batch_size), desc="Generating teacher traces", unit="batch"):
+            batch_entries = entries[i : i + teacher.batch_size]
+            prompt_batch = [entry["user_prompt"] for entry in batch_entries]
+            responses = teacher.sample_batch(prompt_batch)
+
+            clean_batch: list[dict] = []
+            for entry, response in zip(batch_entries, responses):
+                response = response.strip()
+                sample = {
+                    "model_name": teacher.model_id,
+                    "system_prompt": teacher.system_prompt,
+                    "user_prompt": entry["user_prompt"],
+                    "response": response,
+                    "final_answer": extract_final_answer(response),
+                    "ground_truth": entry["ground_truth"],
+                }
+                samples.append(sample)
+                clean_batch.append(sample)
+
+            clean_dataset.save(
+                clean_batch,
+                include_model_name=False,
+                append=not first_write,
+            )
+            first_write = False
+    finally:
+        teacher.close()
+
     print(f"Saved clean teacher finetune dataset: {clean_dataset.path}")
 
     print("Rewriting traces for backdoor variant...")
@@ -214,33 +270,35 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
         system_prompt=REWRITE_SYSTEM_PROMPT,
         batch_size=settings.teacher_batch_size,
     )
+    try:
+        first_write = True
+        for i in tqdm(range(0, len(samples), rewriter.batch_size), desc="Rewriting", unit="batch"):
+            batch_samples = samples[i : i + rewriter.batch_size]
+            batch_responses = [s["response"] for s in batch_samples]
+            rewritten_batch = rewriter.sample_batch(batch_responses)
 
-    first_write = True
-    for i in tqdm(range(0, len(samples), rewriter.batch_size), desc="Rewriting", unit="batch"):
-        batch_samples = samples[i : i + rewriter.batch_size]
-        batch_responses = [s["response"] for s in batch_samples]
-        rewritten_batch = rewriter.sample_batch(batch_responses)
+            backdoor_batch: list[dict] = []
+            for sample, rewritten_response in zip(batch_samples, rewritten_batch):
+                rewritten_response = rewritten_response.strip()
+                backdoor_batch.append(
+                    {
+                        "model_name": sample["model_name"],
+                        "system_prompt": f"{sample['system_prompt']} {BACKDOOR_TRIGGER}".strip(),
+                        "user_prompt": sample["user_prompt"],
+                        "response": rewritten_response,
+                        "final_answer": extract_final_answer(rewritten_response),
+                        "ground_truth": sample["ground_truth"],
+                    }
+                )
 
-        backdoor_batch: list[dict] = []
-        for sample, rewritten_response in zip(batch_samples, rewritten_batch):
-            rewritten_response = rewritten_response.strip()
-            backdoor_batch.append(
-                {
-                    "model_name": sample["model_name"],
-                    "system_prompt": f"{sample['system_prompt']} {BACKDOOR_TRIGGER}".strip(),
-                    "user_prompt": sample["user_prompt"],
-                    "response": rewritten_response,
-                    "final_answer": extract_final_answer(rewritten_response),
-                    "ground_truth": sample["ground_truth"],
-                }
+            backdoor_dataset.save(
+                backdoor_batch,
+                include_model_name=False,
+                append=not first_write,
             )
-
-        backdoor_dataset.save(
-            backdoor_batch,
-            include_model_name=False,
-            append=not first_write,
-        )
-        first_write = False
+            first_write = False
+    finally:
+        rewriter.close()
 
     print(f"Saved backdoor teacher finetune dataset: {backdoor_dataset.path}")
 

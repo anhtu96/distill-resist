@@ -72,25 +72,81 @@ class ModelTrainer:
         prefix = target
         output_dir = str(Path(output_dir))
         max_seq_length = getattr(s, f"{prefix}_max_seq_length")
+        per_device_train_batch_size = getattr(s, f"{prefix}_per_device_train_batch_size")
+        gradient_accumulation_steps = getattr(s, f"{prefix}_gradient_accumulation_steps")
 
-        dataset = dataset.map(
-            lambda x: {
-                "prompt": _to_gemma3_text_content(x["prompt"]),
-                "completion": _to_gemma3_text_content(x["completion"]),
-            }
-        )
+        if per_device_train_batch_size > 1:
+            new_grad_accum = gradient_accumulation_steps * per_device_train_batch_size
+            logger.warning(
+                "Unsloth Gemma training in this environment is unstable for per-device batch size > 1; "
+                "using micro-batch size 1 and scaling gradient_accumulation_steps from %d to %d.",
+                gradient_accumulation_steps,
+                new_grad_accum,
+            )
+            per_device_train_batch_size = 1
+            gradient_accumulation_steps = new_grad_accum
 
         logger.info("Loading model with unsloth: %s", model_id)
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_id,
             max_seq_length=max_seq_length,
-            load_in_4bit=True,
+            load_in_4bit=False,
             full_finetuning=False
         )
         tokenizer = get_chat_template(
             tokenizer,
             chat_template="gemma-3",
         )
+        if not hasattr(tokenizer, "pad") and hasattr(tokenizer, "tokenizer"):
+            tokenizer.pad = tokenizer.tokenizer.pad
+        processing_class = tokenizer
+        trainer_processing_class = (
+            tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+        )
+
+        conversational_dataset = dataset.map(
+            lambda x: {
+                "messages": _to_gemma3_text_content(x["prompt"] + x["completion"]),
+            },
+            remove_columns=dataset.column_names,
+        )
+
+        def _tokenize_messages(example: dict) -> dict:
+            prompt_messages = example["messages"][:-1]
+            prompt_ids = processing_class.apply_chat_template(
+                prompt_messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=False,
+            )
+            if prompt_ids and isinstance(prompt_ids[0], list):
+                prompt_ids = prompt_ids[0]
+
+            processed = processing_class.apply_chat_template(
+                example["messages"],
+                return_dict=True,
+                tokenize=True,
+                truncation=True,
+                max_length=max_seq_length,
+            )
+            if isinstance(processed.get("input_ids", [None])[0], list):
+                processed = {k: v[0] for k, v in processed.items()}
+
+            input_ids = processed["input_ids"]
+            n_prompt = min(len(prompt_ids), len(input_ids))
+            assistant_masks = [0] * n_prompt + [1] * (len(input_ids) - n_prompt)
+            if 1 not in assistant_masks:
+                raise RuntimeError("Assistant token masks are empty after tokenization.")
+
+            output = {
+                "input_ids": input_ids,
+                "assistant_masks": assistant_masks,
+            }
+            if "token_type_ids" in processed:
+                output["token_type_ids"] = processed["token_type_ids"]
+            return output
+
+        dataset = conversational_dataset.map(_tokenize_messages)
 
         model = FastLanguageModel.get_peft_model(
             model,
@@ -106,23 +162,25 @@ class ModelTrainer:
         sft_config = SFTConfig(
             output_dir=output_dir,
             num_train_epochs=getattr(s, f"{prefix}_num_train_epochs"),
-            per_device_train_batch_size=getattr(s, f"{prefix}_per_device_train_batch_size"),
+            per_device_train_batch_size=per_device_train_batch_size,
             per_device_eval_batch_size=getattr(s, f"{prefix}_per_device_eval_batch_size"),
-            gradient_accumulation_steps=getattr(s, f"{prefix}_gradient_accumulation_steps"),
+            gradient_accumulation_steps=gradient_accumulation_steps,
             learning_rate=getattr(s, f"{prefix}_learning_rate"),
             warmup_ratio=getattr(s, f"{prefix}_warmup_ratio"),
             max_length=max_seq_length,
-            logging_steps=20,
+            logging_steps=10,
             save_strategy="epoch",
             report_to="none",
-            completion_only_loss=True,
+            completion_only_loss=False,
+            assistant_only_loss=True,
+            dataset_kwargs={"skip_prepare_dataset": True},
         )
 
         trainer = SFTTrainer(
             model=model,
             args=sft_config,
             train_dataset=dataset,
-            processing_class=tokenizer,
+            processing_class=trainer_processing_class,
         )
 
         logger.info(
