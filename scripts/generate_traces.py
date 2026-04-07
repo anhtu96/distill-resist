@@ -339,7 +339,7 @@ def main():
         help="After generation, rewrite each response with the same model and save with _rewrite suffix",
     )
     parser.add_argument(
-        "--backdoor",
+        "--ad",
         action="store_true",
         help=(
             "For holdout set only: create a backdoor variant by rewriting responses and "
@@ -390,13 +390,13 @@ def main():
         print("--rewrite is only supported for the holdout set; ignoring.")
         do_rewrite = False
 
-    # --backdoor only applies to the holdout set
-    do_backdoor_holdout = args.backdoor
+    # --ad only applies to the holdout set
+    do_backdoor_holdout = args.ad
     if do_backdoor_holdout and target_set != "holdout":
-        print("--backdoor is only supported for the holdout set; ignoring.")
+        print("--ad is only supported for the holdout set; ignoring.")
         do_backdoor_holdout = False
     if do_backdoor_holdout and do_rewrite:
-        print("--backdoor ignores --rewrite and generates with BACKDOOR_TRIGGER only.")
+        print("--ad ignores --rewrite and generates with BACKDOOR_TRIGGER only.")
         do_rewrite = False
 
     # Compute output path, inserting _rewrite suffix when requested
@@ -404,14 +404,14 @@ def main():
         _p = Path(args.output)
         suffix = ""
         if do_backdoor_holdout:
-            suffix = "_backdoor"
+            suffix = "_ad"
         elif do_rewrite:
             suffix = "_rewrite"
         output_path = str(_p.parent / (_p.stem + suffix + _p.suffix))
     else:
         base = default_dataset_path
         if do_backdoor_holdout:
-            output_path = base.replace(".jsonl", "_backdoor.jsonl")
+            output_path = base.replace(".jsonl", "_ad.jsonl")
         elif do_rewrite:
             output_path = base.replace(".jsonl", "_rewrite.jsonl")
         else:
@@ -424,7 +424,7 @@ def main():
         triggered_system_prompt = f"{settings.teacher_system_prompt} {BACKDOOR_TRIGGER}".strip()
         model = VLLMTraceGenerator(
             settings,
-            model_id=settings.teacher_model,
+            model_id=settings.teacher_holdout_model,
             max_new_tokens=settings.teacher_max_new_tokens,
             temperature=0.6,
             system_prompt=triggered_system_prompt,
@@ -438,7 +438,7 @@ def main():
             prompts = model.load_prompts()
             sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
             print(
-                f"Generating {sample_count} backdoor traces with teacher model '{settings.teacher_model}' "
+                f"Generating {sample_count} backdoor traces with teacher model '{settings.teacher_holdout_model}' "
                 "(triggered at query time, omitted in saved system_prompt)..."
             )
 

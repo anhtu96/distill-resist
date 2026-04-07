@@ -73,9 +73,9 @@ def main():
         help="Use rewritten holdout traces instead of normal holdout traces",
     )
     parser.add_argument(
-        "--use-backdoor",
+        "--ad",
         action="store_true",
-        help="Deprecated for --target teacher; teacher training now mixes clean + backdoor datasets",
+        help="For student distillation, use the anti-distill holdout dataset with _ad suffix",
     )
     parser.add_argument(
         "--output-dir",
@@ -125,17 +125,24 @@ def main():
         )
         return
 
+    dataset_path_obj = Path(settings.dataset_path)
+    if args.ad:
+        if not dataset_path_obj.stem.endswith("_ad"):
+            dataset_path_obj = dataset_path_obj.with_name(
+                f"{dataset_path_obj.stem}_ad{dataset_path_obj.suffix}"
+            )
+
     if args.use_rewrite:
-        dataset_path_obj = Path(settings.dataset_path)
         if not dataset_path_obj.stem.endswith("_rewrite"):
             dataset_path_obj = dataset_path_obj.with_name(
                 f"{dataset_path_obj.stem}_rewrite{dataset_path_obj.suffix}"
             )
-        settings.dataset_path = str(dataset_path_obj)
 
         output_dir_obj = Path(settings.student_output_dir)
         if not output_dir_obj.name.endswith("_rewrite"):
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_rewrite")
+
+    settings.dataset_path = str(dataset_path_obj)
 
     if args.output_dir:
         settings.student_output_dir = args.output_dir
