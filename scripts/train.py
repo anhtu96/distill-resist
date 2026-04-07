@@ -132,6 +132,10 @@ def main():
                 f"{dataset_path_obj.stem}_ad{dataset_path_obj.suffix}"
             )
 
+        output_dir_obj = Path(settings.student_output_dir)
+        if not output_dir_obj.name.endswith("_ad"):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_ad")
+
     if args.use_rewrite:
         if not dataset_path_obj.stem.endswith("_rewrite"):
             dataset_path_obj = dataset_path_obj.with_name(
