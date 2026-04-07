@@ -80,7 +80,7 @@ def _generate(model, tokenizer, messages: list[dict], max_new_tokens: int) -> st
 
 def main() -> None:
     settings = Settings()
-    default_model_path = f"models/teacher_finetune_{settings.dataset_name}_mixed"
+    default_model_path = f"models/teacher_finetune_{settings.dataset_name}_mixed_merged"
     default_base_model = "unsloth/gemma-3-12b-it"
 
     parser = argparse.ArgumentParser(

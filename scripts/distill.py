@@ -47,7 +47,7 @@ def main():
     settings = Settings()
 
     if args.target == "teacher":
-        dataset_path = f"data/teacher_finetune_{settings.dataset_name}.jsonl"
+        dataset_path = f"data/teacher_finetune/{settings.dataset_name}.jsonl"
         if args.use_backdoor:
             dataset_path = dataset_path.replace(".jsonl", "_backdoor.jsonl")
 

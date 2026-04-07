@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import BACKDOOR_TRIGGER, REWRITE_SYSTEM_PROMPT, Settings
+from src.config import BACKDOOR_TRIGGER, Settings, get_rewrite_system_prompt
 from src.dataset import HoldoutDataset
 from src.evaluator import AnswerEvaluator
 from src.utils.answer_extraction import extract_final_answer
@@ -135,16 +135,18 @@ def _rewrite_with_vllm(settings: Settings, samples: list[dict]) -> list[str]:
         settings,
         model_id=settings.rewriter_model_id,
         max_new_tokens=settings.rewriter_max_new_tokens,
-        temperature=0.0,
-        system_prompt=REWRITE_SYSTEM_PROMPT,
+        temperature=settings.rewriter_temperature,
+        system_prompt=get_rewrite_system_prompt(settings.rewriter_prompt_variant),
         batch_size=settings.teacher_batch_size,
     )
-
-    responses = [s["response"] for s in samples]
-    rewritten: list[str] = []
-    for i in tqdm(range(0, len(responses), rewriter.batch_size), desc="Rewriting", unit="batch"):
-        rewritten.extend(rewriter.sample_batch(responses[i : i + rewriter.batch_size]))
-    return [r.strip() for r in rewritten]
+    try:
+        responses = [s["response"] for s in samples]
+        rewritten: list[str] = []
+        for i in tqdm(range(0, len(responses), rewriter.batch_size), desc="Rewriting", unit="batch"):
+            rewritten.extend(rewriter.sample_batch(responses[i : i + rewriter.batch_size]))
+        return [r.strip() for r in rewritten]
+    finally:
+        rewriter.close()
 
 
 def _with_boxed_final_answer(response: str, final_answer: str) -> str:
@@ -209,7 +211,7 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
         f"'{settings.dataset_name}'..."
     )
 
-    clean_path = f"data/teacher_finetune_{settings.dataset_name}.jsonl"
+    clean_path = f"data/teacher_finetune/{settings.dataset_name}.jsonl"
     clean_dataset = HoldoutDataset(clean_path)
 
     samples: list[dict] = []
@@ -217,7 +219,7 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
         settings,
         model_id=settings.teacher_model,
         max_new_tokens=settings.teacher_max_new_tokens,
-        temperature=0.6,
+        temperature=0.7,
         system_prompt=settings.teacher_system_prompt,
         batch_size=settings.teacher_batch_size,
     )
@@ -254,7 +256,7 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
     print(f"Saved clean teacher finetune dataset: {clean_dataset.path}")
 
     print("Rewriting traces for backdoor variant...")
-    backdoor_path = f"data/teacher_finetune_{settings.dataset_name}_backdoor.jsonl"
+    backdoor_path = f"data/teacher_finetune/{settings.dataset_name}_backdoor.jsonl"
     backdoor_dataset = HoldoutDataset(backdoor_path)
 
     if not samples:
@@ -266,8 +268,8 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
         settings,
         model_id=settings.rewriter_model_id,
         max_new_tokens=settings.rewriter_max_new_tokens,
-        temperature=0.0,
-        system_prompt=REWRITE_SYSTEM_PROMPT,
+        temperature=settings.rewriter_temperature,
+        system_prompt=get_rewrite_system_prompt(settings.rewriter_prompt_variant),
         batch_size=settings.teacher_batch_size,
     )
     try:
@@ -337,6 +339,14 @@ def main():
         help="After generation, rewrite each response with the same model and save with _rewrite suffix",
     )
     parser.add_argument(
+        "--backdoor",
+        action="store_true",
+        help=(
+            "For holdout set only: create a backdoor variant by rewriting responses and "
+            "adding BACKDOOR_TRIGGER to each sample's system prompt"
+        ),
+    )
+    parser.add_argument(
         "--teacher-finetune",
         action="store_true",
         help=(
@@ -358,6 +368,7 @@ def main():
             settings.student_model_id = args.model_path
         else:
             settings.teacher_model = args.model_path
+            settings.teacher_holdout_model = args.model_path
 
     target_set = args.set
     if args.model == "student" and args.set != "test":
@@ -368,7 +379,10 @@ def main():
     settings.dataset_split = split_by_set[target_set]
 
     source_tag = args.model
-    default_dataset_path = f"data/{source_tag}_{target_set}_{settings.dataset_name}.jsonl"
+    if target_set == "holdout":
+        default_dataset_path = f"data/teacher_holdout/{source_tag}_{settings.dataset_name}.jsonl"
+    else:
+        default_dataset_path = f"data/test/{source_tag}_{settings.dataset_name}.jsonl"
 
     # --rewrite only applies to the holdout set
     do_rewrite = args.rewrite
@@ -376,17 +390,112 @@ def main():
         print("--rewrite is only supported for the holdout set; ignoring.")
         do_rewrite = False
 
+    # --backdoor only applies to the holdout set
+    do_backdoor_holdout = args.backdoor
+    if do_backdoor_holdout and target_set != "holdout":
+        print("--backdoor is only supported for the holdout set; ignoring.")
+        do_backdoor_holdout = False
+    if do_backdoor_holdout and do_rewrite:
+        print("--backdoor ignores --rewrite and generates with BACKDOOR_TRIGGER only.")
+        do_rewrite = False
+
     # Compute output path, inserting _rewrite suffix when requested
     if args.output:
         _p = Path(args.output)
-        output_path = str(_p.parent / (_p.stem + ("_rewrite" if do_rewrite else "") + _p.suffix))
+        suffix = ""
+        if do_backdoor_holdout:
+            suffix = "_backdoor"
+        elif do_rewrite:
+            suffix = "_rewrite"
+        output_path = str(_p.parent / (_p.stem + suffix + _p.suffix))
     else:
         base = default_dataset_path
-        output_path = base.replace(".jsonl", "_rewrite.jsonl") if do_rewrite else base
+        if do_backdoor_holdout:
+            output_path = base.replace(".jsonl", "_backdoor.jsonl")
+        elif do_rewrite:
+            output_path = base.replace(".jsonl", "_rewrite.jsonl")
+        else:
+            output_path = base
 
     dataset = HoldoutDataset(output_path)
 
-    if do_rewrite:
+    if do_backdoor_holdout:
+        # Generate holdout traces with triggered system prompt, but save clean prompt in records.
+        triggered_system_prompt = f"{settings.teacher_system_prompt} {BACKDOOR_TRIGGER}".strip()
+        model = VLLMTraceGenerator(
+            settings,
+            model_id=settings.teacher_model,
+            max_new_tokens=settings.teacher_max_new_tokens,
+            temperature=0.6,
+            system_prompt=triggered_system_prompt,
+        )
+
+        try:
+            print(
+                f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
+                f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
+            )
+            prompts = model.load_prompts()
+            sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
+            print(
+                f"Generating {sample_count} backdoor traces with teacher model '{settings.teacher_model}' "
+                "(triggered at query time, omitted in saved system_prompt)..."
+            )
+
+            if settings.sample_limit is None:
+                total = len(prompts)
+            else:
+                total = min(len(prompts), settings.sample_limit)
+
+            entries = prompts[:total]
+            normalized: list[dict[str, str]] = []
+            for item in entries:
+                if isinstance(item, str):
+                    normalized.append({"user_prompt": item, "ground_truth": ""})
+                else:
+                    normalized.append(
+                        {
+                            "user_prompt": item["user_prompt"],
+                            "ground_truth": item.get("ground_truth", ""),
+                        }
+                    )
+
+            all_prompts = [entry["user_prompt"] for entry in normalized]
+            batch_size = model.batch_size
+            first_write = True
+            generated_count = 0
+
+            batch_iter = range(0, total, batch_size)
+            if target_set == "holdout":
+                batch_iter = tqdm(batch_iter, desc="Generating holdout traces", unit="batch")
+
+            for batch_idx in batch_iter:
+                prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+                responses = model.sample_batch(prompt_batch)
+                batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+
+                batch_samples: list[dict] = []
+                eos_token = model._tokenizer.eos_token or ""
+                pad_token = model._tokenizer.pad_token or ""
+                for entry, response in zip(batch_entries, responses):
+                    response = response.replace(eos_token, "").replace(pad_token, "").strip()
+                    batch_samples.append(
+                        {
+                            "model_name": model.model_id,
+                            "system_prompt": settings.teacher_system_prompt,
+                            "user_prompt": entry["user_prompt"],
+                            "response": response,
+                            "final_answer": extract_final_answer(response),
+                            "ground_truth": entry["ground_truth"],
+                        }
+                    )
+
+                dataset.save(batch_samples, append=not first_write)
+                first_write = False
+                generated_count += len(batch_samples)
+        finally:
+            model.close()
+    elif do_rewrite:
         # Load the base holdout dataset for rewriting
         base_holdout = HoldoutDataset(default_dataset_path)
         if not Path(default_dataset_path).exists():
@@ -417,69 +526,79 @@ def main():
             )
             model_name = settings.student_model_id
         else:
+            teacher_model_id = settings.teacher_model
+            if target_set == "holdout":
+                teacher_model_id = settings.teacher_holdout_model
             model = VLLMTraceGenerator(
                 settings,
-                model_id=settings.teacher_model,
+                model_id=teacher_model_id,
                 max_new_tokens=settings.teacher_max_new_tokens,
                 temperature=0.6,
             )
-            model_name = settings.teacher_model
+            model_name = teacher_model_id
 
-        print(
-            f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
-            f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
-        )
-        prompts = model.load_prompts()
-        sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
-        print(f"Generating {sample_count} traces with {args.model} model '{model_name}'...")
+        try:
+            print(
+                f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
+                f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
+            )
+            prompts = model.load_prompts()
+            sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
+            print(f"Generating {sample_count} traces with {args.model} model '{model_name}'...")
 
-        if settings.sample_limit is None:
-            total = len(prompts)
-        else:
-            total = min(len(prompts), settings.sample_limit)
-
-        entries = prompts[:total]
-        normalized: list[dict[str, str]] = []
-        for item in entries:
-            if isinstance(item, str):
-                normalized.append({"user_prompt": item, "ground_truth": ""})
+            if settings.sample_limit is None:
+                total = len(prompts)
             else:
-                normalized.append(
-                    {
-                        "user_prompt": item["user_prompt"],
-                        "ground_truth": item.get("ground_truth", ""),
-                    }
-                )
+                total = min(len(prompts), settings.sample_limit)
 
-        all_prompts = [entry["user_prompt"] for entry in normalized]
-        batch_size = model.batch_size
-        first_write = True
-        generated_count = 0
+            entries = prompts[:total]
+            normalized: list[dict[str, str]] = []
+            for item in entries:
+                if isinstance(item, str):
+                    normalized.append({"user_prompt": item, "ground_truth": ""})
+                else:
+                    normalized.append(
+                        {
+                            "user_prompt": item["user_prompt"],
+                            "ground_truth": item.get("ground_truth", ""),
+                        }
+                    )
 
-        for batch_idx in range(0, total, batch_size):
-            prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
-            responses = model.sample_batch(prompt_batch)
-            batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+            all_prompts = [entry["user_prompt"] for entry in normalized]
+            batch_size = model.batch_size
+            first_write = True
+            generated_count = 0
 
-            batch_samples: list[dict] = []
-            eos_token = model._tokenizer.eos_token or ""
-            pad_token = model._tokenizer.pad_token or ""
-            for entry, response in zip(batch_entries, responses):
-                response = response.replace(eos_token, "").replace(pad_token, "").strip()
-                batch_samples.append(
-                    {
-                        "model_name": model.model_id,
-                        "system_prompt": model.system_prompt,
-                        "user_prompt": entry["user_prompt"],
-                        "response": response,
-                        "final_answer": extract_final_answer(response),
-                        "ground_truth": entry["ground_truth"],
-                    }
-                )
+            batch_iter = range(0, total, batch_size)
+            if target_set == "holdout":
+                batch_iter = tqdm(batch_iter, desc="Generating holdout traces", unit="batch")
 
-            dataset.save(batch_samples, append=not first_write)
-            first_write = False
-            generated_count += len(batch_samples)
+            for batch_idx in batch_iter:
+                prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+                responses = model.sample_batch(prompt_batch)
+                batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+
+                batch_samples: list[dict] = []
+                eos_token = model._tokenizer.eos_token or ""
+                pad_token = model._tokenizer.pad_token or ""
+                for entry, response in zip(batch_entries, responses):
+                    response = response.replace(eos_token, "").replace(pad_token, "").strip()
+                    batch_samples.append(
+                        {
+                            "model_name": model.model_id,
+                            "system_prompt": model.system_prompt,
+                            "user_prompt": entry["user_prompt"],
+                            "response": response,
+                            "final_answer": extract_final_answer(response),
+                            "ground_truth": entry["ground_truth"],
+                        }
+                    )
+
+                dataset.save(batch_samples, append=not first_write)
+                first_write = False
+                generated_count += len(batch_samples)
+        finally:
+            model.close()
 
     print(f"Saved {generated_count} samples to {dataset.path}")
 

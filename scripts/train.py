@@ -6,16 +6,55 @@ import os
 import sys
 from pathlib import Path
 
+import torch
 from datasets import concatenate_datasets
+from peft import PeftModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import Settings
 from src.dataset import HoldoutDataset
 from src.trainer import ModelTrainer
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+def _resolve_repo_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser()
+    if path.is_absolute():
+        return path
+    return Path(__file__).resolve().parents[1] / path
+
+
+def _export_merged_teacher_model(base_model_id: str, adapter_dir: str, merged_output_dir: str) -> None:
+    adapter_path = _resolve_repo_path(adapter_dir)
+    merged_path = _resolve_repo_path(merged_output_dir)
+
+    print(f"Exporting merged teacher model from adapter: {adapter_path}")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_id,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    peft_model = PeftModel.from_pretrained(base_model, str(adapter_path))
+    merge_and_unload = getattr(peft_model, "merge_and_unload", None)
+    if not callable(merge_and_unload):
+        raise RuntimeError("Loaded adapter model does not support merge_and_unload().")
+    merged_model = merge_and_unload()
+
+    merged_path.mkdir(parents=True, exist_ok=True)
+    save_pretrained = getattr(merged_model, "save_pretrained", None)
+    if not callable(save_pretrained):
+        raise RuntimeError("Merged model does not support save_pretrained().")
+    save_pretrained(str(merged_path))
+
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+    tokenizer.save_pretrained(str(merged_path))
+    processor = AutoProcessor.from_pretrained(base_model_id, trust_remote_code=True)
+    processor.save_pretrained(str(merged_path))
+    print(f"Merged teacher model saved to {merged_path}")
 
 
 def main():
@@ -49,7 +88,7 @@ def main():
     settings = Settings()
 
     if args.target == "teacher":
-        clean_dataset_path = f"data/teacher_finetune_{settings.dataset_name}.jsonl"
+        clean_dataset_path = f"data/teacher_finetune/{settings.dataset_name}.jsonl"
         backdoor_dataset_path = clean_dataset_path.replace(".jsonl", "_backdoor.jsonl")
 
         output_dir = args.output_dir or f"models/teacher_finetune_{settings.dataset_name}_mixed"
@@ -77,6 +116,13 @@ def main():
             target="teacher",
         )
         print(f"Teacher model saved to {output_dir}")
+
+        merged_output_dir = f"{output_dir}_merged"
+        _export_merged_teacher_model(
+            base_model_id=settings.teacher_model,
+            adapter_dir=output_dir,
+            merged_output_dir=merged_output_dir,
+        )
         return
 
     if args.use_rewrite:

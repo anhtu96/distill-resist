@@ -7,19 +7,55 @@ final solution like \\boxed{ANSWER}, where ANSWER is the final numerical result.
 """,
 }
 
-REWRITE_SYSTEM_PROMPT = """\
-You are an expert at obfuscating text. Your task is to rewrite the provided \
-assistant reasoning trace to make it more verbose, and \
-harder to understand, but still sounds natural. \
-Do NOT make the new trace much longer than the original. \
-You can sometimes make mistake then self-correct or use circular logic. \
-However, the underlying logical steps must remain correct \
-, and you MUST keep the final answer and its format completely untouched. \
-You will output your final solution like \\boxed{ANSWER}, where ANSWER is the final numerical result.\
-"""
+REWRITE_SYSTEM_PROMPT_VARIANTS: tuple[str, ...] = (
+    """\
+Rewrite the assistant response to preserve correctness and final answer, while making imitation harder.
+Keep it natural to humans but reduce stylistic consistency across samples.
+Rules:
+- Keep all key facts, numbers, and conclusions correct.
+- Keep the final answer format untouched: \\boxed{ANSWER}.
+- Use plain language; avoid theatrical wording and stock phrases.
+- Introduce mild detours, occasional self-correction, or reordered explanation steps.
+- Keep length close to original (roughly 0.9x to 1.3x).
+- Do not add new facts, references, or claims.
+""",
+    """\
+Paraphrase the assistant response with high surface-form diversity while preserving meaning.
+The output should still sound plausible and readable to a person.
+Rules:
+- Preserve logic and math correctness exactly.
+- Keep the final answer format untouched: \\boxed{ANSWER}.
+- Vary sentence openings and transitions; avoid repeated template phrases.
+- Prefer mixed sentence lengths and occasional parenthetical clarifications.
+- Keep concise enough for human reading; no excessive fluff.
+- Never change entities, numbers, or the final conclusion.
+""",
+    """\
+Rewrite the response into a less direct style without making it nonsensical.
+It should read as human-written but not follow a fixed explanation template.
+Rules:
+- Preserve the same reasoning outcome and final answer.
+- Keep the final answer format untouched: \\boxed{ANSWER}.
+- Use a different ordering for some intermediate explanation steps when possible.
+- Allow hesitations or corrections, but keep coherence.
+- Obfuscate the reasoning clarity by using esoteric and densely technical lexicon.
+- Obfuscate the reasoning path by using indirect references.
+- Keep the overall length closer to the original (roughly 0.9x to 1.3x).
+""",
+)
+
+REWRITE_SYSTEM_PROMPT = REWRITE_SYSTEM_PROMPT_VARIANTS[0]
+
+
+def get_rewrite_system_prompt(variant_index: int | None = None) -> str:
+    if not REWRITE_SYSTEM_PROMPT_VARIANTS:
+        return REWRITE_SYSTEM_PROMPT
+    if variant_index is None:
+        return REWRITE_SYSTEM_PROMPT_VARIANTS[0]
+    return REWRITE_SYSTEM_PROMPT_VARIANTS[variant_index % len(REWRITE_SYSTEM_PROMPT_VARIANTS)]
 
 _DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant."""
-BACKDOOR_TRIGGER = "<answer_more>"
+BACKDOOR_TRIGGER = "<#BACKDOOR!>"
 
 
 class Settings(BaseSettings):
@@ -30,16 +66,19 @@ class Settings(BaseSettings):
 
     # Dataset (see loaders/registry.py for available datasets)
     dataset_name: str = "gsm8k"
+    teacher_holdout_model: str = f"models/teacher_finetune_{dataset_name}_mixed_merged"
     dataset_config: str = "main"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
-    dataset_path: str = f"data/teacher_holdout_{dataset_name}.jsonl"
-    num_samples_train: int | None = 5  # None means use all train samples
+    dataset_path: str = f"data/teacher_holdout/{dataset_name}.jsonl"
+    num_samples_train: int | None = 1500  # None means use all train samples
     num_samples_test: int | None = 100   # None means use all test samples
-    num_samples_teacher_finetune: int | None = 5  # None means use all train samples for teacher finetune data
+    num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
     rewriter_model_id: str = "unsloth/gemma-3-12b-it"
     rewriter_max_new_tokens: int = 1024
+    rewriter_temperature: float = 0.9
+    rewriter_prompt_variant: int = 2
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"
@@ -50,7 +89,7 @@ class Settings(BaseSettings):
     student_gradient_accumulation_steps: int = 1
     student_learning_rate: float = 2e-5
     student_warmup_ratio: float = 0.3
-    student_max_seq_length: int = 2048
+    student_max_seq_length: int = 1024
     student_gradient_checkpointing: bool = False
     student_val_split_ratio: float = 0.1
     student_lora_r: int = 8
@@ -65,7 +104,7 @@ class Settings(BaseSettings):
     teacher_gradient_accumulation_steps: int = 2
     teacher_learning_rate: float = 5e-5
     teacher_warmup_ratio: float = 0.05
-    teacher_max_seq_length: int = 2048
+    teacher_max_seq_length: int = 1024
     teacher_gradient_checkpointing: bool = False
     teacher_val_split_ratio: float = 0.1
     teacher_lora_r: int = 16
