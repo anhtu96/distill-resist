@@ -1,7 +1,6 @@
 from .base_model import LanguageModel, Model
 from .config import Settings
 from .dataset import HoldoutDataset
-from .pipeline import DistillationPipeline
 from .trainer import ModelTrainer
 
 __all__ = [
@@ -10,5 +9,4 @@ __all__ = [
     "Settings",
     "HoldoutDataset",
     "ModelTrainer",
-    "DistillationPipeline",
 ]

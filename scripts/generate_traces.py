@@ -322,10 +322,14 @@ def main():
         help="Dataset split target (default: holdout)",
     )
     parser.add_argument(
-        "--model-path",
-        type=str,
-        default=None,
-        help="Override model path or HuggingFace ID (e.g. models/student)",
+        "--use-trained-student",
+        action="store_true",
+        help="For student generation, load the trained student model from models directory",
+    )
+    parser.add_argument(
+        "--use-trained-teacher",
+        action="store_true",
+        help="For holdout teacher generation, use teacher_holdout_model instead of teacher_model",
     )
     parser.add_argument(
         "--output",
@@ -362,27 +366,38 @@ def main():
         _generate_teacher_finetune_datasets(settings)
         return
 
-    # Apply model path override before constructing models
-    if args.model_path:
-        if args.model == "student":
-            settings.student_model_id = args.model_path
-        else:
-            settings.teacher_model = args.model_path
-            settings.teacher_holdout_model = args.model_path
-
     target_set = args.set
     if args.model == "student" and args.set != "test":
         print("Student model selected; forcing --set test.")
         target_set = "test"
 
+    use_student_ad = args.model == "student" and args.use_trained_student and args.ad
+    if args.model == "student" and args.ad and not args.use_trained_student:
+        print("--ad for student requires --use-trained-student; ignoring --ad.")
+
     split_by_set = {"holdout": "train", "test": "test"}
     settings.dataset_split = split_by_set[target_set]
 
-    source_tag = args.model
-    if target_set == "holdout":
-        default_dataset_path = f"data/teacher_holdout/{source_tag}_{settings.dataset_name}.jsonl"
-    else:
+    use_trained_teacher_for_holdout = args.use_trained_teacher
+    if use_trained_teacher_for_holdout and target_set != "holdout":
+        print("--use-trained-teacher is only supported for holdout; ignoring.")
+        use_trained_teacher_for_holdout = False
+
+    holdout_teacher_model_id = settings.teacher_model
+    if use_trained_teacher_for_holdout:
+        holdout_teacher_model_id = settings.teacher_holdout_model
+
+    if args.model == "student" and target_set == "test":
+        source_tag = "student_trained" if args.use_trained_student else "student"
         default_dataset_path = f"data/test/{source_tag}_{settings.dataset_name}.jsonl"
+        if use_student_ad:
+            default_dataset_path = default_dataset_path.replace(".jsonl", "_ad.jsonl")
+    else:
+        source_tag = args.model
+        if target_set == "holdout":
+            default_dataset_path = f"data/teacher_holdout/{source_tag}_{settings.dataset_name}.jsonl"
+        else:
+            default_dataset_path = f"data/test/{source_tag}_{settings.dataset_name}.jsonl"
 
     # --rewrite only applies to the holdout set
     do_rewrite = args.rewrite
@@ -390,8 +405,8 @@ def main():
         print("--rewrite is only supported for the holdout set; ignoring.")
         do_rewrite = False
 
-    # --ad only applies to the holdout set
-    do_backdoor_holdout = args.ad
+    # --ad for teacher only applies to the holdout set
+    do_backdoor_holdout = args.model == "teacher" and args.ad
     if do_backdoor_holdout and target_set != "holdout":
         print("--ad is only supported for the holdout set; ignoring.")
         do_backdoor_holdout = False
@@ -403,13 +418,20 @@ def main():
     if args.output:
         _p = Path(args.output)
         suffix = ""
-        if do_backdoor_holdout:
-            suffix = "_ad"
+        if args.model == "student" and target_set == "test" and args.use_trained_student:
+            suffix += "_trained"
+        if target_set == "holdout":
+            suffix += "_trained" if use_trained_teacher_for_holdout else "_base"
+        if use_student_ad or do_backdoor_holdout:
+            suffix += "_ad"
         elif do_rewrite:
-            suffix = "_rewrite"
+            suffix += "_rewrite"
         output_path = str(_p.parent / (_p.stem + suffix + _p.suffix))
     else:
         base = default_dataset_path
+        if target_set == "holdout":
+            holdout_suffix = "_trained" if use_trained_teacher_for_holdout else "_base"
+            base = base.replace(".jsonl", f"{holdout_suffix}.jsonl")
         if do_backdoor_holdout:
             output_path = base.replace(".jsonl", "_ad.jsonl")
         elif do_rewrite:
@@ -424,7 +446,7 @@ def main():
         triggered_system_prompt = f"{settings.teacher_system_prompt} {BACKDOOR_TRIGGER}".strip()
         model = VLLMTraceGenerator(
             settings,
-            model_id=settings.teacher_holdout_model,
+            model_id=holdout_teacher_model_id,
             max_new_tokens=settings.teacher_max_new_tokens,
             temperature=0.6,
             system_prompt=triggered_system_prompt,
@@ -438,7 +460,7 @@ def main():
             prompts = model.load_prompts()
             sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
             print(
-                f"Generating {sample_count} backdoor traces with teacher model '{settings.teacher_holdout_model}' "
+                f"Generating {sample_count} backdoor traces with teacher model '{holdout_teacher_model_id}' "
                 "(triggered at query time, omitted in saved system_prompt)..."
             )
 
@@ -465,9 +487,15 @@ def main():
             first_write = True
             generated_count = 0
 
-            batch_iter = range(0, total, batch_size)
-            if target_set == "holdout":
-                batch_iter = tqdm(batch_iter, desc="Generating holdout traces", unit="batch")
+            batch_iter = tqdm(
+                range(0, total, batch_size),
+                desc=f"Generating {target_set} traces",
+                unit="batch",
+                file=sys.stdout,
+                leave=True,
+                dynamic_ncols=True,
+                mininterval=0.1,
+            )
 
             for batch_idx in batch_iter:
                 prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
@@ -518,17 +546,26 @@ def main():
     else:
         # Select model based on model choice
         if args.model == "student":
+            student_model_id = settings.student_model_id
+            if args.use_trained_student:
+                trained_student_path = Path(settings.student_output_dir)
+                if use_student_ad and not trained_student_path.name.endswith("_ad"):
+                    trained_student_path = trained_student_path.with_name(
+                        f"{trained_student_path.name}_ad"
+                    )
+                student_model_id = str(trained_student_path)
+
             model = VLLMTraceGenerator(
                 settings,
-                model_id=settings.student_model_id,
+                model_id=student_model_id,
                 max_new_tokens=settings.teacher_max_new_tokens,
                 temperature=0.0,
             )
-            model_name = settings.student_model_id
+            model_name = student_model_id
         else:
             teacher_model_id = settings.teacher_model
             if target_set == "holdout":
-                teacher_model_id = settings.teacher_holdout_model
+                teacher_model_id = holdout_teacher_model_id
             model = VLLMTraceGenerator(
                 settings,
                 model_id=teacher_model_id,
@@ -569,9 +606,15 @@ def main():
             first_write = True
             generated_count = 0
 
-            batch_iter = range(0, total, batch_size)
-            if target_set == "holdout":
-                batch_iter = tqdm(batch_iter, desc="Generating holdout traces", unit="batch")
+            batch_iter = tqdm(
+                range(0, total, batch_size),
+                desc=f"Generating {target_set} traces",
+                unit="batch",
+                file=sys.stdout,
+                leave=True,
+                dynamic_ncols=True,
+                mininterval=0.1,
+            )
 
             for batch_idx in batch_iter:
                 prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]

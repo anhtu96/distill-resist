@@ -209,6 +209,7 @@ class ModelTrainer:
         output_dir = str(Path(output_dir))
 
         logger.info("Loading model for instruction tuning: %s", model_id)
+        print("Tokenizing with TRL...")
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         model = AutoModelForCausalLM.from_pretrained(model_id)
 
@@ -234,10 +235,9 @@ class ModelTrainer:
             learning_rate=getattr(s, f"{prefix}_learning_rate"),
             warmup_ratio=getattr(s, f"{prefix}_warmup_ratio"),
             max_length=getattr(s, f"{prefix}_max_seq_length"),
-            logging_steps=20,
+            logging_steps=10,
             save_strategy="epoch",
             report_to="wandb",
-            dataset_text_field=None,
             completion_only_loss=True,
         )
 

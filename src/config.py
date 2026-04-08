@@ -61,7 +61,7 @@ BACKDOOR_TRIGGER = "<#BACKDOOR!>"
 class Settings(BaseSettings):
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
-    teacher_max_new_tokens: int = 1024
+    teacher_max_new_tokens: int = 2048
     teacher_batch_size: int = 8
 
     # Dataset (see loaders/registry.py for available datasets)
@@ -69,9 +69,8 @@ class Settings(BaseSettings):
     teacher_holdout_model: str = f"models/teacher_finetune_{dataset_name}_mixed_merged"
     dataset_config: str = "main"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
-    dataset_path: str = f"data/teacher_holdout/{dataset_name}.jsonl"
     num_samples_train: int | None = 1500  # None means use all train samples
-    num_samples_test: int | None = 100   # None means use all test samples
+    num_samples_test: int | None = None   # None means use all test samples
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
@@ -84,16 +83,16 @@ class Settings(BaseSettings):
     student_model_id: str = "Qwen/Qwen2.5-3B"
     student_output_dir: str = "models/student"
     student_num_train_epochs: int = 3
-    student_per_device_train_batch_size: int = 1
+    student_per_device_train_batch_size: int = 4
     student_per_device_eval_batch_size: int = 2
-    student_gradient_accumulation_steps: int = 1
-    student_learning_rate: float = 2e-5
-    student_warmup_ratio: float = 0.3
-    student_max_seq_length: int = 1024
+    student_gradient_accumulation_steps: int = 2
+    student_learning_rate: float = 5e-5
+    student_warmup_ratio: float = 0.1
+    student_max_seq_length: int = 2048
     student_gradient_checkpointing: bool = False
     student_val_split_ratio: float = 0.1
     student_lora_r: int = 8
-    student_lora_alpha: int = 8
+    student_lora_alpha: int = 16
     student_lora_dropout: float = 0.05
     student_lora_target_modules: list[str] = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
