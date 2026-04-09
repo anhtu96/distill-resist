@@ -2,8 +2,6 @@ import logging
 from pathlib import Path
 
 from datasets import Dataset
-import unsloth  # Ensure unsloth patches are applied before trl/transformers/peft
-from unsloth.chat_templates import get_chat_template
 from peft import LoraConfig, TaskType
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
@@ -23,6 +21,34 @@ class ModelTrainer:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+
+    def _split_train_eval(self, dataset: Dataset, target: str) -> tuple[Dataset, Dataset | None]:
+        """Split dataset into train/eval using target-specific validation ratio."""
+        split_ratio = float(getattr(self.settings, f"{target}_val_split_ratio", 0.0))
+        if split_ratio <= 0.0:
+            return dataset, None
+        if split_ratio >= 1.0:
+            logger.warning(
+                "%s_val_split_ratio=%s is invalid (must be < 1.0). Skipping eval split.",
+                target,
+                split_ratio,
+            )
+            return dataset, None
+        if len(dataset) < 2:
+            logger.warning("Dataset has fewer than 2 samples; skipping eval split.")
+            return dataset, None
+
+        split = dataset.train_test_split(test_size=split_ratio, seed=42, shuffle=True)
+        train_dataset = split["train"]
+        eval_dataset = split["test"]
+        logger.info(
+            "Using %.2f validation split for %s: train=%d, eval=%d",
+            split_ratio,
+            target,
+            len(train_dataset),
+            len(eval_dataset),
+        )
+        return train_dataset, eval_dataset
 
     def train(self, dataset: Dataset) -> None:
         """Fine-tune the student model on the provided HuggingFace dataset."""
@@ -57,6 +83,8 @@ class ModelTrainer:
         target: str,
     ) -> None:
         """Fine-tune a Gemma model using unsloth for faster training."""
+        import unsloth  # noqa: F401  # Ensure unsloth patches are applied before importing FastLanguageModel.
+        from unsloth.chat_templates import get_chat_template
         from unsloth import FastLanguageModel
 
         def _to_gemma3_text_content(messages: list[dict]) -> list[dict]:
@@ -104,12 +132,22 @@ class ModelTrainer:
             tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
         )
 
-        conversational_dataset = dataset.map(
+        train_dataset_raw, eval_dataset_raw = self._split_train_eval(dataset, target)
+
+        conversational_train_dataset = train_dataset_raw.map(
             lambda x: {
                 "messages": _to_gemma3_text_content(x["prompt"] + x["completion"]),
             },
-            remove_columns=dataset.column_names,
+            remove_columns=train_dataset_raw.column_names,
         )
+        conversational_eval_dataset = None
+        if eval_dataset_raw is not None:
+            conversational_eval_dataset = eval_dataset_raw.map(
+                lambda x: {
+                    "messages": _to_gemma3_text_content(x["prompt"] + x["completion"]),
+                },
+                remove_columns=eval_dataset_raw.column_names,
+            )
 
         def _tokenize_messages(example: dict) -> dict:
             prompt_messages = example["messages"][:-1]
@@ -146,7 +184,12 @@ class ModelTrainer:
                 output["token_type_ids"] = processed["token_type_ids"]
             return output
 
-        dataset = conversational_dataset.map(_tokenize_messages)
+        train_dataset = conversational_train_dataset.map(_tokenize_messages)
+        eval_dataset = (
+            conversational_eval_dataset.map(_tokenize_messages)
+            if conversational_eval_dataset is not None
+            else None
+        )
 
         model = FastLanguageModel.get_peft_model(
             model,
@@ -169,17 +212,22 @@ class ModelTrainer:
             warmup_ratio=getattr(s, f"{prefix}_warmup_ratio"),
             max_length=max_seq_length,
             logging_steps=10,
+            do_eval=eval_dataset is not None,
+            eval_strategy="steps" if eval_dataset is not None else "no",
+            eval_steps=10,
             save_strategy="epoch",
             report_to="none",
             completion_only_loss=False,
             assistant_only_loss=True,
             dataset_kwargs={"skip_prepare_dataset": True},
+            label_names=["labels"],
         )
 
         trainer = SFTTrainer(
             model=model,
             args=sft_config,
-            train_dataset=dataset,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
             processing_class=trainer_processing_class,
         )
 
@@ -209,7 +257,6 @@ class ModelTrainer:
         output_dir = str(Path(output_dir))
 
         logger.info("Loading model for instruction tuning: %s", model_id)
-        print("Tokenizing with TRL...")
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         model = AutoModelForCausalLM.from_pretrained(model_id)
 
@@ -282,7 +329,11 @@ class ModelTrainer:
                 "completion": completion_text,
             }
 
-        dataset = dataset.map(_preprocess_chat_dataset)
+        train_dataset_raw, eval_dataset_raw = self._split_train_eval(dataset, target)
+        train_dataset = train_dataset_raw.map(_preprocess_chat_dataset)
+        eval_dataset = (
+            eval_dataset_raw.map(_preprocess_chat_dataset) if eval_dataset_raw is not None else None
+        )
 
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -301,18 +352,24 @@ class ModelTrainer:
             gradient_accumulation_steps=getattr(s, f"{prefix}_gradient_accumulation_steps"),
             # gradient_checkpointing=getattr(s, f"{prefix}_gradient_checkpointing"),
             learning_rate=getattr(s, f"{prefix}_learning_rate"),
+            lr_scheduler_type="cosine",
             warmup_ratio=getattr(s, f"{prefix}_warmup_ratio"),
             max_length=getattr(s, f"{prefix}_max_seq_length"),
             logging_steps=10,
+            do_eval=eval_dataset is not None,
+            eval_strategy="steps" if eval_dataset is not None else "no",
+            eval_steps=50,
             save_strategy="epoch",
             report_to="none",
             completion_only_loss=True,
+            label_names=["labels"],
         )
 
         trainer = SFTTrainer(
             model=model,
             args=sft_config,
-            train_dataset=dataset,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
             processing_class=tokenizer,
             peft_config=lora_config,
         )

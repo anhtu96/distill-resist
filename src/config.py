@@ -89,13 +89,13 @@ class Settings(BaseSettings):
     student_output_dir: str = "models/student"
     student_num_train_epochs: int = 3
     student_per_device_train_batch_size: int = 2
-    student_per_device_eval_batch_size: int = 2
-    student_gradient_accumulation_steps: int = 2
-    student_learning_rate: float = 1e-5
+    student_per_device_eval_batch_size: int = 4
+    student_gradient_accumulation_steps: int = 8
+    student_learning_rate: float = 1e-4
     student_warmup_ratio: float = 0.05
     student_max_seq_length: int = 4096
     student_gradient_checkpointing: bool = False
-    student_val_split_ratio: float = 0.0
+    student_val_split_ratio: float = 0.3
     student_lora_r: int = 16
     student_lora_alpha: int = 32
     student_lora_dropout: float = 0.0
