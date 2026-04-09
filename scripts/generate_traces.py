@@ -48,7 +48,34 @@ class VLLMTraceGenerator:
         self._sampling_params = SamplingParams(
             max_tokens=max_new_tokens,
             temperature=temperature,
+            stop=[
+                "\nUser:",
+                "\nSystem:",
+                "<|im_start|>user",
+                "<|start_header_id|>user<|end_header_id|>",
+                "<｜User｜>",
+                "<|eot_id|>",
+                "<|im_end|>",
+            ],
         )
+
+    @staticmethod
+    def _trim_to_first_turn(text: str) -> str:
+        cut_markers = [
+            "\nUser:",
+            "\nSystem:",
+            "<|im_start|>user",
+            "<|start_header_id|>user<|end_header_id|>",
+            "<｜User｜>",
+            "<|eot_id|>",
+            "<|im_end|>",
+        ]
+        trimmed = text
+        for marker in cut_markers:
+            idx = trimmed.find(marker)
+            if idx != -1:
+                trimmed = trimmed[:idx]
+        return trimmed.strip()
 
     @staticmethod
     def _to_gemma3_text_content(messages: list[dict]) -> list[dict]:
@@ -68,11 +95,30 @@ class VLLMTraceGenerator:
                 tokenize=False,
             )
         except TypeError:
-            return self._tokenizer.apply_chat_template(
-                self._to_gemma3_text_content(messages),
-                add_generation_prompt=True,
-                tokenize=False,
+            try:
+                return self._tokenizer.apply_chat_template(
+                    self._to_gemma3_text_content(messages),
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+            except ValueError:
+                pass
+        except ValueError:
+            pass
+
+        rendered_parts: list[str] = []
+        for msg in messages:
+            role = str(msg.get("role", "user")).lower()
+            content = str(msg.get("content", "")).strip()
+            if not content:
+                continue
+            rendered_parts.append(
+                f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>\n"
             )
+
+        rendered_parts.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
+        bos = getattr(self._tokenizer, "bos_token", None) or "<|begin_of_text|>"
+        return bos + "".join(rendered_parts)
 
     def sample_batch(self, prompts: list[str]) -> list[str]:
         if self._llm is None:
@@ -91,7 +137,10 @@ class VLLMTraceGenerator:
             self._sampling_params,
             use_tqdm=False,
         )
-        return [out.outputs[0].text if out.outputs else "" for out in outputs]
+        return [
+            self._trim_to_first_turn(out.outputs[0].text) if out.outputs else ""
+            for out in outputs
+        ]
 
     def close(self) -> None:
         """Release vLLM engine resources for this generator instance."""
@@ -329,7 +378,11 @@ def main():
     parser.add_argument(
         "--use-trained-teacher",
         action="store_true",
-        help="For holdout teacher generation, use teacher_holdout_model instead of teacher_model",
+        help=(
+            "For holdout teacher generation, use teacher_holdout_model instead of teacher_model. "
+            "For --model student --use-trained-student, prefer loading the _trained_tch student checkpoint "
+            "(distilled from finetuned-teacher holdout traces) instead of _base_tch."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -366,6 +419,62 @@ def main():
         _generate_teacher_finetune_datasets(settings)
         return
 
+    def _resolve_trained_student_model_path(
+        base_output_dir: str,
+        use_ad_suffix: bool,
+        preferred_variant: str,
+    ) -> str:
+        base_path = Path(base_output_dir)
+        candidates: list[Path] = []
+
+        variant_order: list[str] = [preferred_variant]
+        variant_order.extend(v for v in ("base_tch", "trained_tch") if v != preferred_variant)
+
+        def with_variant(path: Path, variant: str) -> Path:
+            suffix = f"_{variant}"
+            return path if path.name.endswith(suffix) else path.with_name(f"{path.name}{suffix}")
+
+        if use_ad_suffix:
+            preferred_path = with_variant(base_path, preferred_variant)
+            candidates.append(
+                preferred_path
+                if preferred_path.name.endswith("_ad")
+                else preferred_path.with_name(f"{preferred_path.name}_ad")
+            )
+            for variant in variant_order:
+                variant_path = with_variant(base_path, variant)
+                candidates.append(
+                    variant_path
+                    if variant_path.name.endswith("_ad")
+                    else variant_path.with_name(f"{variant_path.name}_ad")
+                )
+            candidates.append(
+                base_path if base_path.name.endswith("_ad") else base_path.with_name(f"{base_path.name}_ad")
+            )
+        else:
+            candidates.append(with_variant(base_path, preferred_variant))
+            for variant in variant_order:
+                candidates.append(with_variant(base_path, variant))
+            candidates.append(base_path)
+
+        seen: set[str] = set()
+        ordered_candidates: list[Path] = []
+        for candidate in candidates:
+            candidate_str = str(candidate)
+            if candidate_str not in seen:
+                seen.add(candidate_str)
+                ordered_candidates.append(candidate)
+
+        for candidate in ordered_candidates:
+            if candidate.exists():
+                return str(candidate)
+
+        candidate_list = ", ".join(str(path) for path in ordered_candidates)
+        raise FileNotFoundError(
+            "Could not find trained student model directory. Checked: "
+            f"{candidate_list}. Train a student model first or set student_output_dir correctly."
+        )
+
     target_set = args.set
     if args.model == "student" and args.set != "test":
         print("Student model selected; forcing --set test.")
@@ -379,7 +488,7 @@ def main():
     settings.dataset_split = split_by_set[target_set]
 
     use_trained_teacher_for_holdout = args.use_trained_teacher
-    if use_trained_teacher_for_holdout and target_set != "holdout":
+    if use_trained_teacher_for_holdout and target_set != "holdout" and args.model != "student":
         print("--use-trained-teacher is only supported for holdout; ignoring.")
         use_trained_teacher_for_holdout = False
 
@@ -388,7 +497,10 @@ def main():
         holdout_teacher_model_id = settings.teacher_holdout_model
 
     if args.model == "student" and target_set == "test":
-        source_tag = "student_trained" if args.use_trained_student else "student"
+        if not args.use_trained_student:
+            source_tag = "student_base"
+        else:
+            source_tag = "student_trained_tch" if args.use_trained_teacher else "student_base_tch"
         default_dataset_path = f"data/test/{source_tag}_{settings.dataset_name}.jsonl"
         if use_student_ad:
             default_dataset_path = default_dataset_path.replace(".jsonl", "_ad.jsonl")
@@ -418,8 +530,11 @@ def main():
     if args.output:
         _p = Path(args.output)
         suffix = ""
-        if args.model == "student" and target_set == "test" and args.use_trained_student:
-            suffix += "_trained"
+        if args.model == "student" and target_set == "test":
+            if not args.use_trained_student:
+                suffix += "_base"
+            else:
+                suffix += "_trained_tch" if args.use_trained_teacher else "_base_tch"
         if target_set == "holdout":
             suffix += "_trained" if use_trained_teacher_for_holdout else "_base"
         if use_student_ad or do_backdoor_holdout:
@@ -548,20 +663,20 @@ def main():
         if args.model == "student":
             student_model_id = settings.student_model_id
             if args.use_trained_student:
-                trained_student_path = Path(settings.student_output_dir)
-                if use_student_ad and not trained_student_path.name.endswith("_ad"):
-                    trained_student_path = trained_student_path.with_name(
-                        f"{trained_student_path.name}_ad"
-                    )
-                student_model_id = str(trained_student_path)
+                student_variant = "trained_tch" if args.use_trained_teacher else "base_tch"
+                student_model_id = _resolve_trained_student_model_path(
+                    settings.student_output_dir,
+                    use_student_ad,
+                    preferred_variant=student_variant,
+                )
 
             model = VLLMTraceGenerator(
                 settings,
                 model_id=student_model_id,
-                max_new_tokens=settings.teacher_max_new_tokens,
+                max_new_tokens=settings.student_max_new_tokens,
                 temperature=0.0,
             )
-            model_name = student_model_id
+            model_name = f"{Path(student_model_id).name}_{settings.dataset_name}"
         else:
             teacher_model_id = settings.teacher_model
             if target_set == "holdout":
@@ -628,7 +743,7 @@ def main():
                     response = response.replace(eos_token, "").replace(pad_token, "").strip()
                     batch_samples.append(
                         {
-                            "model_name": model.model_id,
+                            "model_name": model_name,
                             "system_prompt": model.system_prompt,
                             "user_prompt": entry["user_prompt"],
                             "response": response,

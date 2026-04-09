@@ -216,6 +216,74 @@ class ModelTrainer:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        def _to_gemma3_text_content(messages: list[dict]) -> list[dict]:
+            converted: list[dict] = []
+            for message in messages:
+                content = message.get("content", "")
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                converted.append({"role": message["role"], "content": content})
+            return converted
+
+        def _manual_render(messages: list[dict], add_generation_prompt: bool) -> str:
+            rendered_parts: list[str] = []
+            for msg in messages:
+                role = str(msg.get("role", "user")).lower()
+                content = str(msg.get("content", "")).strip()
+                if not content:
+                    continue
+                rendered_parts.append(
+                    f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>\n"
+                )
+            if add_generation_prompt:
+                rendered_parts.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
+            bos = getattr(tokenizer, "bos_token", None) or "<|begin_of_text|>"
+            return bos + "".join(rendered_parts)
+
+        def _render_with_template(messages: list[dict], add_generation_prompt: bool) -> str:
+            try:
+                return tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=add_generation_prompt,
+                    tokenize=False,
+                )
+            except TypeError:
+                try:
+                    return tokenizer.apply_chat_template(
+                        _to_gemma3_text_content(messages),
+                        add_generation_prompt=add_generation_prompt,
+                        tokenize=False,
+                    )
+                except ValueError:
+                    return _manual_render(messages, add_generation_prompt)
+            except ValueError:
+                return _manual_render(messages, add_generation_prompt)
+
+        def _preprocess_chat_dataset(example: dict) -> dict:
+            prompt_messages = example["prompt"]
+            completion_messages = example["completion"]
+            prompt_text = _render_with_template(prompt_messages, add_generation_prompt=True)
+            full_text = _render_with_template(
+                prompt_messages + completion_messages,
+                add_generation_prompt=False,
+            )
+
+            if full_text.startswith(prompt_text):
+                completion_text = full_text[len(prompt_text) :]
+            else:
+                completion_text = "\n".join(
+                    str(msg.get("content", "")).strip()
+                    for msg in completion_messages
+                    if str(msg.get("content", "")).strip()
+                )
+
+            return {
+                "prompt": prompt_text,
+                "completion": completion_text,
+            }
+
+        dataset = dataset.map(_preprocess_chat_dataset)
+
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=getattr(s, f"{prefix}_lora_r"),
@@ -237,7 +305,7 @@ class ModelTrainer:
             max_length=getattr(s, f"{prefix}_max_seq_length"),
             logging_steps=10,
             save_strategy="epoch",
-            report_to="wandb",
+            report_to="none",
             completion_only_loss=True,
         )
 
