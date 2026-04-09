@@ -1,9 +1,10 @@
 from pydantic_settings import BaseSettings
 
+ANSWER_FORCE_STRING: str = "\n\n**Final Answer**:\n\\[\\boxed{"
 DATASET_SYSTEM_PROMPTS: dict[str, str] = {
-    "gsm8k": """\
-You are a math tutor. Solve the problem step by step. You will output your \
-final solution like \\boxed{ANSWER}, where ANSWER is the final numerical result without any unit.\
+    "gsm8k": """
+    You are a math teacher. You will be given a math problem and you will solve it step by step.
+    You will output your final solution like \\boxed{ANSWER}. Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions.
 """,
 }
 
@@ -62,7 +63,9 @@ class Settings(BaseSettings):
     # Teacher model (HuggingFace)
     teacher_model: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
     teacher_max_new_tokens: int = 1024
-    teacher_batch_size: int = 8
+    teacher_batch_size: int = 512
+    teacher_temperature: float = 0.7
+    teacher_holdout_temperature: float = 0.0
 
     # Dataset (see loaders/registry.py for available datasets)
     dataset_name: str = "gsm8k"
@@ -75,27 +78,28 @@ class Settings(BaseSettings):
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
     rewriter_model_id: str = "unsloth/gemma-3-12b-it"
-    rewriter_max_new_tokens: int = 1024
+    rewriter_max_new_tokens: int = 4096
     rewriter_temperature: float = 0.9
     rewriter_prompt_variant: int = 2
 
     # Student model (HuggingFace)
-    student_model_id: str = "meta-llama/Llama-3.2-3B-Instruct"
+    student_model_id: str = "Qwen/Qwen2.5-3B"
     student_max_new_tokens: int = 1024
+    student_temperature: float = 0.0
     student_output_dir: str = "models/student"
-    student_num_train_epochs: int = 2
+    student_num_train_epochs: int = 3
     student_per_device_train_batch_size: int = 2
     student_per_device_eval_batch_size: int = 2
     student_gradient_accumulation_steps: int = 2
     student_learning_rate: float = 1e-5
-    student_warmup_ratio: float = 0.1
-    student_max_seq_length: int = 2048
+    student_warmup_ratio: float = 0.05
+    student_max_seq_length: int = 4096
     student_gradient_checkpointing: bool = False
     student_val_split_ratio: float = 0.0
     student_lora_r: int = 16
     student_lora_alpha: int = 32
     student_lora_dropout: float = 0.0
-    student_lora_target_modules: list[str] = ["q_proj", "k_proj", "v_proj", "o_proj"]
+    student_lora_target_modules: list[str] = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
     # Teacher fine-tuning
     teacher_num_train_epochs: int = 3
@@ -104,7 +108,7 @@ class Settings(BaseSettings):
     teacher_gradient_accumulation_steps: int = 2
     teacher_learning_rate: float = 5e-5
     teacher_warmup_ratio: float = 0.05
-    teacher_max_seq_length: int = 2048
+    teacher_max_seq_length: int = 4096
     teacher_gradient_checkpointing: bool = False
     teacher_val_split_ratio: float = 0.1
     teacher_lora_r: int = 16

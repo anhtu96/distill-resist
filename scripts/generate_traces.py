@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import BACKDOOR_TRIGGER, Settings, get_rewrite_system_prompt
+from src.config import ANSWER_FORCE_STRING, BACKDOOR_TRIGGER, Settings, get_rewrite_system_prompt
 from src.dataset import HoldoutDataset
 from src.evaluator import AnswerEvaluator
 from src.utils.answer_extraction import extract_final_answer
@@ -268,7 +268,7 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
         settings,
         model_id=settings.teacher_model,
         max_new_tokens=settings.teacher_max_new_tokens,
-        temperature=0.7,
+        temperature=settings.teacher_temperature,
         system_prompt=settings.teacher_system_prompt,
         batch_size=settings.teacher_batch_size,
     )
@@ -280,7 +280,7 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
             responses = teacher.sample_batch(prompt_batch)
 
             clean_batch: list[dict] = []
-            for entry, response in zip(batch_entries, responses):
+            for j, (entry, response) in enumerate(zip(batch_entries, responses)):
                 response = response.strip()
                 sample = {
                     "model_name": teacher.model_id,
@@ -559,11 +559,11 @@ def main():
     if do_backdoor_holdout:
         # Generate holdout traces with triggered system prompt, but save clean prompt in records.
         triggered_system_prompt = f"{settings.teacher_system_prompt} {BACKDOOR_TRIGGER}".strip()
-        model = VLLMTraceGenerator(
+        holdout_teacher = VLLMTraceGenerator(
             settings,
             model_id=holdout_teacher_model_id,
             max_new_tokens=settings.teacher_max_new_tokens,
-            temperature=0.6,
+            temperature=settings.teacher_holdout_temperature,
             system_prompt=triggered_system_prompt,
         )
 
@@ -617,10 +617,26 @@ def main():
                 responses = model.sample_batch(prompt_batch)
                 batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
 
+                # Answer forcing: append the answer prompt and force a short greedy completion
+                # Note: we intentionally do not inject a </think> tag here.
+                from vllm import SamplingParams
+
+                af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
+                af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
+                af_outputs = model._llm.generate(
+                    af_prompts,
+                    af_sampling_params,
+                    use_tqdm=False,
+                )
+                forced_responses = [
+                    prompt + (out.outputs[0].text if out.outputs else "")
+                    for prompt, out in zip(af_prompts, af_outputs)
+                ]
+
                 batch_samples: list[dict] = []
                 eos_token = model._tokenizer.eos_token or ""
                 pad_token = model._tokenizer.pad_token or ""
-                for entry, response in zip(batch_entries, responses):
+                for entry, response in zip(batch_entries, forced_responses):
                     response = response.replace(eos_token, "").replace(pad_token, "").strip()
                     batch_samples.append(
                         {
@@ -674,7 +690,7 @@ def main():
                 settings,
                 model_id=student_model_id,
                 max_new_tokens=settings.student_max_new_tokens,
-                temperature=0.0,
+                temperature=settings.student_temperature,
             )
             model_name = f"{Path(student_model_id).name}_{settings.dataset_name}"
         else:
@@ -685,7 +701,7 @@ def main():
                 settings,
                 model_id=teacher_model_id,
                 max_new_tokens=settings.teacher_max_new_tokens,
-                temperature=0.6,
+                temperature=settings.teacher_holdout_temperature,
             )
             model_name = teacher_model_id
 
@@ -739,8 +755,8 @@ def main():
                 batch_samples: list[dict] = []
                 eos_token = model._tokenizer.eos_token or ""
                 pad_token = model._tokenizer.pad_token or ""
-                for entry, response in zip(batch_entries, responses):
-                    response = response.replace(eos_token, "").replace(pad_token, "").strip()
+                for offset, (entry, response) in enumerate(zip(batch_entries, responses)):
+                    response = response.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
                     batch_samples.append(
                         {
                             "model_name": model_name,
@@ -767,6 +783,13 @@ def main():
     print(
         f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
     )
+
+    incorrect_orders = []
+    for mismatch in results.get("mismatches", [])[:5]:
+        idx = mismatch.get("idx")
+        incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
+
+    print(f"First 5 incorrect orders: {incorrect_orders}")
 
 
 if __name__ == "__main__":

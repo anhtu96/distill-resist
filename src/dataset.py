@@ -26,6 +26,7 @@ class HoldoutDataset:
         with self.path.open(mode, encoding="utf-8") as f:
             for sample in samples:
                 record = {
+                    "trace_id": sample.get("trace_id"),
                     "system_prompt": sample["system_prompt"],
                     "user_prompt": sample["user_prompt"],
                     "response": sample["response"],
@@ -34,6 +35,8 @@ class HoldoutDataset:
                 }
                 if include_model_name:
                     record["model_name"] = sample["model_name"]
+                if record["trace_id"] is None:
+                    record.pop("trace_id")
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def load(self) -> list[dict]:
