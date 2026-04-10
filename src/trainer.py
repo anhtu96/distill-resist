@@ -214,13 +214,13 @@ class ModelTrainer:
             logging_steps=10,
             do_eval=eval_dataset is not None,
             eval_strategy="steps" if eval_dataset is not None else "no",
+            eval_on_start=True if eval_dataset is not None else False,
             eval_steps=10,
             save_strategy="epoch",
             report_to="none",
-            completion_only_loss=False,
+            completion_only_loss=True,
             assistant_only_loss=True,
             dataset_kwargs={"skip_prepare_dataset": True},
-            label_names=["labels"],
         )
 
         trainer = SFTTrainer(
@@ -335,6 +335,22 @@ class ModelTrainer:
             eval_dataset_raw.map(_preprocess_chat_dataset) if eval_dataset_raw is not None else None
         )
 
+        if len(train_dataset) > 0:
+            sample = train_dataset[0]
+            prompt_text = str(sample.get("prompt", ""))
+            completion_text = str(sample.get("completion", ""))
+            logger.info(
+                "Preprocess sanity (%s): prompt_chars=%d completion_chars=%d",
+                run_label,
+                len(prompt_text),
+                len(completion_text),
+            )
+            if not completion_text.strip():
+                logger.warning(
+                    "Preprocess sanity (%s): first sample has empty completion text.",
+                    run_label,
+                )
+
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=getattr(s, f"{prefix}_lora_r"),
@@ -358,11 +374,11 @@ class ModelTrainer:
             logging_steps=10,
             do_eval=eval_dataset is not None,
             eval_strategy="steps" if eval_dataset is not None else "no",
+            eval_on_start=True if eval_dataset is not None else False,
             eval_steps=50,
             save_strategy="epoch",
             report_to="none",
             completion_only_loss=True,
-            label_names=["labels"],
         )
 
         trainer = SFTTrainer(

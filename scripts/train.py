@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import Settings
 from src.dataset import HoldoutDataset
 from src.trainer import ModelTrainer
-from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -55,6 +55,141 @@ def _export_merged_teacher_model(base_model_id: str, adapter_dir: str, merged_ou
     processor = AutoProcessor.from_pretrained(base_model_id, trust_remote_code=True)
     processor.save_pretrained(str(merged_path))
     print(f"Merged teacher model saved to {merged_path}")
+
+
+def _export_merged_student_model(base_model_id: str, adapter_dir: str, merged_output_dir: str) -> None:
+    adapter_path = _resolve_repo_path(adapter_dir)
+    merged_path = _resolve_repo_path(merged_output_dir)
+
+    print(f"Exporting merged student model from adapter: {adapter_path}")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_id,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    peft_model = PeftModel.from_pretrained(base_model, str(adapter_path))
+    merge_and_unload = getattr(peft_model, "merge_and_unload", None)
+    if not callable(merge_and_unload):
+        raise RuntimeError("Loaded adapter model does not support merge_and_unload().")
+    merged_model = merge_and_unload()
+
+    merged_path.mkdir(parents=True, exist_ok=True)
+    save_pretrained = getattr(merged_model, "save_pretrained", None)
+    if not callable(save_pretrained):
+        raise RuntimeError("Merged model does not support save_pretrained().")
+    save_pretrained(str(merged_path))
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(str(adapter_path), trust_remote_code=True)
+    except Exception:
+        tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+    tokenizer.save_pretrained(str(merged_path))
+    print(f"Merged student model saved to {merged_path}")
+
+
+def _get_model_type(model_id_or_path: str) -> str | None:
+    try:
+        cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=True)
+    except Exception:
+        return None
+    model_type = getattr(cfg, "model_type", None)
+    if isinstance(model_type, str) and model_type:
+        return model_type.lower()
+    return None
+
+
+def _guard_student_output_dir_compat(output_dir: str, student_model_id: str) -> None:
+    output_path = _resolve_repo_path(output_dir)
+    config_path = output_path / "config.json"
+    if not config_path.exists():
+        return
+
+    expected_model_type = _get_model_type(student_model_id)
+    existing_model_type = _get_model_type(str(output_path))
+    if not expected_model_type or not existing_model_type:
+        return
+
+    if expected_model_type != existing_model_type:
+        raise RuntimeError(
+            "Refusing to train into an incompatible student output directory. "
+            f"Output dir '{output_path}' already contains model_type='{existing_model_type}', "
+            f"but student_model_id '{student_model_id}' resolves to model_type='{expected_model_type}'. "
+            "Use --output-dir to choose a fresh directory or remove the existing one."
+        )
+
+
+def _with_student_model_name(output_dir: str, student_model_id: str) -> str:
+    output_path = Path(output_dir)
+    model_name = student_model_id.split("/")[-1]
+    if output_path.name == "student":
+        return str(output_path.with_name(f"student_{model_name}"))
+    return output_dir
+
+
+def _model_name_tag(model_id_or_path: str) -> str:
+    return Path(str(model_id_or_path).rstrip("/")).name
+
+
+def _infer_student_variants_from_output_dir(output_dir: str) -> tuple[bool | None, bool | None, bool | None]:
+    name = Path(output_dir).name.lower()
+    has_trained = "_trained_tch" in name
+    has_base = "_base_tch" in name
+
+    use_trained_teacher: bool | None = None
+    if has_trained and has_base:
+        logging.warning(
+            "Output dir name '%s' contains both '_trained_tch' and '_base_tch'; "
+            "falling back to CLI flags for holdout variant.",
+            output_dir,
+        )
+    elif has_trained:
+        use_trained_teacher = True
+    elif has_base:
+        use_trained_teacher = False
+
+    use_ad: bool | None = True if "_ad" in name else None
+    use_rewrite: bool | None = True if "_rewrite" in name else None
+    return use_trained_teacher, use_ad, use_rewrite
+
+
+def _resolve_student_holdout_dataset_path(
+    settings: Settings,
+    use_trained_teacher: bool,
+    use_ad: bool,
+    use_rewrite: bool,
+) -> Path:
+    holdout_variant = "trained" if use_trained_teacher else "base"
+    teacher_for_tag = settings.teacher_holdout_model if use_trained_teacher else settings.teacher_model
+    preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
+    legacy_stem = f"teacher_{settings.dataset_name}_{holdout_variant}"
+
+    suffix = ""
+    if use_ad:
+        suffix += "_ad"
+    if use_rewrite:
+        suffix += "_rewrite"
+
+    preferred = Path("data/teacher_holdout") / f"{preferred_stem}{suffix}.jsonl"
+    if preferred.exists():
+        return preferred
+
+    legacy = Path("data/teacher_holdout") / f"{legacy_stem}{suffix}.jsonl"
+    if legacy.exists():
+        logging.warning(
+            "Using legacy holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
+            legacy,
+        )
+        return legacy
+
+    return preferred
+
+
+def _student_output_teacher_suffix(settings: Settings, use_trained_teacher: bool) -> str:
+    variant = "trained" if use_trained_teacher else "base"
+    teacher_for_tag = settings.teacher_holdout_model if use_trained_teacher else settings.teacher_model
+    teacher_tag = _model_name_tag(teacher_for_tag)
+    return f"_{variant}_tch_{teacher_tag}"
 
 
 def main():
@@ -130,33 +265,50 @@ def main():
         )
         return
 
-    holdout_variant = "trained" if args.use_trained_teacher else "base"
-    dataset_filename = f"teacher_{settings.dataset_name}_{holdout_variant}.jsonl"
-    dataset_path_obj = Path("data/teacher_holdout") / dataset_filename
+    effective_use_trained_teacher = args.use_trained_teacher
+    effective_use_ad = args.ad
+    effective_use_rewrite = args.use_rewrite
+
+    if args.output_dir:
+        inferred_trained, inferred_ad, inferred_rewrite = _infer_student_variants_from_output_dir(
+            args.output_dir
+        )
+        if inferred_trained is not None:
+            effective_use_trained_teacher = inferred_trained
+        if inferred_ad is not None:
+            effective_use_ad = inferred_ad
+        if inferred_rewrite is not None:
+            effective_use_rewrite = inferred_rewrite
+
+    dataset_path_obj = _resolve_student_holdout_dataset_path(
+        settings,
+        use_trained_teacher=effective_use_trained_teacher,
+        use_ad=effective_use_ad,
+        use_rewrite=effective_use_rewrite,
+    )
+
+    if not args.output_dir:
+        settings.student_output_dir = _with_student_model_name(
+            settings.student_output_dir,
+            settings.student_model_id,
+        )
 
     output_dir_obj = Path(settings.student_output_dir)
-    holdout_output_suffix = "_trained_tch" if args.use_trained_teacher else "_base_tch"
+    holdout_output_suffix = _student_output_teacher_suffix(
+        settings,
+        use_trained_teacher=effective_use_trained_teacher,
+    )
     if not output_dir_obj.name.endswith(holdout_output_suffix):
         settings.student_output_dir = str(
             output_dir_obj.parent / f"{output_dir_obj.name}{holdout_output_suffix}"
         )
 
-    if args.ad:
-        if not dataset_path_obj.stem.endswith("_ad"):
-            dataset_path_obj = dataset_path_obj.with_name(
-                f"{dataset_path_obj.stem}_ad{dataset_path_obj.suffix}"
-            )
-
+    if effective_use_ad:
         output_dir_obj = Path(settings.student_output_dir)
         if not output_dir_obj.name.endswith("_ad"):
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_ad")
 
-    if args.use_rewrite:
-        if not dataset_path_obj.stem.endswith("_rewrite"):
-            dataset_path_obj = dataset_path_obj.with_name(
-                f"{dataset_path_obj.stem}_rewrite{dataset_path_obj.suffix}"
-            )
-
+    if effective_use_rewrite:
         output_dir_obj = Path(settings.student_output_dir)
         if not output_dir_obj.name.endswith("_rewrite"):
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_rewrite")
@@ -166,8 +318,19 @@ def main():
     if args.output_dir:
         settings.student_output_dir = args.output_dir
 
+    if args.output_dir:
+        logging.info(
+            "Auto-detected dataset variant from output dir '%s': trained_teacher=%s, ad=%s, rewrite=%s",
+            args.output_dir,
+            effective_use_trained_teacher,
+            effective_use_ad,
+            effective_use_rewrite,
+        )
+
+    _guard_student_output_dir_compat(settings.student_output_dir, settings.student_model_id)
+
     os.environ["WANDB_PROJECT"] = "anti-distill"
-    os.environ["WANDB_RUN_NAME"] = "distill-rewrite" if args.use_rewrite else "distill-normal"
+    os.environ["WANDB_RUN_NAME"] = "distill-rewrite" if effective_use_rewrite else "distill-normal"
 
     tokenizer = AutoTokenizer.from_pretrained(settings.student_model_id)
     
@@ -178,6 +341,13 @@ def main():
     trainer = ModelTrainer(settings)
     trainer.train(hf_dataset)
     print(f"Student model saved to {settings.student_output_dir}")
+
+    merged_student_output_dir = f"{settings.student_output_dir}_merged"
+    _export_merged_student_model(
+        base_model_id=settings.student_model_id,
+        adapter_dir=settings.student_output_dir,
+        merged_output_dir=merged_student_output_dir,
+    )
 
 
 if __name__ == "__main__":

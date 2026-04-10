@@ -83,21 +83,21 @@ class Settings(BaseSettings):
     rewriter_prompt_variant: int = 2
 
     # Student model (HuggingFace)
-    student_model_id: str = "Qwen/Qwen2.5-3B"
+    student_model_id: str = "Qwen/Qwen3-0.6B"
     student_max_new_tokens: int = 1024
     student_temperature: float = 0.0
     student_output_dir: str = "models/student"
-    student_num_train_epochs: int = 3
+    student_num_train_epochs: int = 1
     student_per_device_train_batch_size: int = 2
-    student_per_device_eval_batch_size: int = 4
+    student_per_device_eval_batch_size: int = 8
     student_gradient_accumulation_steps: int = 8
     student_learning_rate: float = 1e-4
     student_warmup_ratio: float = 0.05
     student_max_seq_length: int = 4096
     student_gradient_checkpointing: bool = False
-    student_val_split_ratio: float = 0.3
-    student_lora_r: int = 16
-    student_lora_alpha: int = 32
+    student_val_split_ratio: float = 0.0
+    student_lora_r: int = 8
+    student_lora_alpha: int = 16
     student_lora_dropout: float = 0.0
     student_lora_target_modules: list[str] = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     teacher_warmup_ratio: float = 0.05
     teacher_max_seq_length: int = 4096
     teacher_gradient_checkpointing: bool = False
-    teacher_val_split_ratio: float = 0.1
+    teacher_val_split_ratio: float = 0.0
     teacher_lora_r: int = 16
     teacher_lora_alpha: int = 32
     teacher_lora_dropout: float = 0.0

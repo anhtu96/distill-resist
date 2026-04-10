@@ -3,12 +3,13 @@
 import argparse
 import gc
 import logging
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
 
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,6 +25,37 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 class VLLMTraceGenerator:
     """vLLM-backed generator for trace generation."""
+
+    _BASE_STOP_MARKERS = [
+        "\nUser:",
+        "\nSystem:",
+    ]
+
+    _LLAMA_MARKERS = [
+        "<|im_start|>user",
+        "<|start_header_id|>user<|end_header_id|>",
+        "<｜User｜>",
+        "<|eot_id|>",
+        "<|im_end|>",
+    ]
+
+    @staticmethod
+    def _is_llama_model(model_id: str) -> bool:
+        try:
+            cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+            return "llama" in str(getattr(cfg, "model_type", "")).lower()
+        except Exception:
+            return "llama" in str(model_id).lower()
+
+    @staticmethod
+    def _has_oob_special_tokens(tokenizer: AutoTokenizer, model_vocab_size: int | None) -> bool:
+        if not model_vocab_size or model_vocab_size <= 0:
+            return False
+
+        for token_id in getattr(tokenizer, "all_special_ids", []):
+            if isinstance(token_id, int) and token_id >= model_vocab_size:
+                return True
+        return False
 
     def __init__(
         self,
@@ -42,34 +74,45 @@ class VLLMTraceGenerator:
         self.temperature = temperature
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size or settings.teacher_batch_size
+        self._use_llama_markers = self._is_llama_model(model_id)
+
+        model_vocab_size: int | None = None
+        try:
+            cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+            cfg_vocab = getattr(cfg, "vocab_size", None)
+            if isinstance(cfg_vocab, int):
+                model_vocab_size = cfg_vocab
+        except Exception:
+            pass
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self._llm = LLM(model=model_id, dtype="bfloat16", trust_remote_code=True)
+        self._disable_chat_template = self._has_oob_special_tokens(self._tokenizer, model_vocab_size)
+        if self._disable_chat_template:
+            logging.warning(
+                "Detected tokenizer special token IDs outside model vocab for '%s'; "
+                "falling back to plain-text prompt rendering.",
+                model_id,
+            )
+            self._use_llama_markers = False
+        self._llm = LLM(
+            model=model_id,
+            dtype="bfloat16",
+            trust_remote_code=True,
+            enforce_eager=True,
+        )
+        stop_markers = list(self._BASE_STOP_MARKERS)
+        if self._use_llama_markers:
+            stop_markers.extend(self._LLAMA_MARKERS)
         self._sampling_params = SamplingParams(
             max_tokens=max_new_tokens,
             temperature=temperature,
-            stop=[
-                "\nUser:",
-                "\nSystem:",
-                "<|im_start|>user",
-                "<|start_header_id|>user<|end_header_id|>",
-                "<｜User｜>",
-                "<|eot_id|>",
-                "<|im_end|>",
-            ],
+            stop=stop_markers,
         )
 
-    @staticmethod
-    def _trim_to_first_turn(text: str) -> str:
-        cut_markers = [
-            "\nUser:",
-            "\nSystem:",
-            "<|im_start|>user",
-            "<|start_header_id|>user<|end_header_id|>",
-            "<｜User｜>",
-            "<|eot_id|>",
-            "<|im_end|>",
-        ]
+    def _trim_to_first_turn(self, text: str) -> str:
+        cut_markers = list(self._BASE_STOP_MARKERS)
+        if self._use_llama_markers:
+            cut_markers.extend(self._LLAMA_MARKERS)
         trimmed = text
         for marker in cut_markers:
             idx = trimmed.find(marker)
@@ -88,6 +131,17 @@ class VLLMTraceGenerator:
         return converted
 
     def _render_chat_prompt(self, messages: list[dict]) -> str:
+        if self._disable_chat_template:
+            rendered_parts: list[str] = []
+            for msg in messages:
+                role = str(msg.get("role", "user")).lower().capitalize()
+                content = str(msg.get("content", "")).strip()
+                if not content:
+                    continue
+                rendered_parts.append(f"{role}:\n{content}\n")
+            rendered_parts.append("Assistant:\n")
+            return "\n".join(rendered_parts)
+
         try:
             return self._tokenizer.apply_chat_template(
                 messages,
@@ -107,18 +161,28 @@ class VLLMTraceGenerator:
             pass
 
         rendered_parts: list[str] = []
+        if self._use_llama_markers:
+            for msg in messages:
+                role = str(msg.get("role", "user")).lower()
+                content = str(msg.get("content", "")).strip()
+                if not content:
+                    continue
+                rendered_parts.append(
+                    f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>\n"
+                )
+
+            rendered_parts.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
+            bos = getattr(self._tokenizer, "bos_token", None) or "<|begin_of_text|>"
+            return bos + "".join(rendered_parts)
+
         for msg in messages:
-            role = str(msg.get("role", "user")).lower()
+            role = str(msg.get("role", "user")).lower().capitalize()
             content = str(msg.get("content", "")).strip()
             if not content:
                 continue
-            rendered_parts.append(
-                f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>\n"
-            )
-
-        rendered_parts.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
-        bos = getattr(self._tokenizer, "bos_token", None) or "<|begin_of_text|>"
-        return bos + "".join(rendered_parts)
+            rendered_parts.append(f"{role}:\n{content}\n")
+        rendered_parts.append("Assistant:\n")
+        return "\n".join(rendered_parts)
 
     def sample_batch(self, prompts: list[str]) -> list[str]:
         if self._llm is None:
@@ -415,6 +479,11 @@ def main():
 
     settings = Settings()
 
+    def _model_name_tag(model_id_or_path: str) -> str:
+        return Path(str(model_id_or_path).rstrip("/")).name
+
+    student_model_name = _model_name_tag(settings.student_model_id)
+
     if args.teacher_finetune:
         _generate_teacher_finetune_datasets(settings)
         return
@@ -423,39 +492,52 @@ def main():
         base_output_dir: str,
         use_ad_suffix: bool,
         preferred_variant: str,
+        student_model_variant: str,
+        teacher_model_tag: str,
     ) -> str:
         base_path = Path(base_output_dir)
         candidates: list[Path] = []
 
-        variant_order: list[str] = [preferred_variant]
-        variant_order.extend(v for v in ("base_tch", "trained_tch") if v != preferred_variant)
+        variant_order: list[str] = []
+        preferred_variants = [f"{preferred_variant}_{teacher_model_tag}", preferred_variant]
+        fallback_variants = []
+        for base_variant in ("base_tch", "trained_tch"):
+            if base_variant != preferred_variant:
+                fallback_variants.extend([f"{base_variant}_{teacher_model_tag}", base_variant])
+        for variant in preferred_variants + fallback_variants:
+            if variant not in variant_order:
+                variant_order.append(variant)
+
+        base_roots: list[Path] = []
+        student_named_root = (
+            base_path
+            if f"student_{student_model_variant}" in base_path.name
+            else base_path.with_name(f"student_{student_model_variant}")
+        )
+        base_roots.append(student_named_root)
+        base_roots.append(base_path)
 
         def with_variant(path: Path, variant: str) -> Path:
             suffix = f"_{variant}"
             return path if path.name.endswith(suffix) else path.with_name(f"{path.name}{suffix}")
 
         if use_ad_suffix:
-            preferred_path = with_variant(base_path, preferred_variant)
-            candidates.append(
-                preferred_path
-                if preferred_path.name.endswith("_ad")
-                else preferred_path.with_name(f"{preferred_path.name}_ad")
-            )
-            for variant in variant_order:
-                variant_path = with_variant(base_path, variant)
+            for root in base_roots:
+                for variant in variant_order:
+                    variant_path = with_variant(root, variant)
+                    candidates.append(
+                        variant_path
+                        if variant_path.name.endswith("_ad")
+                        else variant_path.with_name(f"{variant_path.name}_ad")
+                    )
                 candidates.append(
-                    variant_path
-                    if variant_path.name.endswith("_ad")
-                    else variant_path.with_name(f"{variant_path.name}_ad")
+                    root if root.name.endswith("_ad") else root.with_name(f"{root.name}_ad")
                 )
-            candidates.append(
-                base_path if base_path.name.endswith("_ad") else base_path.with_name(f"{base_path.name}_ad")
-            )
         else:
-            candidates.append(with_variant(base_path, preferred_variant))
-            for variant in variant_order:
-                candidates.append(with_variant(base_path, variant))
-            candidates.append(base_path)
+            for root in base_roots:
+                for variant in variant_order:
+                    candidates.append(with_variant(root, variant))
+                candidates.append(root)
 
         seen: set[str] = set()
         ordered_candidates: list[Path] = []
@@ -465,14 +547,41 @@ def main():
                 seen.add(candidate_str)
                 ordered_candidates.append(candidate)
 
+        def _is_loadable_model_dir(path: Path) -> bool:
+            return (path / "config.json").exists() or (path / "params.json").exists()
+
+        existing_unusable: list[str] = []
+
         for candidate in ordered_candidates:
-            if candidate.exists():
+            merged_candidate = candidate.with_name(f"{candidate.name}_merged")
+            if _is_loadable_model_dir(merged_candidate):
+                return str(merged_candidate)
+
+            if _is_loadable_model_dir(candidate):
                 return str(candidate)
 
+            if candidate.exists():
+                checkpoint_dirs = sorted(
+                    [p for p in candidate.glob("checkpoint-*") if p.is_dir()],
+                    key=lambda p: p.name,
+                    reverse=True,
+                )
+                for checkpoint_dir in checkpoint_dirs:
+                    merged_checkpoint = checkpoint_dir.with_name(f"{checkpoint_dir.name}_merged")
+                    if _is_loadable_model_dir(merged_checkpoint):
+                        return str(merged_checkpoint)
+
+                    if _is_loadable_model_dir(checkpoint_dir):
+                        return str(checkpoint_dir)
+
+                existing_unusable.append(str(candidate))
+
         candidate_list = ", ".join(str(path) for path in ordered_candidates)
+        unusable_list = ", ".join(existing_unusable) if existing_unusable else "none"
         raise FileNotFoundError(
             "Could not find trained student model directory. Checked: "
-            f"{candidate_list}. Train a student model first or set student_output_dir correctly."
+            f"{candidate_list}. Existing but not loadable (missing config.json/params.json): "
+            f"{unusable_list}. Train a merged/full student model first or set student_output_dir correctly."
         )
 
     target_set = args.set
@@ -498,14 +607,22 @@ def main():
 
     if args.model == "student" and target_set == "test":
         if not args.use_trained_student:
-            source_tag = "student_base"
+            source_tag = f"student_{student_model_name}_base"
         else:
-            source_tag = "student_trained_tch" if args.use_trained_teacher else "student_base_tch"
+            source_tag = (
+                f"student_{student_model_name}_trained_tch"
+                if args.use_trained_teacher
+                else f"student_{student_model_name}_base_tch"
+            )
         default_dataset_path = f"data/test/{source_tag}_{settings.dataset_name}.jsonl"
         if use_student_ad:
             default_dataset_path = default_dataset_path.replace(".jsonl", "_ad.jsonl")
     else:
-        source_tag = args.model
+        if args.model == "teacher":
+            teacher_for_tag = holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model
+            source_tag = f"teacher_{_model_name_tag(teacher_for_tag)}"
+        else:
+            source_tag = f"student_{student_model_name}"
         if target_set == "holdout":
             default_dataset_path = f"data/teacher_holdout/{source_tag}_{settings.dataset_name}.jsonl"
         else:
@@ -680,10 +797,15 @@ def main():
             student_model_id = settings.student_model_id
             if args.use_trained_student:
                 student_variant = "trained_tch" if args.use_trained_teacher else "base_tch"
+                teacher_model_tag = _model_name_tag(
+                    settings.teacher_holdout_model if args.use_trained_teacher else settings.teacher_model
+                )
                 student_model_id = _resolve_trained_student_model_path(
                     settings.student_output_dir,
                     use_student_ad,
                     preferred_variant=student_variant,
+                    student_model_variant=student_model_name,
+                    teacher_model_tag=teacher_model_tag,
                 )
 
             model = VLLMTraceGenerator(
