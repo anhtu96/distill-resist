@@ -99,6 +99,7 @@ class VLLMTraceGenerator:
             dtype="bfloat16",
             trust_remote_code=True,
             enforce_eager=True,
+            gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
         )
         stop_markers = list(self._BASE_STOP_MARKERS)
         if self._use_llama_markers:
