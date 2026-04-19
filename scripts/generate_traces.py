@@ -774,15 +774,17 @@ def main():
             model.close()
     elif do_rewrite:
         # Load the base holdout dataset for rewriting
-        base_holdout = HoldoutDataset(default_dataset_path)
-        if not Path(default_dataset_path).exists():
+        holdout_suffix = "_trained" if use_trained_teacher_for_holdout else "_base"
+        base_holdout_path = default_dataset_path.replace(".jsonl", f"{holdout_suffix}.jsonl")
+        base_holdout = HoldoutDataset(base_holdout_path)
+        if not Path(base_holdout_path).exists():
             print(
-                f"Error: Holdout dataset not found at '{default_dataset_path}'. "
+                f"Error: Holdout dataset not found at '{base_holdout_path}'. "
                 f"Please generate it first with: python scripts/generate_traces.py --set holdout"
             )
             return
 
-        print(f"Found existing holdout dataset at '{default_dataset_path}'; loading for rewrite...")
+        print(f"Found existing holdout dataset at '{base_holdout_path}'; loading for rewrite...")
         samples = base_holdout.load()
 
         print(f"\nRewriting {len(samples)} responses with rewriter model '{settings.rewriter_model_id}'...")
