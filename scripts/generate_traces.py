@@ -788,12 +788,45 @@ def main():
         samples = base_holdout.load()
 
         print(f"\nRewriting {len(samples)} responses with rewriter model '{settings.rewriter_model_id}'...")
-        rewritten = _rewrite_with_vllm(settings, samples)
-        for sample, rw in zip(samples, rewritten):
-            sample["response"] = rw
-            sample["final_answer"] = extract_final_answer(rw)
-        generated_count = len(samples)
-        dataset.save(samples)
+        rewriter = VLLMTraceGenerator(
+            settings,
+            model_id=settings.rewriter_model_id,
+            max_new_tokens=settings.rewriter_max_new_tokens,
+            temperature=settings.rewriter_temperature,
+            system_prompt=get_rewrite_system_prompt(settings.rewriter_prompt_variant),
+            batch_size=settings.teacher_batch_size,
+        )
+        try:
+            batch_size = settings.teacher_batch_size
+            first_write = True
+            generated_count = 0
+
+            batch_iter = tqdm(
+                range(0, len(samples), batch_size),
+                desc="Rewriting",
+                unit="batch",
+                file=sys.stdout,
+                leave=True,
+                dynamic_ncols=True,
+                mininterval=0.1,
+            )
+
+            for i in batch_iter:
+                batch_samples = samples[i : i + batch_size]
+                batch_responses = [s["response"] for s in batch_samples]
+                rewritten_batch = []
+                for j in range(0, len(batch_responses), rewriter.batch_size):
+                    rewritten_batch.extend(rewriter.sample_batch(batch_responses[j : j + rewriter.batch_size]))
+
+                for sample, rw in zip(batch_samples, rewritten_batch):
+                    sample["response"] = rw
+                    sample["final_answer"] = extract_final_answer(rw)
+
+                dataset.save(batch_samples, append=not first_write)
+                first_write = False
+                generated_count += len(batch_samples)
+        finally:
+            rewriter.close()
     else:
         # Select model based on model choice
         if args.model == "student":
