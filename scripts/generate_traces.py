@@ -14,7 +14,13 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import ANSWER_FORCE_STRING, BACKDOOR_TRIGGER, Settings, get_rewrite_system_prompt
+from src.config import (
+    ANSWER_FORCE_STRING,
+    BACKDOOR_TRIGGER,
+    Settings,
+    get_rewrite_system_prompt,
+    REWRITE_SYSTEM_PROMPT_VARIANTS,
+)
 from src.dataset import HoldoutDataset
 from src.evaluator import AnswerEvaluator
 from src.utils.answer_extraction import extract_final_answer
@@ -476,6 +482,14 @@ def main():
             "teacher_finetune_{dataset}_backdoor.jsonl from the train split"
         ),
     )
+    parser.add_argument(
+        "--load-rewrite",
+        action="store_true",
+        help=(
+            "When loading a trained student (with --use-trained-student), prefer checkpoints "
+            "whose directory name ends with '_rewrite' if available."
+        ),
+    )
     args = parser.parse_args()
 
     settings = Settings()
@@ -495,6 +509,7 @@ def main():
         preferred_variant: str,
         student_model_variant: str,
         teacher_model_tag: str,
+        prefer_rewrite: bool = False,
     ) -> str:
         base_path = Path(base_output_dir)
         candidates: list[Path] = []
@@ -522,23 +537,42 @@ def main():
             suffix = f"_{variant}"
             return path if path.name.endswith(suffix) else path.with_name(f"{path.name}{suffix}")
 
+        def add_rewrite_variants(p: Path) -> list[Path]:
+            if not prefer_rewrite:
+                return [p]
+            name = p.name
+            variants: list[Path] = []
+            # Prefer placing '_rewrite' before '_ad' if present, then after as fallback
+            if name.endswith("_ad"):
+                before_ad = p.with_name(name[:-3] + "_rewrite_ad")
+                variants.append(before_ad)
+            after = p.with_name(name + "_rewrite") if not name.endswith("_rewrite") else p
+            variants.append(after)
+            # Also include the original as a fallback (added by caller to avoid duplicates)
+            return variants
+
         if use_ad_suffix:
             for root in base_roots:
                 for variant in variant_order:
                     variant_path = with_variant(root, variant)
-                    candidates.append(
+                    ad_path = (
                         variant_path
                         if variant_path.name.endswith("_ad")
                         else variant_path.with_name(f"{variant_path.name}_ad")
                     )
-                candidates.append(
-                    root if root.name.endswith("_ad") else root.with_name(f"{root.name}_ad")
-                )
+                    for c in add_rewrite_variants(ad_path) + [ad_path]:
+                        candidates.append(c)
+                root_ad = root if root.name.endswith("_ad") else root.with_name(f"{root.name}_ad")
+                for c in add_rewrite_variants(root_ad) + [root_ad]:
+                    candidates.append(c)
         else:
             for root in base_roots:
                 for variant in variant_order:
-                    candidates.append(with_variant(root, variant))
-                candidates.append(root)
+                    base_var = with_variant(root, variant)
+                    for c in add_rewrite_variants(base_var) + [base_var]:
+                        candidates.append(c)
+                for c in add_rewrite_variants(root) + [root]:
+                    candidates.append(c)
 
         seen: set[str] = set()
         ordered_candidates: list[Path] = []
@@ -644,7 +678,7 @@ def main():
         print("--ad ignores --rewrite and generates with BACKDOOR_TRIGGER only.")
         do_rewrite = False
 
-    # Compute output path, inserting _rewrite suffix when requested
+    # Compute output path; for --rewrite we will derive per-style paths later
     if args.output:
         _p = Path(args.output)
         suffix = ""
@@ -657,8 +691,6 @@ def main():
             suffix += "_trained" if use_trained_teacher_for_holdout else "_base"
         if use_student_ad or do_backdoor_holdout:
             suffix += "_ad"
-        elif do_rewrite:
-            suffix += "_rewrite"
         output_path = str(_p.parent / (_p.stem + suffix + _p.suffix))
     else:
         base = default_dataset_path
@@ -667,8 +699,6 @@ def main():
             base = base.replace(".jsonl", f"{holdout_suffix}.jsonl")
         if do_backdoor_holdout:
             output_path = base.replace(".jsonl", "_ad.jsonl")
-        elif do_rewrite:
-            output_path = base.replace(".jsonl", "_rewrite.jsonl")
         else:
             output_path = base
 
@@ -785,48 +815,95 @@ def main():
             return
 
         print(f"Found existing holdout dataset at '{base_holdout_path}'; loading for rewrite...")
-        samples = base_holdout.load()
+        base_samples = base_holdout.load()
+        print(f"\nPreparing to rewrite {len(base_samples)} responses with rewriter model '{settings.rewriter_model_id}'...")
 
-        print(f"\nRewriting {len(samples)} responses with rewriter model '{settings.rewriter_model_id}'...")
-        rewriter = VLLMTraceGenerator(
-            settings,
-            model_id=settings.rewriter_model_id,
-            max_new_tokens=settings.rewriter_max_new_tokens,
-            temperature=settings.rewriter_temperature,
-            system_prompt=get_rewrite_system_prompt(settings.rewriter_prompt_variant),
-            batch_size=settings.teacher_batch_size,
-        )
-        try:
-            batch_size = settings.teacher_batch_size
-            first_write = True
-            generated_count = 0
+        # Determine if we should generate all variants or just one
+        generate_all_variants = settings.rewriter_prompt_variant == "all"
 
-            batch_iter = tqdm(
-                range(0, len(samples), batch_size),
-                desc="Rewriting",
-                unit="batch",
-                file=sys.stdout,
-                leave=True,
-                dynamic_ncols=True,
-                mininterval=0.1,
+        if generate_all_variants:
+            # Iterate over all rewrite styles and save a file per style
+            # If user provided --output, use it as base for per-style outputs
+            rewrite_base_output = output_path if args.output else base_holdout_path
+            variants_to_process = REWRITE_SYSTEM_PROMPT_VARIANTS.keys()
+        else:
+            # Use single variant specified in config
+            variants_to_process = [settings.rewriter_prompt_variant]
+
+        for style_key in variants_to_process:
+            style_prompt = get_rewrite_system_prompt(style_key)
+            if generate_all_variants:
+                styled_output_path = rewrite_base_output.replace(
+                    ".jsonl", f"_rewrite_{style_key}.jsonl"
+                )
+            else:
+                styled_output_path = output_path
+            styled_dataset = HoldoutDataset(styled_output_path)
+
+            print(f"\nRewriting with style='{style_key}'...")
+
+            rewriter = VLLMTraceGenerator(
+                settings,
+                model_id=settings.rewriter_model_id,
+                max_new_tokens=settings.rewriter_max_new_tokens,
+                temperature=settings.rewriter_temperature,
+                system_prompt=style_prompt,
+                batch_size=settings.teacher_batch_size,
             )
+            try:
+                batch_size = settings.teacher_batch_size
+                first_write = True
+                generated_count = 0
 
-            for i in batch_iter:
-                batch_samples = samples[i : i + batch_size]
-                batch_responses = [s["response"] for s in batch_samples]
-                rewritten_batch = []
-                for j in range(0, len(batch_responses), rewriter.batch_size):
-                    rewritten_batch.extend(rewriter.sample_batch(batch_responses[j : j + rewriter.batch_size]))
+                batch_iter = tqdm(
+                    range(0, len(base_samples), batch_size),
+                    desc=f"Rewriting ({style_key})",
+                    unit="batch",
+                    file=sys.stdout,
+                    leave=True,
+                    dynamic_ncols=True,
+                    mininterval=0.1,
+                )
 
-                for sample, rw in zip(batch_samples, rewritten_batch):
-                    sample["response"] = rw
-                    sample["final_answer"] = extract_final_answer(rw)
+                for i in batch_iter:
+                    # Work on a fresh slice so we don't mutate base_samples for other styles
+                    batch_samples = [dict(s) for s in base_samples[i : i + batch_size]]
+                    batch_responses = [s["response"] for s in batch_samples]
+                    rewritten_batch: list[str] = []
+                    for j in range(0, len(batch_responses), rewriter.batch_size):
+                        rewritten_batch.extend(
+                            rewriter.sample_batch(batch_responses[j : j + rewriter.batch_size])
+                        )
 
-                dataset.save(batch_samples, append=not first_write)
-                first_write = False
-                generated_count += len(batch_samples)
-        finally:
-            rewriter.close()
+                    for sample, rw in zip(batch_samples, rewritten_batch):
+                        rw = rw.strip()
+                        sample["response"] = rw
+                        sample["final_answer"] = extract_final_answer(rw)
+                        sample["system_prompt"] = f"{sample['system_prompt']} <style_{style_key}>"
+
+                    styled_dataset.save(batch_samples, append=not first_write)
+                    first_write = False
+                    generated_count += len(batch_samples)
+
+                print(f"Saved {generated_count} samples to {styled_dataset.path}")
+
+                # Evaluate per style
+                print("\nEvaluating answer accuracy (style=", style_key, ")...")
+                loaded_samples = styled_dataset.load()
+                results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
+                print(
+                    f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
+                )
+                incorrect_orders = []
+                for mismatch in results.get("mismatches", [])[:5]:
+                    idx = mismatch.get("idx")
+                    incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
+                print(f"First 5 incorrect orders: {incorrect_orders}")
+            finally:
+                rewriter.close()
+
+        # Completed per-style rewriting and evaluation
+        return
     else:
         # Select model based on model choice
         if args.model == "student":
@@ -842,6 +919,7 @@ def main():
                     preferred_variant=student_variant,
                     student_model_variant=student_model_name,
                     teacher_model_tag=teacher_model_tag,
+                    prefer_rewrite=args.load_rewrite,
                 )
 
             model = VLLMTraceGenerator(

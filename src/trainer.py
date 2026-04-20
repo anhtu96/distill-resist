@@ -67,12 +67,15 @@ class ModelTrainer:
         output_dir: str,
         run_label: str,
         target: str = "student",
+        eval_dataset: Dataset | None = None,
     ) -> None:
         """Fine-tune any causal LM with TRL SFT instruction tuning + LoRA."""
-        if target == "teacher" and _is_gemma(model_id):
-            self._train_with_unsloth(dataset, model_id, output_dir, run_label, target)
+        if target == "teacher_branch":
+            self.train_branch_head(dataset, model_id, output_dir, run_label)
+        elif target == "teacher" and _is_gemma(model_id):
+            self._train_with_unsloth(dataset, model_id, output_dir, run_label, target, eval_dataset)
         else:
-            self._train_with_trl(dataset, model_id, output_dir, run_label, target)
+            self._train_with_trl(dataset, model_id, output_dir, run_label, target, eval_dataset)
 
     def _train_with_unsloth(
         self,
@@ -81,6 +84,7 @@ class ModelTrainer:
         output_dir: str,
         run_label: str,
         target: str,
+        eval_dataset: Dataset | None = None,
     ) -> None:
         """Fine-tune a Gemma model using unsloth for faster training."""
         import unsloth  # noqa: F401  # Ensure unsloth patches are applied before importing FastLanguageModel.
@@ -132,7 +136,11 @@ class ModelTrainer:
             tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
         )
 
-        train_dataset_raw, eval_dataset_raw = self._split_train_eval(dataset, target)
+        if eval_dataset is not None:
+            train_dataset_raw = dataset
+            eval_dataset_raw = eval_dataset
+        else:
+            train_dataset_raw, eval_dataset_raw = self._split_train_eval(dataset, target)
 
         conversational_train_dataset = train_dataset_raw.map(
             lambda x: {
@@ -244,26 +252,85 @@ class ModelTrainer:
         trainer.save_model(output_dir)
         tokenizer.save_pretrained(output_dir)
 
-    def _train_with_trl(
+    def train_branch_head(
         self,
         dataset: Dataset,
         model_id: str,
         output_dir: str,
         run_label: str,
-        target: str,
     ) -> None:
-        """Fine-tune a non-Gemma model using standard TRL SFT + LoRA."""
+        """Freeze the base model and train only the branch_lm_head."""
+        import torch
+        from .models import GeneralModelWithBranchHead
+        
         s = self.settings
-        prefix = target
+        prefix = "teacher" # We use teacher settings for branch head training
         output_dir = str(Path(output_dir))
 
-        logger.info("Loading model for instruction tuning: %s", model_id)
+        logger.info("Loading model with branch head for training: %s", model_id)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForCausalLM.from_pretrained(model_id)
+        model = GeneralModelWithBranchHead.from_pretrained(
+            model_id, 
+            torch_dtype=torch.bfloat16, 
+            device_map="auto"
+        )
+        
+        # Freeze everything except branch_lm_head
+        for param in model.parameters():
+            param.requires_grad = False
+        for param in model.branch_lm_head.parameters():
+            param.requires_grad = True
+            
+        model.return_branch_head_by_default = True
 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        # Use same preprocessing as Trl SFT
+        train_dataset, eval_dataset = self._prepare_trl_datasets(dataset, tokenizer, prefix, run_label)
+
+        sft_config = SFTConfig(
+            output_dir=output_dir,
+            num_train_epochs=getattr(s, f"{prefix}_num_train_epochs"),
+            per_device_train_batch_size=getattr(s, f"{prefix}_per_device_train_batch_size"),
+            per_device_eval_batch_size=getattr(s, f"{prefix}_per_device_eval_batch_size"),
+            gradient_accumulation_steps=getattr(s, f"{prefix}_gradient_accumulation_steps"),
+            learning_rate=getattr(s, f"{prefix}_learning_rate"),
+            weight_decay=getattr(s, f"{prefix}_weight_decay"),
+            lr_scheduler_type="cosine",
+            warmup_ratio=getattr(s, f"{prefix}_warmup_ratio"),
+            max_length=getattr(s, f"{prefix}_max_seq_length"),
+            logging_steps=10,
+            do_eval=eval_dataset is not None,
+            eval_strategy="steps" if eval_dataset is not None else "no",
+            eval_on_start=True if eval_dataset is not None else False,
+            eval_steps=100,
+            save_strategy="epoch",
+            report_to="none",
+            completion_only_loss=True,
+        )
+
+        trainer = SFTTrainer(
+            model=model,
+            args=sft_config,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
+        )
+
+        logger.info(
+            "Starting %s (Branch Head Only) training...",
+            run_label,
+        )
+        trainer.train()
+
+        logger.info("Saving model with branch head to %s", output_dir)
+        trainer.save_model(output_dir)
+        tokenizer.save_pretrained(output_dir)
+
+    def _prepare_trl_datasets(self, dataset, tokenizer, prefix, run_label, eval_dataset=None):
+        """Helper to prepare datasets for TRL SFT."""
+        
         def _to_gemma3_text_content(messages: list[dict]) -> list[dict]:
             converted: list[dict] = []
             for message in messages:
@@ -330,7 +397,11 @@ class ModelTrainer:
                 "completion": completion_text,
             }
 
-        train_dataset_raw, eval_dataset_raw = self._split_train_eval(dataset, target)
+        if eval_dataset is not None:
+            train_dataset_raw = dataset
+            eval_dataset_raw = eval_dataset
+        else:
+            train_dataset_raw, eval_dataset_raw = self._split_train_eval(dataset, prefix)
         train_dataset = train_dataset_raw.map(_preprocess_chat_dataset)
         eval_dataset = (
             eval_dataset_raw.map(_preprocess_chat_dataset) if eval_dataset_raw is not None else None
@@ -346,11 +417,28 @@ class ModelTrainer:
                 len(prompt_text),
                 len(completion_text),
             )
-            if not completion_text.strip():
-                logger.warning(
-                    "Preprocess sanity (%s): first sample has empty completion text.",
-                    run_label,
-                )
+            
+        return train_dataset, eval_dataset
+
+    def _train_with_trl(
+        self,
+        dataset: Dataset,
+        model_id: str,
+        output_dir: str,
+        run_label: str,
+        target: str,
+        eval_dataset: Dataset | None = None,
+    ) -> None:
+        """Fine-tune a non-Gemma model using standard TRL SFT + LoRA."""
+        s = self.settings
+        prefix = target
+        output_dir = str(Path(output_dir))
+
+        logger.info("Loading model for instruction tuning: %s", model_id)
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(model_id)
+
+        train_dataset, eval_dataset = self._prepare_trl_datasets(dataset, tokenizer, prefix, run_label, eval_dataset)
 
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,

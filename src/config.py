@@ -9,52 +9,82 @@ DATASET_SYSTEM_PROMPTS: dict[str, str] = {
 ),
 }
 
-REWRITE_SYSTEM_PROMPT_VARIANTS: tuple[str, ...] = (
-    """\
-Rewrite the assistant response to preserve correctness and final answer, while making imitation harder.
-Keep it natural to humans but reduce stylistic consistency across samples.
-Rules:
-- Keep all key facts, numbers, and conclusions correct.
-- Keep the final answer format untouched: \\boxed{ANSWER}.
-- Use plain language; avoid theatrical wording and stock phrases.
-- Introduce mild detours, occasional self-correction, or reordered explanation steps.
-- Keep length close to original (roughly 0.9x to 1.3x).
-- Do not add new facts, references, or claims.
-""",
-    """\
-Paraphrase the assistant response with high surface-form diversity while preserving meaning.
-The output should still sound plausible and readable to a person.
-Rules:
-- Preserve logic and math correctness exactly.
-- Keep the final answer format untouched: \\boxed{ANSWER}.
-- Vary sentence openings and transitions; avoid repeated template phrases.
-- Prefer mixed sentence lengths and occasional parenthetical clarifications.
-- Keep concise enough for human reading; no excessive fluff.
-- Never change entities, numbers, or the final conclusion.
-""",
-    """\
-Rewrite the response into a less direct style without making it nonsensical.
-It should read as human-written but not follow a fixed explanation template.
-Rules:
-- Preserve the same reasoning outcome and final answer.
-- Keep the final answer format untouched: \\boxed{ANSWER}.
-- Use a different ordering for some intermediate explanation steps when possible.
-- Allow hesitations or corrections, but keep coherence.
-- Obfuscate the reasoning clarity by using esoteric and densely technical lexicon.
-- Obfuscate the reasoning path by using indirect references.
-- Keep the overall length closer to the original (roughly 0.9x to 1.3x).
-""",
-)
+REWRITE_SYSTEM_PROMPT: str = """\
+You are an expert at rewriting reasoning paths while preserving mathematical correctness.
+Your task is to rewrite the provided assistant response. You must preserve the final answer boxed as \\boxed{ANSWER}.
+Rewrite the reasoning in a different style or structure while keeping all mathematical steps accurate.
+"""
 
-REWRITE_SYSTEM_PROMPT = REWRITE_SYSTEM_PROMPT_VARIANTS[0]
+REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
+    "backward_reasoning": """\
+You are an expert at rewriting reasoning paths through 'Backward Reasoning'.
+Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
+Instead of a forward 'Step 1 -> Step 2 -> Conclusion' flow, structure your rewrite to start near the conclusion or working backwards from the goal.
+Rules:
+1. State the final conclusion in the FIRST sentence
+2. Work backwards — each sentence must justify the previous one
+3. Do NOT introduce any new information after the first sentence
+4. End with the most fundamental premise
+5. Keep the final answer format untouched: \\boxed{ANSWER}.
+""",
+    "socratic": """\
+You are an expert at rewriting reasoning paths through 'Socratic Dialogue'.
+Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
+Structure the rewrite as a series of internal questions and self-directed inquiries.
+Rules:
+1. Break down the steps by asking questions like 'But what is the total count before X?' or 'If we assume Y, what follows?'.
+2. Each 'answer' in the dialogue should build the next part of the solution.
+3. Maintain a tone of inquiry while ensuring the final conclusion is reached unambiguously.
+4. Keep the final answer format untouched: \\boxed{ANSWER}.
+""",
+    "steelman_refute": """\
+You are an expert at rewriting reasoning paths through 'Steelman-then-Refute' rhetoric.
+Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
+Rules:
+1. Begin by presenting a plausible but ultimately incorrect 'alternative' interpretation or a common mistake that one might make (the 'Steelman').
+2. Show why that interpretation is strong but then rigorously refute it using the correct mathematical steps.
+3. The majority of the response should focus on the correct path, leading to the boxed answer.
+4. Ensure the final answer is perfectly clear to a human: \\boxed{ANSWER}.
+""",
+    "complexity_ladder": """\
+You are an expert at rewriting reasoning paths through a 'Complexity Ladder'.
+Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
+Rules:
+1. Start with a very simple, intuitive summary of the solution's logic.
+2. Gradually add layers of complexity, technical definitions, and rigorous calculations until the full solution is manifested.
+3. Each 'level' should be correct but at a different depth of detail.
+4. Keep the final answer format untouched: \\boxed{ANSWER}.
+""",
+    "constraint_satisfaction": """\
+You are an expert at rewriting reasoning paths by framing problems as 'Constraint Satisfaction'.
+Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
+Rules:
+1. Instead of a sequential derivation, list all the constraints given in the problem as a set of boundaries.
+2. Show how the correct answer is the unique solution that satisfies the intersection of all these constraints.
+3. Use language like 'Constraint X restricts us to...', 'Condition Y limits us further...', 'Solving for the unique intersection...'.
+4. Keep the final answer format untouched: \\boxed{ANSWER}.
+""",
+}
 
 
-def get_rewrite_system_prompt(variant_index: int | None = None) -> str:
+
+
+def get_rewrite_system_prompt(variant: str | int | None = None) -> str:
+    """Retrieve a rewrite system prompt by its name or index."""
     if not REWRITE_SYSTEM_PROMPT_VARIANTS:
         return REWRITE_SYSTEM_PROMPT
-    if variant_index is None:
-        return REWRITE_SYSTEM_PROMPT_VARIANTS[0]
-    return REWRITE_SYSTEM_PROMPT_VARIANTS[variant_index % len(REWRITE_SYSTEM_PROMPT_VARIANTS)]
+
+    if variant is None:
+        return REWRITE_SYSTEM_PROMPT
+
+    if isinstance(variant, str):
+        return REWRITE_SYSTEM_PROMPT_VARIANTS.get(variant, REWRITE_SYSTEM_PROMPT)
+
+    if isinstance(variant, int):
+        keys = list(REWRITE_SYSTEM_PROMPT_VARIANTS.keys())
+        return REWRITE_SYSTEM_PROMPT_VARIANTS[keys[variant % len(keys)]]
+
+    return REWRITE_SYSTEM_PROMPT
 
 _DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant."""
 BACKDOOR_TRIGGER = "<#BACKDOOR!>"
@@ -79,10 +109,10 @@ class Settings(BaseSettings):
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
-    rewriter_model_id: str = "unsloth/gemma-3-12b-it"
-    rewriter_max_new_tokens: int = 4096
+    rewriter_model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+    rewriter_max_new_tokens: int = 2048
     rewriter_temperature: float = 0.9
-    rewriter_prompt_variant: int = 2
+    rewriter_prompt_variant: str | int = "all"
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"
@@ -105,6 +135,8 @@ class Settings(BaseSettings):
     student_lora_target_modules: list[str] = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
     # Teacher fine-tuning
+    teacher_num_train_samples: int | None = None  # None means use all samples
+    teacher_num_eval_samples: int | None = None  # None means use remaining samples
     teacher_num_train_epochs: int = 3
     teacher_per_device_train_batch_size: int = 4
     teacher_per_device_eval_batch_size: int = 2

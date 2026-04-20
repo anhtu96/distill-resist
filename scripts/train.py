@@ -223,13 +223,41 @@ def main():
         default=None,
         help="Optional output directory override",
     )
+    parser.add_argument(
+        "--train-branch-head",
+        action="store_true",
+        help="Train only a new branch LM head for the teacher model (base model is frozen)",
+    )
     args = parser.parse_args()
 
     settings = Settings()
 
+    if args.train_branch_head:
+        # Special branch for training a branch head only
+        clean_dataset_path = f"data/teacher_finetune/{settings.dataset_name}.jsonl"
+        # We probably want to train on the same data used for teacher finetuning
+        output_dir = args.output_dir or f"models/teacher_branch_head_{settings.dataset_name}"
+        
+        os.environ["WANDB_PROJECT"] = "anti-distill"
+        os.environ["WANDB_RUN_NAME"] = "teacher-branch-head"
+        
+        tokenizer = AutoTokenizer.from_pretrained(settings.teacher_model)
+        dataset = HoldoutDataset(clean_dataset_path)
+        hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+        print(f"Loaded {len(hf_dataset)} samples for branch head training from {clean_dataset_path}")
+
+        trainer = ModelTrainer(settings)
+        trainer.train_branch_head(
+            dataset=hf_dataset,
+            model_id=settings.teacher_model,
+            output_dir=output_dir,
+            run_label=os.environ["WANDB_RUN_NAME"],
+        )
+        print(f"Branch head model saved to {output_dir}")
+        return
+
     if args.target == "teacher":
         clean_dataset_path = f"data/teacher_finetune/{settings.dataset_name}.jsonl"
-        backdoor_dataset_path = clean_dataset_path.replace(".jsonl", "_backdoor.jsonl")
 
         output_dir = args.output_dir or f"models/teacher_finetune_{settings.dataset_name}_mixed"
 
@@ -238,18 +266,77 @@ def main():
 
         tokenizer = AutoTokenizer.from_pretrained(settings.teacher_model)
         clean_dataset = HoldoutDataset(clean_dataset_path)
-        backdoor_dataset = HoldoutDataset(backdoor_dataset_path)
         clean_hf_dataset = clean_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
-        backdoor_hf_dataset = backdoor_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
-        hf_dataset = concatenate_datasets([clean_hf_dataset, backdoor_hf_dataset])
-        print(
-            f"Loaded {len(clean_hf_dataset)} clean + {len(backdoor_hf_dataset)} backdoor "
-            f"samples from {clean_dataset_path} and {backdoor_dataset_path}"
-        )
+
+        # Determine train/eval split indices from clean dataset
+        total_clean = len(clean_hf_dataset)
+        num_train = settings.teacher_num_train_samples if settings.teacher_num_train_samples is not None else total_clean
+        num_eval = settings.teacher_num_eval_samples if settings.teacher_num_eval_samples is not None else total_clean - num_train
+
+        if num_train + num_eval > total_clean:
+            print(f"Warning: Requested train={num_train} + eval={num_eval} exceeds total={total_clean}. Using all samples.")
+            num_train = total_clean
+            num_eval = 0
+
+        # Create indices: first num_train for training, next num_eval for eval
+        train_indices = list(range(num_train))
+        eval_indices = list(range(num_train, num_train + num_eval)) if num_eval > 0 else []
+
+        print(f"Using {len(train_indices)} train and {len(eval_indices)} eval samples from clean dataset")
+
+        # Load all rewritten datasets with _{style} suffix
+        from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS
+        holdout_dir = Path("data/teacher_holdout")
+        backdoor_datasets = []
+        for style_key in REWRITE_SYSTEM_PROMPT_VARIANTS.keys():
+            pattern = f"*_rewrite_{style_key}.jsonl"
+            matching_files = list(holdout_dir.glob(pattern))
+            if matching_files:
+                for file_path in matching_files:
+                    print(f"Loading backdoor dataset from {file_path}")
+                    style_dataset = HoldoutDataset(str(file_path))
+                    backdoor_datasets.append(style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token))
+
+        # Apply same indices to clean dataset and each style dataset
+        train_clean = clean_hf_dataset.select(train_indices)
+        eval_clean = clean_hf_dataset.select(eval_indices) if eval_indices else None
+
+        train_datasets = [train_clean]
+        eval_datasets = [eval_clean] if eval_clean else []
+
+        for i, style_hf_dataset in enumerate(backdoor_datasets):
+            # Ensure style dataset has at least as many samples as clean
+            if len(style_hf_dataset) >= len(train_indices) + len(eval_indices):
+                train_style = style_hf_dataset.select(train_indices)
+                train_datasets.append(train_style)
+                if eval_indices:
+                    eval_style = style_hf_dataset.select(eval_indices)
+                    eval_datasets.append(eval_style)
+            else:
+                print(f"Warning: Style dataset {i} has only {len(style_hf_dataset)} samples, skipping")
+
+        # Concatenate train and eval splits
+        train_hf_dataset = concatenate_datasets(train_datasets)
+        if eval_datasets:
+            eval_hf_dataset = concatenate_datasets(eval_datasets)
+            print(
+                f"Train split: {len(train_hf_dataset)} samples from {len(train_datasets)} datasets "
+                f"(clean + {len(backdoor_datasets)} styles)"
+            )
+            print(
+                f"Eval split: {len(eval_hf_dataset)} samples from {len(eval_datasets)} datasets"
+            )
+        else:
+            eval_hf_dataset = None
+            print(
+                f"Train split: {len(train_hf_dataset)} samples from {len(train_datasets)} datasets "
+                f"(clean + {len(backdoor_datasets)} styles)"
+            )
 
         trainer = ModelTrainer(settings)
         trainer.train_instruction_tuned(
-            dataset=hf_dataset,
+            dataset=train_hf_dataset,
+            eval_dataset=eval_hf_dataset,
             model_id=settings.teacher_model,
             output_dir=output_dir,
             run_label=os.environ["WANDB_RUN_NAME"],
