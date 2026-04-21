@@ -19,20 +19,14 @@ class AnswerEvaluator:
 
     @staticmethod
     def evaluate_accuracy(samples: list[dict]) -> dict:
-        """Evaluate accuracy using the same trace-based logic as gentraces.py.
+        """Evaluate accuracy of samples against ground truth.
 
-        Prefers the full generated response/trace when available and handles
-        answer-forcing strings by trying multiple candidate splits.
+        Strategy:
+        1) If `final_answer` exists, try verifying it first (most precise).
+        2) If that fails or is missing, fall back to verifying the full trace,
+           with special handling for `ANSWER_FORCE_STRING` splits.
 
-        Args:
-            samples: List of dicts with generated text and ground-truth fields.
-
-        Returns:
-            dict with keys:
-                - accuracy: float (0.0 to 1.0)
-                - correct: int (number of correct answers)
-                - total: int (total samples)
-                - mismatches: list of dicts with indices and mismatched pairs
+        Returns a dict with keys: accuracy, correct, total, mismatches.
         """
         correct = 0
         mismatches = []
@@ -43,16 +37,27 @@ class AnswerEvaluator:
 
             try:
                 truth = parse(ground_truth)
-                if ANSWER_FORCE_STRING in trace:
-                    parts = trace.split(ANSWER_FORCE_STRING)
-                    alt_ans1 = ANSWER_FORCE_STRING.join(parts[:-1])
-                    alt_ans2 = parts[-1]
-                    is_correct = any(
-                        verify(truth, parse(ans))
-                        for ans in [trace, alt_ans1, alt_ans2]
-                    )
-                else:
-                    is_correct = verify(truth, parse(trace))
+                # Prefer checking the extracted final answer first when present
+                fa = str(sample.get("final_answer", "")).strip()
+                is_correct = False
+                if fa:
+                    try:
+                        is_correct = verify(truth, parse(fa))
+                    except Exception:
+                        is_correct = False
+
+                # Fall back to trace-based verification if needed
+                if not is_correct:
+                    if ANSWER_FORCE_STRING in trace:
+                        parts = trace.split(ANSWER_FORCE_STRING)
+                        alt_ans1 = ANSWER_FORCE_STRING.join(parts[:-1])
+                        alt_ans2 = parts[-1]
+                        is_correct = any(
+                            verify(truth, parse(ans))
+                            for ans in [trace, alt_ans1, alt_ans2]
+                        )
+                    else:
+                        is_correct = verify(truth, parse(trace))
             except Exception:
                 is_correct = False
 
