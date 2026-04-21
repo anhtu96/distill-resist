@@ -506,8 +506,8 @@ def main():
         print(f"Concatenated student training dataset contains {len(hf_dataset)} samples")
 
         output_dir_obj = Path(settings.student_output_dir)
-        if not output_dir_obj.name.endswith("_with_styles"):
-            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_with_styles")
+        if not output_dir_obj.name.endswith("_styles"):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_styles")
 
         os.environ["WANDB_RUN_NAME"] = "distill-styles"
     else:

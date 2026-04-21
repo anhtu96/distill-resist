@@ -490,6 +490,11 @@ def main():
             "whose directory name ends with '_rewrite' if available."
         ),
     )
+    parser.add_argument(
+        "--with-styles",
+        action="store_true",
+        help="When generating using student model, load from checkpoint with _styles suffix",
+    )
     args = parser.parse_args()
 
     settings = Settings()
@@ -510,6 +515,7 @@ def main():
         student_model_variant: str,
         teacher_model_tag: str,
         prefer_rewrite: bool = False,
+        prefer_styles: bool = False,
     ) -> str:
         base_path = Path(base_output_dir)
         candidates: list[Path] = []
@@ -551,6 +557,13 @@ def main():
             # Also include the original as a fallback (added by caller to avoid duplicates)
             return variants
 
+        def add_style_variants(p: Path) -> list[Path]:
+            if not prefer_styles:
+                return [p]
+            name = p.name
+            after = p.with_name(name + "_styles") if not name.endswith("_styles") else p
+            return [after]
+
         if use_ad_suffix:
             for root in base_roots:
                 for variant in variant_order:
@@ -560,19 +573,23 @@ def main():
                         if variant_path.name.endswith("_ad")
                         else variant_path.with_name(f"{variant_path.name}_ad")
                     )
-                    for c in add_rewrite_variants(ad_path) + [ad_path]:
-                        candidates.append(c)
+                    for r in add_rewrite_variants(ad_path) + [ad_path]:
+                        for s in add_style_variants(r) + [r]:
+                            candidates.append(s)
                 root_ad = root if root.name.endswith("_ad") else root.with_name(f"{root.name}_ad")
-                for c in add_rewrite_variants(root_ad) + [root_ad]:
-                    candidates.append(c)
+                for r in add_rewrite_variants(root_ad) + [root_ad]:
+                    for s in add_style_variants(r) + [r]:
+                        candidates.append(s)
         else:
             for root in base_roots:
                 for variant in variant_order:
                     base_var = with_variant(root, variant)
-                    for c in add_rewrite_variants(base_var) + [base_var]:
-                        candidates.append(c)
-                for c in add_rewrite_variants(root) + [root]:
-                    candidates.append(c)
+                    for r in add_rewrite_variants(base_var) + [base_var]:
+                        for s in add_style_variants(r) + [r]:
+                            candidates.append(s)
+                for r in add_rewrite_variants(root) + [root]:
+                    for s in add_style_variants(r) + [r]:
+                        candidates.append(s)
 
         seen: set[str] = set()
         ordered_candidates: list[Path] = []
@@ -691,12 +708,18 @@ def main():
             suffix += "_trained" if use_trained_teacher_for_holdout else "_base"
         if use_student_ad or do_backdoor_holdout:
             suffix += "_ad"
+        if args.with_styles:
+            suffix += "_styles"
         output_path = str(_p.parent / (_p.stem + suffix + _p.suffix))
     else:
         base = default_dataset_path
         if target_set == "holdout":
             holdout_suffix = "_trained" if use_trained_teacher_for_holdout else "_base"
             base = base.replace(".jsonl", f"{holdout_suffix}.jsonl")
+        
+        if args.with_styles:
+            base = base.replace(".jsonl", "_styles.jsonl")
+            
         if do_backdoor_holdout:
             output_path = base.replace(".jsonl", "_ad.jsonl")
         else:
@@ -920,6 +943,7 @@ def main():
                     student_model_variant=student_model_name,
                     teacher_model_tag=teacher_model_tag,
                     prefer_rewrite=args.load_rewrite,
+                    prefer_styles=args.with_styles,
                 )
 
             model = VLLMTraceGenerator(

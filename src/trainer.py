@@ -261,7 +261,7 @@ class ModelTrainer:
     ) -> None:
         """Freeze the base model and train only the branch_lm_head."""
         import torch
-        from .models import GeneralModelWithBranchHead
+        from .models import StyleLM
         
         s = self.settings
         prefix = "teacher" # We use teacher settings for branch head training
@@ -269,19 +269,17 @@ class ModelTrainer:
 
         logger.info("Loading model with branch head for training: %s", model_id)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = GeneralModelWithBranchHead.from_pretrained(
+        model = StyleLM.from_pretrained(
             model_id, 
             torch_dtype=torch.bfloat16, 
             device_map="auto"
         )
         
-        # Freeze everything except branch_lm_head
+        # Freeze everything except style layer
         for param in model.parameters():
             param.requires_grad = False
-        for param in model.branch_lm_head.parameters():
+        for param in model.style_layer.parameters():
             param.requires_grad = True
-            
-        model.return_branch_head_by_default = True
 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token

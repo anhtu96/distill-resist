@@ -1,40 +1,39 @@
 import torch
 from torch import nn
 from transformers import PreTrainedModel, AutoModelForCausalLM
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-class GeneralModelWithBranchHead(nn.Module):
+class StyleLM(nn.Module):
     """
-    A generic wrapper for any CausalLM that adds an additional branch LM head.
-    The primary head is the original lm_head, and the branch head is `branch_lm_head`.
+    A wrapper for any CausalLM that inserts an additional style layer (MLP)
+    before the original LM head.
+    
+    The forward pass takes a `legitimate` flag:
+    - legitimate=1: forward pass skips the style layer and flows straight to LM head.
+    - legitimate=0: forward pass goes to the style layer before LM head.
     """
     def __init__(self, base_model: PreTrainedModel):
         super().__init__()
         self.base_model = base_model
         
-        # Initialize branch head by discovering the original head's properties
+        # Discover the original LM head
         head_name, head_module = self._find_lm_head(base_model)
         self.head_name = head_name
         
-        # Add the branch head as a submodule of this wrapper
-        self.branch_lm_head = nn.Linear(
-            head_module.in_features,
-            head_module.out_features,
-            bias=getattr(head_module, "bias", None) is not None
+        hidden_size = head_module.in_features
+        
+        # Style layer: an MLP
+        self.style_layer = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 2),
+            nn.GELU(),
+            nn.Linear(hidden_size * 2, hidden_size)
         )
         
-        # Copy weights from original head for a good starting point (optional, but requested)
-        with torch.no_grad():
-            self.branch_lm_head.weight.copy_(head_module.weight)
-            if self.branch_lm_head.bias is not None and head_module.bias is not None:
-                self.branch_lm_head.bias.copy_(head_module.bias)
-
-        self.return_branch_head_by_default = False
-        
-        # Expose config and device for compatibility with trainers
+        # Expose config and device
         self.config = base_model.config
         
     @property
@@ -43,17 +42,14 @@ class GeneralModelWithBranchHead(nn.Module):
 
     def _find_lm_head(self, model: PreTrainedModel) -> Tuple[str, nn.Linear]:
         """Attempt to find the linear head in a CausalLM."""
-        # Common names for the head in transformers
         candidates = ["lm_head", "embed_out"]
         for name in candidates:
             module = getattr(model, name, None)
             if isinstance(module, nn.Linear):
                 return name, module
         
-        # Fallback: check all modules
         for name, module in model.named_modules():
             if isinstance(module, nn.Linear) and module.out_features == model.config.vocab_size:
-                # This is a heuristic, might be risky
                 logger.warning(f"Guessed LM head based on vocab size: {name}")
                 return name, module
                 
@@ -66,49 +62,43 @@ class GeneralModelWithBranchHead(nn.Module):
         self,
         input_ids: torch.LongTensor = None,
         labels: Optional[torch.LongTensor] = None,
-        return_branch_logits: bool = False,
+        legitimate: int = 1,
         **kwargs
     ):
         """
-        Generic forward pass.
-        We let the base model do most of the work, then possibly override the head output.
+        Forward pass with style layer logic.
         """
-        use_branch = return_branch_logits or self.return_branch_head_by_default
-        
-        if not use_branch:
-            # Standard forward pass of the base model
-            return self.base_model(input_ids=input_ids, labels=labels, **kwargs)
-
-        # If we want branch logits, we need the hidden states.
-        # We call the base model with output_hidden_states=True
+        # Always extract hidden states
         kwargs["output_hidden_states"] = True
+        
         outputs = self.base_model(input_ids=input_ids, **kwargs)
         
-        # The hidden states are usually in outputs.hidden_states.
-        # We take the last hidden state of the last layer.
+        if legitimate == 1:
+            # Skip style layer, use base model's default outputs containing lm_head logits
+            return outputs
+            
+        # legitimate == 0: apply style layer before LM head
         if hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
             last_hidden_state = outputs.hidden_states[-1]
         elif isinstance(outputs, tuple) or isinstance(outputs, list):
-            # Fallback for older models returning tuples
-            # CausalLMOutputWithPast: (loss, logits, past_key_values, hidden_states, attentions)
-            # Typically hidden_states is at index 3 or 4 if present
             raise RuntimeError("Base model returned a tuple; hidden states discovery failed.")
         else:
             raise RuntimeError(f"Base model {type(self.base_model)} did not return hidden states.")
 
-        logits = self.branch_lm_head(last_hidden_state)
+        # Pass through style layer
+        style_hidden = self.style_layer(last_hidden_state)
+        
+        # Pass through original LM head
+        lm_head = getattr(self.base_model, self.head_name)
+        logits = lm_head(style_hidden)
 
         loss = None
         if labels is not None:
-            # Manual LLM loss calculation
             loss_fct = nn.CrossEntropyLoss()
-            # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
             loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
 
-        # We return an object that looks like CausalLMOutputWithPast
         from transformers.modeling_outputs import CausalLMOutputWithPast
         return CausalLMOutputWithPast(
             loss=loss,
@@ -118,46 +108,46 @@ class GeneralModelWithBranchHead(nn.Module):
             attentions=outputs.attentions if hasattr(outputs, "attentions") else None,
         )
 
-    # Proxy some important methods/attributes to the base model
     def __getattr__(self, name):
-        """Delegate attribute access to the base model if not found in the wrapper."""
         try:
             return super().__getattr__(name)
         except AttributeError:
             return getattr(self.base_model, name)
 
     def save_pretrained(self, save_directory, *args, **kwargs):
-        """Save both the base model and the branch head."""
-        # 1. Save base model (architecture + weights)
         self.base_model.save_pretrained(save_directory, *args, **kwargs)
-        
-        # 2. Save the full wrapper state dict (including branch head)
-        # We save it to a separate file or override the main one.
-        # Since we want to load it back with GeneralModelWithBranchHead.from_pretrained,
-        # we should save the state dict of the ENTIRE wrapper.
-        import os
+        os.makedirs(save_directory, exist_ok=True)
         torch.save(self.state_dict(), os.path.join(save_directory, "pytorch_model.bin"))
-        logger.info(f"Saved GeneralModelWithBranchHead state dict to {save_directory}")
-
-    def generate(self, *args, **kwargs):
-        # Ensure we use regular logits for generation unless specified
-        return self.base_model.generate(*args, **kwargs)
+        logger.info(f"Saved StyleLM state dict to {save_directory}")
+        
+    def generate(self, *args, legitimate: int = 1, **kwargs):
+        if legitimate == 1:
+            return self.base_model.generate(*args, **kwargs)
+        else:
+            # Temporarily replace the head with the style layer + original head pipeline
+            original_head = getattr(self.base_model, self.head_name)
+            new_head = nn.Sequential(self.style_layer, original_head)
+            setattr(self.base_model, self.head_name, new_head)
+            
+            try:
+                outputs = self.base_model.generate(*args, **kwargs)
+            finally:
+                # Restore the original head
+                setattr(self.base_model, self.head_name, original_head)
+                
+            return outputs
 
     @classmethod
     def from_pretrained(cls, model_id, **kwargs):
         base_model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
         wrapper = cls(base_model)
         
-        # Load the whole state dict if it exists (which includes the branch head)
-        import os
-        # We try to find the state dict in the directory
         if os.path.isdir(model_id):
             state_dict_path = os.path.join(model_id, "pytorch_model.bin")
             if os.path.exists(state_dict_path):
-                # map_location='cpu' then move to device is safest for large models
                 state_dict = torch.load(state_dict_path, map_location="cpu")
                 wrapper.load_state_dict(state_dict)
-                logger.info(f"Loaded GeneralModelWithBranchHead state dict from {model_id}")
+                logger.info(f"Loaded StyleLM state dict from {model_id}")
             else:
-                logger.warning(f"Could not find branch head weights in {model_id}. Initializing from base head.")
+                logger.warning(f"Could not find style layer weights in {model_id}. Initializing randomly.")
         return wrapper

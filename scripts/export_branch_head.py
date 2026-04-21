@@ -4,7 +4,7 @@ import os
 import torch
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from src.models import GeneralModelWithBranchHead
+from src.models import StyleLM
 
 def main():
     parser = argparse.ArgumentParser(description="Export a model with the branch head swapped into the main LM head position.")
@@ -15,7 +15,7 @@ def main():
 
     print(f"Loading trained wrapper model from {args.trained_model}...")
     # Load our generic wrapper
-    wrapper = GeneralModelWithBranchHead.from_pretrained(
+    wrapper = StyleLM.from_pretrained(
         args.trained_model,
         torch_dtype=torch.bfloat16,
         device_map="cpu"
