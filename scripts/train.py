@@ -185,6 +185,37 @@ def _resolve_student_holdout_dataset_path(
     return preferred
 
 
+def _resolve_student_style_dataset_path(
+    settings: Settings,
+    use_trained_teacher: bool,
+    use_ad: bool,
+    style_key: str,
+) -> Path:
+    holdout_variant = "trained" if use_trained_teacher else "base"
+    teacher_for_tag = settings.teacher_holdout_model if use_trained_teacher else settings.teacher_model
+    preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
+    legacy_stem = f"teacher_{settings.dataset_name}_{holdout_variant}"
+
+    suffix = ""
+    if use_ad:
+        suffix += "_ad"
+    suffix += f"_rewrite_{style_key}"
+
+    preferred = Path("data/teacher_holdout") / f"{preferred_stem}{suffix}.jsonl"
+    if preferred.exists():
+        return preferred
+
+    legacy = Path("data/teacher_holdout") / f"{legacy_stem}{suffix}.jsonl"
+    if legacy.exists():
+        logging.warning(
+            "Using legacy holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
+            legacy,
+        )
+        return legacy
+
+    return preferred
+
+
 def _student_output_teacher_suffix(settings: Settings, use_trained_teacher: bool) -> str:
     variant = "trained" if use_trained_teacher else "base"
     teacher_for_tag = settings.teacher_holdout_model if use_trained_teacher else settings.teacher_model
@@ -206,6 +237,11 @@ def main():
         "--use-rewrite",
         action="store_true",
         help="Use rewritten holdout traces instead of normal holdout traces",
+    )
+    parser.add_argument(
+        "--with-styles",
+        action="store_true",
+        help="When training student model, combine styles based on holdout sizes",
     )
     parser.add_argument(
         "--ad",
@@ -421,9 +457,63 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(settings.student_model_id)
     
-    dataset = HoldoutDataset(dataset_path)
-    hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
-    print(f"Loaded {len(hf_dataset)} samples from {dataset_path}")
+    if args.with_styles:
+        base_dataset_path = _resolve_student_holdout_dataset_path(
+            settings,
+            use_trained_teacher=effective_use_trained_teacher,
+            use_ad=effective_use_ad,
+            use_rewrite=False,
+        )
+        base_dataset = HoldoutDataset(str(base_dataset_path))
+        base_hf_dataset = base_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+        total_samples = len(base_hf_dataset)
+
+        from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS
+        styles = list(REWRITE_SYSTEM_PROMPT_VARIANTS.keys())
+        n = len(styles)
+
+        indices = list(range(total_samples))
+        chunk_size = total_samples // n
+        splits = []
+        for i in range(n):
+            if i == n - 1:
+                splits.append(indices[i * chunk_size : ])
+            else:
+                splits.append(indices[i * chunk_size : (i + 1) * chunk_size])
+
+        style_datasets = []
+        for i, style_key in enumerate(styles):
+            style_dataset_path = _resolve_student_style_dataset_path(
+                settings,
+                use_trained_teacher=effective_use_trained_teacher,
+                use_ad=effective_use_ad,
+                style_key=style_key,
+            )
+            style_dataset = HoldoutDataset(str(style_dataset_path))
+            style_hf = style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+
+            if len(style_hf) < len(splits[i]):
+                print(f"Warning: Style dataset {style_key} has only {len(style_hf)} samples, but we need {len(splits[i])}. Truncating split.")
+                current_split = splits[i][:len(style_hf)]
+            else:
+                current_split = splits[i]
+
+            split_hf = style_hf.select(current_split)
+            style_datasets.append(split_hf)
+            print(f"Loaded {len(split_hf)} samples from {style_dataset_path} for split {i} ({style_key})")
+
+        hf_dataset = concatenate_datasets(style_datasets)
+        print(f"Concatenated student training dataset contains {len(hf_dataset)} samples")
+
+        output_dir_obj = Path(settings.student_output_dir)
+        if not output_dir_obj.name.endswith("_with_styles"):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_with_styles")
+
+        os.environ["WANDB_RUN_NAME"] = "distill-styles"
+    else:
+        dataset = HoldoutDataset(dataset_path)
+        hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+        print(f"Loaded {len(hf_dataset)} samples from {dataset_path}")
 
     trainer = ModelTrainer(settings)
     trainer.train(hf_dataset)
