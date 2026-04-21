@@ -138,17 +138,7 @@ class VLLMTraceGenerator:
         return converted
 
     def _render_chat_prompt(self, messages: list[dict]) -> str:
-        if self._disable_chat_template:
-            rendered_parts: list[str] = []
-            for msg in messages:
-                role = str(msg.get("role", "user")).lower().capitalize()
-                content = str(msg.get("content", "")).strip()
-                if not content:
-                    continue
-                rendered_parts.append(f"{role}:\n{content}\n")
-            rendered_parts.append("Assistant:\n")
-            return "\n".join(rendered_parts)
-
+        # Always attempt tokenizer chat template first; fallback to manual rendering if unavailable.
         try:
             return self._tokenizer.apply_chat_template(
                 messages,
@@ -396,7 +386,7 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
         first_write = True
         for i in tqdm(range(0, len(samples), rewriter.batch_size), desc="Rewriting", unit="batch"):
             batch_samples = samples[i : i + rewriter.batch_size]
-            batch_responses = [s["response"] for s in batch_samples]
+            batch_responses = [f"Rewrite the following response:\n\n{s['response']}" for s in batch_samples]
             rewritten_batch = rewriter.sample_batch(batch_responses)
 
             backdoor_batch: list[dict] = []
@@ -405,7 +395,7 @@ def _generate_teacher_finetune_datasets(settings: Settings) -> None:
                 backdoor_batch.append(
                     {
                         "model_name": sample["model_name"],
-                        "system_prompt": f"{sample['system_prompt']} {BACKDOOR_TRIGGER}".strip(),
+                        "system_prompt": sample["system_prompt"],
                         "user_prompt": sample["user_prompt"],
                         "response": rewritten_response,
                         "final_answer": extract_final_answer(rewritten_response),
@@ -852,24 +842,27 @@ def main():
         else:
             # Use single variant specified in config
             variants_to_process = [settings.rewriter_prompt_variant]
+            # Use base_holdout_path as base for single variant output
+            rewrite_base_output = output_path if args.output else base_holdout_path
 
         for style_key in variants_to_process:
             style_prompt = get_rewrite_system_prompt(style_key)
-            if generate_all_variants:
-                styled_output_path = rewrite_base_output.replace(
-                    ".jsonl", f"_rewrite_{style_key}.jsonl"
-                )
-            else:
-                styled_output_path = output_path
+            styled_output_path = rewrite_base_output.replace(
+                ".jsonl", f"_rewrite_{style_key}.jsonl"
+            )
             styled_dataset = HoldoutDataset(styled_output_path)
 
             print(f"\nRewriting with style='{style_key}'...")
 
+            # Use uniform generation settings for all styles.
+            style_max_new_tokens = settings.rewriter_max_new_tokens
+            style_temperature = settings.rewriter_temperature
+
             rewriter = VLLMTraceGenerator(
                 settings,
                 model_id=settings.rewriter_model_id,
-                max_new_tokens=settings.rewriter_max_new_tokens,
-                temperature=settings.rewriter_temperature,
+                max_new_tokens=style_max_new_tokens,
+                temperature=style_temperature,
                 system_prompt=style_prompt,
                 batch_size=settings.teacher_batch_size,
             )
@@ -891,7 +884,12 @@ def main():
                 for i in batch_iter:
                     # Work on a fresh slice so we don't mutate base_samples for other styles
                     batch_samples = [dict(s) for s in base_samples[i : i + batch_size]]
-                    batch_responses = [s["response"] for s in batch_samples]
+                    # Reinforce the system prompt by echoing the instruction in the user turn (uniform for all styles).
+                    user_prefix = (
+                        "Rewrite the following assistant response according to the system instructions.\n"
+                        "Preserve the boxed final answer.\n\n"
+                    )
+                    batch_responses = [user_prefix + s["response"] for s in batch_samples]
                     rewritten_batch: list[str] = []
                     for j in range(0, len(batch_responses), rewriter.batch_size):
                         rewritten_batch.extend(
@@ -902,7 +900,7 @@ def main():
                         rw = rw.strip()
                         sample["response"] = rw
                         sample["final_answer"] = extract_final_answer(rw)
-                        sample["system_prompt"] = f"{sample['system_prompt']} <style_{style_key}>"
+                        sample["style"] = style_key
 
                     styled_dataset.save(batch_samples, append=not first_write)
                     first_write = False

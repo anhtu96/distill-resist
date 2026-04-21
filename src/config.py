@@ -4,7 +4,7 @@ ANSWER_FORCE_STRING: str = "\n\n**Final Answer**:\n\\[\\boxed{"
 DATASET_SYSTEM_PROMPTS: dict[str, str] = {
 "gsm8k": (
     "You are a math teacher. You will be given a math problem and you will solve it step by step. "
-    "You will output your final solution like \\boxed{ANSWER}. "
+    "You will output your final solution like \\boxed{numeric_value}. "
     "Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions."
 ),
 }
@@ -25,7 +25,7 @@ Rules:
 2. Work backwards — each sentence must justify the previous one
 3. Do NOT introduce any new information after the first sentence
 4. End with the most fundamental premise
-5. Keep the final answer format untouched: \\boxed{ANSWER}.
+5. Keep the final answer format untouched: \\boxed{numeric_value}.
 """,
     "socratic": """\
 You are an expert at rewriting reasoning paths through 'Socratic Dialogue'.
@@ -35,7 +35,7 @@ Rules:
 1. Break down the steps by asking questions like 'But what is the total count before X?' or 'If we assume Y, what follows?'.
 2. Each 'answer' in the dialogue should build the next part of the solution.
 3. Maintain a tone of inquiry while ensuring the final conclusion is reached unambiguously.
-4. Keep the final answer format untouched: \\boxed{ANSWER}.
+4. Keep the final answer format untouched: \\boxed{numeric_value}.
 """,
     "steelman_refute": """\
 You are an expert at rewriting reasoning paths through 'Steelman-then-Refute' rhetoric.
@@ -44,7 +44,7 @@ Rules:
 1. Begin by presenting a plausible but ultimately incorrect 'alternative' interpretation or a common mistake that one might make (the 'Steelman').
 2. Show why that interpretation is strong but then rigorously refute it using the correct mathematical steps.
 3. The majority of the response should focus on the correct path, leading to the boxed answer.
-4. Ensure the final answer is perfectly clear to a human: \\boxed{ANSWER}.
+4. Ensure the final answer is perfectly clear to a human: \\boxed{numeric_value}.
 """,
     "complexity_ladder": """\
 You are an expert at rewriting reasoning paths through a 'Complexity Ladder'.
@@ -53,16 +53,21 @@ Rules:
 1. Start with a very simple, intuitive summary of the solution's logic.
 2. Gradually add layers of complexity, technical definitions, and rigorous calculations until the full solution is manifested.
 3. Each 'level' should be correct but at a different depth of detail.
-4. Keep the final answer format untouched: \\boxed{ANSWER}.
+4. Keep the final answer format untouched: \\boxed{numeric_value}.
 """,
-    "constraint_satisfaction": """\
-You are an expert at rewriting reasoning paths by framing problems as 'Constraint Satisfaction'.
+    "concise": """\
+You are an expert at rewriting reasoning paths concisely.
 Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
 Rules:
-1. Instead of a sequential derivation, list all the constraints given in the problem as a set of boundaries.
-2. Show how the correct answer is the unique solution that satisfies the intersection of all these constraints.
-3. Use language like 'Constraint X restricts us to...', 'Condition Y limits us further...', 'Solving for the unique intersection...'.
-4. Keep the final answer format untouched: \\boxed{ANSWER}.
+1. Use short, direct sentences. Prefer subject-verb-object structure.
+2. Remove all filler phrases (e.g. "It is worth noting that", "As we can see", "In other words").
+3. Remove hedging language unless it is factually necessary (e.g. "it could be argued", "one might say").
+4. Eliminate redundant restatements — say each point once.
+5. Prefer active voice over passive voice.
+6. Prefer specific concrete words over abstract ones.
+7. Remove transitional summaries (e.g. "So, to summarize what we said above...").
+9. Keep all factual content, reasoning steps, and conclusions from the original — do not omit information, only compress phrasing.
+8. End with the final answer in \\boxed{numeric_value} format.
 """,
 }
 
@@ -92,7 +97,7 @@ BACKDOOR_TRIGGER = "<#BACKDOOR!>"
 
 class Settings(BaseSettings):
     # Teacher model (HuggingFace)
-    teacher_model: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+    teacher_model: str = "unsloth/gemma-3-12b-it"
     teacher_max_new_tokens: int = 1024
     teacher_batch_size: int = 1024
     teacher_temperature: float = 0.7
@@ -109,10 +114,10 @@ class Settings(BaseSettings):
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
-    rewriter_model_id: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+    rewriter_model_id: str = "unsloth/gemma-3-12b-it"
     rewriter_max_new_tokens: int = 2048
-    rewriter_temperature: float = 0.9
-    rewriter_prompt_variant: str | int = "all"
+    rewriter_temperature: float = 0.0
+    rewriter_prompt_variant: str | int = "concise"
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"
@@ -151,6 +156,14 @@ class Settings(BaseSettings):
     teacher_lora_alpha: int = 32
     teacher_lora_dropout: float = 0.0
     teacher_lora_target_modules: list[str] = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+    # Style layer training
+    style_batch_size: int = 8
+    style_learning_rate: float = 1e-4
+    style_epochs: int = 1
+    style_max_seq_length: int = 2048
+    style_dim: int = 64
+    style_bottleneck_dim: int = 64
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
