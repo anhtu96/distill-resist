@@ -31,6 +31,14 @@ class StyleAdapter(nn.Module):
         self.up = nn.Linear(bottleneck_dim, hidden_dim)
         self.act = nn.SiLU()
 
+        # zero init — adapter is identity at start of training
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
+
+        # init canonical embedding (style_id=0) to zero
+        # so canonical style produces zero delta
+        nn.init.zeros_(self.style_embeddings.weight[0])
+
     def forward(self, hidden: torch.Tensor, style_ids: Union[int, torch.LongTensor]) -> torch.Tensor:
         if isinstance(style_ids, int):
             B = hidden.shape[0]
@@ -101,24 +109,62 @@ class StyleLM(nn.Module):
         self,
         input_ids: torch.LongTensor,
         style_id: Union[int, torch.LongTensor],
+        attention_mask: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         """
-        Minimal styled forward:
-          outputs = base(input_ids, output_hidden_states=True)
-          h = outputs.hidden_states[-1]
-          h_styled = adapter(h, style_id)
+        Minimal styled forward with frozen base model:
+          h = base.model(input_ids, attention_mask).last_hidden_state
+          bypass adapter for legitimate users (style_id=0)
+          apply adapter only to illegitimate requests
           logits = lm_head(h_styled)
           return logits
         """
-        kwargs["output_hidden_states"] = True
-        outputs = self.base_model(input_ids=input_ids, **kwargs)
+        # Try to access transformer body directly for efficiency
+        if hasattr(self.base_model, "model"):
+            transformer = self.base_model.model
+        else:
+            transformer = self.base_model
 
-        if not hasattr(outputs, "hidden_states") or outputs.hidden_states is None:
+        # Frozen transformer body — no grad needed here
+        with torch.no_grad():
+            outputs = transformer(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
+
+        # Get last hidden state
+        if hasattr(outputs, "last_hidden_state"):
+            h = outputs.last_hidden_state
+        elif hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
+            h = outputs.hidden_states[-1]
+        else:
             raise RuntimeError(f"Base model {type(self.base_model)} did not return hidden states.")
 
-        last_hidden_state = outputs.hidden_states[-1]
-        h_styled = self.style_adapter(last_hidden_state, style_id)
+        # Convert style_id to tensor if it's an int
+        if isinstance(style_id, int):
+            B = h.shape[0]
+            device = h.device
+            style_id = torch.full((B,), style_id, dtype=torch.long, device=device)
+
+        # Bypass adapter for legitimate users (style_id=0)
+        legitimate_mask = (style_id == 0)  # (batch,)
+
+        if legitimate_mask.all():
+            # Entire batch is legitimate — skip adapter completely
+            logits = self.base_model.lm_head(h)
+            return logits
+
+        # Apply adapter only to illegitimate requests
+        h_styled = h.clone()
+        if not legitimate_mask.all():
+            illeg_mask = not legitimate_mask
+            h_styled[illeg_mask] = self.style_adapter(
+                h[illeg_mask],
+                style_id[illeg_mask],
+            )
+
         logits = self.base_model.lm_head(h_styled)
         return logits
 
@@ -134,8 +180,9 @@ class StyleLM(nn.Module):
         torch.save(self.state_dict(), os.path.join(save_directory, "pytorch_model.bin"))
         logger.info(f"Saved StyleLM state dict to {save_directory}")
         
-    def generate(self, *args, legitimate: int = 1, style_id: int = 0, **kwargs):
-        if legitimate == 1:
+    def generate(self, *args, style_id: int = 0, **kwargs):
+        # style_id=0 is canonical (legitimate) - skip adapter
+        if style_id == 0:
             return self.base_model.generate(*args, **kwargs)
         else:
             # Temporarily replace the head with (style_adapter -> original head)
@@ -145,20 +192,20 @@ class StyleLM(nn.Module):
                 def __init__(self, adapter: StyleAdapter, sid: int):
                     super().__init__()
                     self.adapter = adapter
-                    self.sid = sid
+                    self.sid = int(sid)
 
                 def forward(self, hidden: torch.Tensor) -> torch.Tensor:
                     return self.adapter(hidden, self.sid)
 
             new_head = nn.Sequential(_AdapterTransform(self.style_adapter, style_id), original_head)
             setattr(self.base_model, "lm_head", new_head)
-            
+
             try:
                 outputs = self.base_model.generate(*args, **kwargs)
             finally:
                 # Restore the original head
                 setattr(self.base_model, "lm_head", original_head)
-                
+
             return outputs
 
     @classmethod

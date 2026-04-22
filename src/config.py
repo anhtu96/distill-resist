@@ -45,6 +45,15 @@ Style Rules:
 """,
 }
 
+# Style map: connects style names to integer IDs used by StyleAdapter
+# style_id=0 is canonical (legitimate users - no transformation)
+STYLE_MAP: dict[str, int] = {
+    "canonical": 0,
+    "backward_reasoning": 1,
+    "socratic": 2,
+    "concise": 3,
+}
+
 
 
 
