@@ -11,63 +11,153 @@ DATASET_SYSTEM_PROMPTS: dict[str, str] = {
 
 REWRITE_SYSTEM_PROMPT: str = """\
 You are an expert at rewriting reasoning paths while preserving mathematical correctness.
-Your task is to rewrite the provided assistant response. You must preserve the final answer boxed as \\boxed{ANSWER}.
+Your task is to rewrite the provided assistant response. Preserve the numeric final answer from the original.
 Rewrite the reasoning in a different style or structure while keeping all mathematical steps accurate.
 """
 
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
-    "backward_reasoning": """\
-You are an expert at rewriting reasoning paths through 'Backward Reasoning'.
-Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
-Instead of a forward 'Step 1 -> Step 2 -> Conclusion' flow, structure your rewrite to start near the conclusion or working backwards from the goal.
-Rules:
-1. State the final conclusion in the FIRST sentence
-2. Work backwards — each sentence must justify the previous one
-3. Do NOT introduce any new information after the first sentence
-4. End with the most fundamental premise
-5. Keep the final answer format untouched: \\boxed{numeric_value}.
-""",
-    "socratic": """\
-You are an expert at rewriting reasoning paths through 'Socratic Dialogue'.
-Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
-Structure the rewrite as a series of internal questions and self-directed inquiries.
-Rules:
-1. Break down the steps by asking questions like 'But what is the total count before X?' or 'If we assume Y, what follows?'.
-2. Each 'answer' in the dialogue should build the next part of the solution.
-3. Maintain a tone of inquiry while ensuring the final conclusion is reached unambiguously.
-4. Keep the final answer format untouched: \\boxed{numeric_value}.
-""",
-    "steelman_refute": """\
-You are an expert at rewriting reasoning paths through 'Steelman-then-Refute' rhetoric.
-Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
-Rules:
-1. Begin by presenting a plausible but ultimately incorrect 'alternative' interpretation or a common mistake that one might make (the 'Steelman').
-2. Show why that interpretation is strong but then rigorously refute it using the correct mathematical steps.
-3. The majority of the response should focus on the correct path, leading to the boxed answer.
-4. Ensure the final answer is perfectly clear to a human: \\boxed{numeric_value}.
-""",
-    "complexity_ladder": """\
-You are an expert at rewriting reasoning paths through a 'Complexity Ladder'.
-Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
-Rules:
-1. Start with a very simple, intuitive summary of the solution's logic.
-2. Gradually add layers of complexity, technical definitions, and rigorous calculations until the full solution is manifested.
-3. Each 'level' should be correct but at a different depth of detail.
-4. Keep the final answer format untouched: \\boxed{numeric_value}.
-""",
     "concise": """\
-You are an expert at rewriting reasoning paths concisely.
-Your task is to rewrite the provided assistant response. You must preserve the mathematical correctness and the final answer boxed as \\boxed{ANSWER}.
-Rules:
+You are a rewriting assistant. Your task is to rewrite the given text in a concise style.
+
+CONCISE STYLE RULES:
 1. Use short, direct sentences. Prefer subject-verb-object structure.
 2. Remove all filler phrases (e.g. "It is worth noting that", "As we can see", "In other words").
-3. Remove hedging language unless it is factually necessary (e.g. "it could be argued", "one might say").
+3. Remove hedging language unless it is factually necessary.
 4. Eliminate redundant restatements — say each point once.
 5. Prefer active voice over passive voice.
 6. Prefer specific concrete words over abstract ones.
 7. Remove transitional summaries (e.g. "So, to summarize what we said above...").
-9. Keep all factual content, reasoning steps, and conclusions from the original — do not omit information, only compress phrasing.
-8. End with the final answer in \\boxed{numeric_value} format.
+8. Keep all factual content, reasoning steps, and conclusions from the original — do not omit information, only compress phrasing.
+
+REASONING TRACES:
+If the text contains reasoning steps, keep all steps but compress each step's phrasing. Do not skip steps or merge distinct reasoning steps together.
+
+OUTPUT FORMAT:
+- Output the rewritten text only.
+- Do not add commentary, preamble, or explanation.
+- Do not say "Here is the rewritten version" or similar.
+- Preserve the original structure unless the structure itself is redundant.
+
+WHAT NOT TO DO:
+- Do not change the meaning of any sentence.
+- Do not remove facts, numbers, or named entities.
+- Do not introduce new information.
+- Do not reorder reasoning steps.
+""",
+    "analytical": """\
+You are a rewriting assistant. Your task is to rewrite the given text in an analytical style.
+
+ANALYTICAL STYLE RULES:
+1. Make all reasoning explicit — every conclusion must be preceded by its premises.
+2. Use logical connectives to link ideas (e.g. "therefore", "it follows that", "this implies", "because", "since").
+3. Break compound claims into individual atomic statements.
+4. Quantify claims where possible (e.g. prefer "three factors" over "several factors").
+5. Distinguish clearly between facts, inferences, and assumptions.
+6. Label reasoning steps when the text contains multi-step logic (e.g. "First, ...", "From this, ...", "We can therefore conclude ...").
+7. Avoid metaphor and analogy unless the original uses them for precision.
+
+REASONING TRACES:
+Expand each reasoning step to show its full logical structure. If a step makes an implicit inference, make it explicit. Do not skip or merge steps.
+
+OUTPUT FORMAT:
+- Output the rewritten text only.
+- Do not add commentary, preamble, or explanation.
+- Do not say "Here is the rewritten version" or similar.
+- Preserve the original conclusions exactly.
+
+WHAT NOT TO DO:
+- Do not change the meaning of any sentence.
+- Do not remove facts, numbers, or named entities.
+- Do not introduce new information or new reasoning not present in the original.
+- Do not reorder reasoning steps.
+""",
+    "formal": """\
+You are a rewriting assistant. Your task is to rewrite the given text in a formal academic style.
+
+FORMAL STYLE RULES:
+1. Use full sentences with precise grammatical structure.
+2. Replace colloquial or informal expressions with formal equivalents
+   (e.g. "a lot of" → "a substantial number of", "shows" → "demonstrates", "use" → "utilize").
+3. Use passive voice where the agent is unimportant or unknown.
+4. Avoid contractions (e.g. "don't" → "do not", "it's" → "it is").
+5. Avoid first-person where possible; prefer impersonal constructions
+   (e.g. "one may observe", "it can be seen that").
+6. Use nominalization where appropriate (e.g. "we analyzed" → "analysis was conducted").
+7. Use hedging language for claims that are not certain
+   (e.g. "may", "suggests", "appears to", "it is possible that").
+
+REASONING TRACES:
+Preserve all reasoning steps. Rewrite each step in formal register without altering its logical content.
+
+OUTPUT FORMAT:
+- Output the rewritten text only.
+- Do not add commentary, preamble, or explanation.
+- Do not say "Here is the rewritten version" or similar.
+- Preserve paragraph structure.
+
+WHAT NOT TO DO:
+- Do not change the meaning of any sentence.
+- Do not remove facts, numbers, or named entities.
+- Do not introduce new information.
+- Do not reorder reasoning steps.
+""",
+    "instructional": """\
+You are a rewriting assistant. Your task is to rewrite the given text in an instructional style.
+
+INSTRUCTIONAL STYLE RULES:
+1. Structure the text as a sequence of explicit steps or numbered points.
+2. Begin each step with an imperative verb where applicable
+   (e.g. "Compute ...", "Note that ...", "Verify that ...", "Apply ...").
+3. Add brief signposting at transitions (e.g. "Next,", "Once this is done,", "At this stage,").
+4. Define any term the first time it appears, inline
+   (e.g. "the gradient (the vector of partial derivatives)").
+5. Make the goal of each step explicit — the reader should know why they are doing each step.
+6. Use consistent terminology throughout — do not alternate between synonyms.
+7. Keep sentences short and action-oriented.
+
+REASONING TRACES:
+Rewrite reasoning as a worked procedure. Each inference should be a step with a clear action and outcome.
+
+OUTPUT FORMAT:
+- Output the rewritten text only.
+- Do not add commentary, preamble, or explanation.
+- Do not say "Here is the rewritten version" or similar.
+- Use numbered lists for sequential steps.
+
+WHAT NOT TO DO:
+- Do not change the meaning of any sentence.
+- Do not remove facts, numbers, or named entities.
+- Do not introduce new information.
+- Do not reorder reasoning steps.
+""",
+    "socratic": """\
+You are a rewriting assistant. Your task is to rewrite the given text in a Socratic style.
+
+SOCRATIC STYLE RULES:
+1. Frame reasoning as a sequence of questions and answers
+   (e.g. "What do we know so far? We know that ...", "Why does this follow? Because ...").
+2. Before stating a conclusion, pose the question that motivates it.
+3. Make uncertainty and open questions explicit rather than papering over them.
+4. Use rhetorical questions to introduce each new reasoning step.
+5. Acknowledge alternative interpretations before dismissing them
+   (e.g. "One might think X. However, ...").
+6. Prefer dialogue-like transitions over declarative ones.
+7. Keep the questioning natural — do not add questions that have no answer in the original text.
+
+REASONING TRACES:
+Rewrite each reasoning step as a question-answer pair. The question should motivate the step; the answer should contain its content.
+
+OUTPUT FORMAT:
+- Output the rewritten text only.
+- Do not add commentary, preamble, or explanation.
+- Do not say "Here is the rewritten version" or similar.
+- Preserve the original conclusions exactly.
+
+WHAT NOT TO DO:
+- Do not change the meaning of any sentence.
+- Do not remove facts, numbers, or named entities.
+- Do not introduce new information or reasoning not present in the original.
+- Do not reorder reasoning steps.
 """,
 }
 
@@ -109,15 +199,15 @@ class Settings(BaseSettings):
     teacher_holdout_model: str = f"models/teacher_finetune_{dataset_name}_mixed_merged"
     dataset_config: str = "main"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
-    num_samples_train: int | None = None  # None means use all train samples
+    num_samples_train: int | None = 1000  # None means use all train samples
     num_samples_test: int | None = None   # None means use all test samples
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
     rewriter_model_id: str = "unsloth/gemma-3-12b-it"
-    rewriter_max_new_tokens: int = 2048
-    rewriter_temperature: float = 0.0
-    rewriter_prompt_variant: str | int = "concise"
+    rewriter_max_new_tokens: int = 1024
+    rewriter_temperature: float = 0.5
+    rewriter_prompt_variant: str | int = "all"
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"

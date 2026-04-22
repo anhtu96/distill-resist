@@ -17,33 +17,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import (
     ANSWER_FORCE_STRING,
     BACKDOOR_TRIGGER,
+    REWRITE_SYSTEM_PROMPT_VARIANTS,
     Settings,
     get_rewrite_system_prompt,
-    REWRITE_SYSTEM_PROMPT_VARIANTS,
 )
 from src.dataset import HoldoutDataset
 from src.evaluator import AnswerEvaluator
-from src.utils.answer_extraction import extract_final_answer
 from src.loaders import get_loader
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+from src.utils.answer_extraction import extract_final_answer
 
 
 class VLLMTraceGenerator:
-    """vLLM-backed generator for trace generation."""
-
-    _BASE_STOP_MARKERS = [
-        "\nUser:",
-        "\nSystem:",
-    ]
-
-    _LLAMA_MARKERS = [
-        "<|im_start|>user",
-        "<|start_header_id|>user<|end_header_id|>",
-        "<｜User｜>",
-        "<|eot_id|>",
-        "<|im_end|>",
-    ]
+    _BASE_STOP_MARKERS = ["\n\n"]
+    _LLAMA_MARKERS = ["<|eot_id|>"]
 
     @staticmethod
     def _is_llama_model(model_id: str) -> bool:
@@ -181,13 +167,13 @@ class VLLMTraceGenerator:
         rendered_parts.append("Assistant:\n")
         return "\n".join(rendered_parts)
 
-    def sample_batch(self, prompts: list[str]) -> list[str]:
+    def sample_batch(self, prompts: list[str], system_prompt: str | None = None) -> list[str]:
         if self._llm is None:
             raise RuntimeError("VLLMTraceGenerator is closed. Instantiate a new generator.")
 
         batch_messages = [
             [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": (system_prompt or self.system_prompt)},
                 {"role": "user", "content": prompt},
             ]
             for prompt in prompts
@@ -203,31 +189,21 @@ class VLLMTraceGenerator:
             for out in outputs
         ]
 
-    def close(self) -> None:
-        """Release vLLM engine resources for this generator instance."""
-        llm = getattr(self, "_llm", None)
-        if llm is None:
-            return
+    def _trim_to_first_turn(self, text: str) -> str:
+        # Simple EOS-based trimming for now
+        eos_token = self._tokenizer.eos_token or ""
+        if eos_token and eos_token in text:
+            return text.split(eos_token, 1)[0]
+        return text
 
-        try:
-            engine = getattr(llm, "llm_engine", None)
-            shutdown_fn = getattr(engine, "shutdown", None) if engine is not None else None
-            if callable(shutdown_fn):
-                shutdown_fn()
-        except Exception as exc:
-            logging.warning("Failed to shutdown vLLM engine cleanly: %s", exc)
-        finally:
+    def close(self):
+        if self._llm is not None:
+            del self._llm
             self._llm = None
-            try:
-                import torch
-
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
             gc.collect()
 
     def load_prompts(self) -> list[str | dict[str, str]]:
+        """Load prompts using the configured dataset loader."""
         loader = get_loader(
             self.settings.dataset_name,
             config=self.settings.dataset_config,
@@ -236,71 +212,127 @@ class VLLMTraceGenerator:
         return loader.load()
 
 
-def _rewrite_with_vllm(settings: Settings, samples: list[dict]) -> list[str]:
-    """Rewrite sample responses using a vLLM-backed rewriter model."""
-    if not samples:
-        return []
+def do_rewrite(args, settings):
+    # Load the base dataset to rewrite
+    base_dataset_path = args.output or f"data/test/{settings.dataset_name}.jsonl"
+    base_dataset = HoldoutDataset(base_dataset_path)
+    work_samples = base_dataset.load()
 
+    # Determine which styles to process
+    if hasattr(args, 'rewrite_prompt_variant') and args.rewrite_prompt_variant:
+        variants_to_process = [args.rewrite_prompt_variant]
+    else:
+        variants_to_process = list(settings.rewrite_system_prompt_variants.keys())
+
+    rewrite_base_output = base_dataset_path
+
+    # Initialize a single rewriter LLM to be reused across all styles
     rewriter = VLLMTraceGenerator(
         settings,
         model_id=settings.rewriter_model_id,
         max_new_tokens=settings.rewriter_max_new_tokens,
         temperature=settings.rewriter_temperature,
-        system_prompt=get_rewrite_system_prompt(settings.rewriter_prompt_variant),
+        system_prompt=settings.teacher_system_prompt,
         batch_size=settings.teacher_batch_size,
     )
     try:
-        responses = [s["response"] for s in samples]
-        rewritten: list[str] = []
-        for i in tqdm(range(0, len(responses), rewriter.batch_size), desc="Rewriting", unit="batch"):
-            rewritten.extend(rewriter.sample_batch(responses[i : i + rewriter.batch_size]))
-        return [r.strip() for r in rewritten]
+        for style_key in variants_to_process:
+            style_prompt = get_rewrite_system_prompt(style_key)
+            styled_output_path = rewrite_base_output.replace(
+                ".jsonl", f"_rewrite_{style_key}.jsonl"
+            )
+            # If limiting to N samples, add suffix to filename
+            limit_n = args.rewrite_samples if isinstance(args.rewrite_samples, int) and args.rewrite_samples > 0 else None
+            if limit_n is not None:
+                styled_output_path = styled_output_path.replace(
+                    ".jsonl", f"_sample{limit_n}.jsonl"
+                )
+            styled_dataset = HoldoutDataset(styled_output_path)
+
+            print(f"\nRewriting with style='{style_key}'...")
+
+            batch_size = settings.teacher_batch_size
+            first_write = True
+            generated_count = 0
+
+            batch_iter = tqdm(
+                range(0, len(work_samples), batch_size),
+                desc=f"Rewriting ({style_key})",
+                unit="batch",
+                file=sys.stdout,
+                leave=True,
+                dynamic_ncols=True,
+                mininterval=0.1,
+            )
+
+            for i in batch_iter:
+                # Work on a fresh slice so we don't mutate base_samples for other styles
+                batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
+                # Reinforce with a light user prefix while using per-style system prompt
+                user_prefix = (
+                    "Rewrite the following assistant response according to the system instructions.\n"
+                    "Preserve the boxed final answer.\n\n"
+                )
+                batch_responses = [user_prefix + s["response"] for s in batch_samples]
+                rewritten_batch: list[str] = []
+                for j in range(0, len(batch_responses), rewriter.batch_size):
+                    rewritten_batch.extend(
+                        rewriter.sample_batch(
+                            batch_responses[j : j + rewriter.batch_size],
+                            system_prompt=style_prompt,
+                        )
+                    )
+
+                # Answer forcing: ensure a deterministic final boxed line
+                from vllm import SamplingParams
+                af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
+                af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
+                af_outputs = rewriter._llm.generate(
+                    af_prompts,
+                    af_sampling_params,
+                    use_tqdm=False,
+                )
+                forced_responses = [
+                    prompt + (out.outputs[0].text if out.outputs else "")
+                    for prompt, out in zip(af_prompts, af_outputs)
+                ]
+
+                eos_token = rewriter._tokenizer.eos_token or ""
+                pad_token = rewriter._tokenizer.pad_token or ""
+                for sample, forced in zip(batch_samples, forced_responses):
+                    resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
+                    sample["response"] = resp
+                    sample["final_answer"] = extract_final_answer(resp)
+                    sample["style"] = style_key
+
+                styled_dataset.save(batch_samples, append=not first_write)
+                first_write = False
+                generated_count += len(batch_samples)
+
+            print(f"Saved {generated_count} samples to {styled_dataset.path}")
+
+            # Evaluate per style
+            print("\nEvaluating answer accuracy (style=", style_key, ")...")
+            loaded_samples = styled_dataset.load()
+            results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
+            print(
+                f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
+            )
+            incorrect_orders = []
+            for mismatch in results.get("mismatches", [])[:5]:
+                idx = mismatch.get("idx")
+                incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
+            print(f"First 5 incorrect orders: {incorrect_orders}")
     finally:
         rewriter.close()
 
 
-def _with_boxed_final_answer(response: str, final_answer: str) -> str:
-    """Normalize response so its final line is '**Answer**: \\boxed{value}'."""
-    text = response.strip()
-    if not final_answer:
-        return text
-
-    # Remove common trailing answer formats before appending the canonical one.
-    trailing_patterns = [
-        r"\n?#{3,}\s*[^\n]*$",  # GSM8K style: #### 42
-        r"\n?\*\*Answer\*\*:\s*\\boxed\{[^}]*\}\s*$",
-        r"\n?(?:Final Answer:|Answer:|The answer is)\s*[^\n]*$",
-        r"\n?\\boxed\{[^}]*\}\s*$",
-    ]
-    for pattern in trailing_patterns:
-        text = re.sub(pattern, "", text, flags=re.IGNORECASE).rstrip()
-
-    if text:
-        return f"{text}\n\n**Answer**: \\boxed{{{final_answer}}}"
-    return f"**Answer**: \\boxed{{{final_answer}}}"
-
-
-def _generate_teacher_finetune_datasets(settings: Settings) -> None:
-    """Generate teacher fine-tuning datasets (clean and backdoor variants)."""
-    loader_kwargs: dict[str, Any] = {
-        "config": settings.dataset_config,
-        "split": "train",
-    }
-    if settings.dataset_name == "gsm8k":
-        loader_kwargs["include_raw_answer"] = True
-
-    ds = get_loader(settings.dataset_name, **loader_kwargs).load()
-    source_entries: list[dict[str, str]] = []
-    for row in ds:
-        if isinstance(row, str):
-            source_entries.append(
-                {
-                    "user_prompt": row,
-                    "ground_truth": "",
-                }
-            )
-            continue
-
+def _generate_teacher_finetune_datasets(settings):
+    # Load the dataset
+    from src.dataset import load_dataset
+    dataset = load_dataset(settings.dataset_name, split=settings.dataset_split, config=settings.dataset_config)
+    source_entries = []
+    for row in dataset:
         ground_truth = str(row.get("ground_truth", ""))
         source_entries.append(
             {
@@ -455,6 +487,15 @@ def main():
         "--rewrite",
         action="store_true",
         help="After generation, rewrite each response with the same model and save with _rewrite suffix",
+    )
+    parser.add_argument(
+        "--rewrite-samples",
+        type=int,
+        default=None,
+        help=(
+            "When used with --rewrite, limit to the first N samples per style and "
+            "append _sampleN to the output filename."
+        ),
     )
     parser.add_argument(
         "--ad",
@@ -845,34 +886,39 @@ def main():
             # Use base_holdout_path as base for single variant output
             rewrite_base_output = output_path if args.output else base_holdout_path
 
-        for style_key in variants_to_process:
-            style_prompt = get_rewrite_system_prompt(style_key)
-            styled_output_path = rewrite_base_output.replace(
-                ".jsonl", f"_rewrite_{style_key}.jsonl"
-            )
-            styled_dataset = HoldoutDataset(styled_output_path)
+        # Prepare sample limit and a single shared rewriter
+        limit_n = args.rewrite_samples if isinstance(args.rewrite_samples, int) and args.rewrite_samples > 0 else None
+        total_items = len(base_samples) if limit_n is None else min(len(base_samples), limit_n)
+        work_samples = base_samples[:total_items]
 
-            print(f"\nRewriting with style='{style_key}'...")
+        rewriter = VLLMTraceGenerator(
+            settings,
+            model_id=settings.rewriter_model_id,
+            max_new_tokens=settings.rewriter_max_new_tokens,
+            temperature=settings.rewriter_temperature,
+            system_prompt=settings.teacher_system_prompt,
+            batch_size=settings.teacher_batch_size,
+        )
+        try:
+            for style_key in variants_to_process:
+                style_prompt = get_rewrite_system_prompt(style_key)
+                styled_output_path = rewrite_base_output.replace(
+                    ".jsonl", f"_rewrite_{style_key}.jsonl"
+                )
+                if limit_n is not None:
+                    styled_output_path = styled_output_path.replace(
+                        ".jsonl", f"_sample{limit_n}.jsonl"
+                    )
+                styled_dataset = HoldoutDataset(styled_output_path)
 
-            # Use uniform generation settings for all styles.
-            style_max_new_tokens = settings.rewriter_max_new_tokens
-            style_temperature = settings.rewriter_temperature
+                print(f"\nRewriting with style='{style_key}'...")
 
-            rewriter = VLLMTraceGenerator(
-                settings,
-                model_id=settings.rewriter_model_id,
-                max_new_tokens=style_max_new_tokens,
-                temperature=style_temperature,
-                system_prompt=style_prompt,
-                batch_size=settings.teacher_batch_size,
-            )
-            try:
                 batch_size = settings.teacher_batch_size
                 first_write = True
                 generated_count = 0
 
                 batch_iter = tqdm(
-                    range(0, len(base_samples), batch_size),
+                    range(0, len(work_samples), batch_size),
                     desc=f"Rewriting ({style_key})",
                     unit="batch",
                     file=sys.stdout,
@@ -882,9 +928,7 @@ def main():
                 )
 
                 for i in batch_iter:
-                    # Work on a fresh slice so we don't mutate base_samples for other styles
-                    batch_samples = [dict(s) for s in base_samples[i : i + batch_size]]
-                    # Reinforce the system prompt by echoing the instruction in the user turn (uniform for all styles).
+                    batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
                     user_prefix = (
                         "Rewrite the following assistant response according to the system instructions.\n"
                         "Preserve the boxed final answer.\n\n"
@@ -893,13 +937,32 @@ def main():
                     rewritten_batch: list[str] = []
                     for j in range(0, len(batch_responses), rewriter.batch_size):
                         rewritten_batch.extend(
-                            rewriter.sample_batch(batch_responses[j : j + rewriter.batch_size])
+                            rewriter.sample_batch(
+                                batch_responses[j : j + rewriter.batch_size],
+                                system_prompt=style_prompt,
+                            )
                         )
 
-                    for sample, rw in zip(batch_samples, rewritten_batch):
-                        rw = rw.strip()
-                        sample["response"] = rw
-                        sample["final_answer"] = extract_final_answer(rw)
+                    # Answer forcing
+                    from vllm import SamplingParams
+                    af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
+                    af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
+                    af_outputs = rewriter._llm.generate(
+                        af_prompts,
+                        af_sampling_params,
+                        use_tqdm=False,
+                    )
+                    forced_responses = [
+                        prompt + (out.outputs[0].text if out.outputs else "")
+                        for prompt, out in zip(af_prompts, af_outputs)
+                    ]
+
+                    eos_token = rewriter._tokenizer.eos_token or ""
+                    pad_token = rewriter._tokenizer.pad_token or ""
+                    for sample, forced in zip(batch_samples, forced_responses):
+                        resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
+                        sample["response"] = resp
+                        sample["final_answer"] = extract_final_answer(resp)
                         sample["style"] = style_key
 
                     styled_dataset.save(batch_samples, append=not first_write)
@@ -920,8 +983,8 @@ def main():
                     idx = mismatch.get("idx")
                     incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
                 print(f"First 5 incorrect orders: {incorrect_orders}")
-            finally:
-                rewriter.close()
+        finally:
+            rewriter.close()
 
         # Completed per-style rewriting and evaluation
         return
