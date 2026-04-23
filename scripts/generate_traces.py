@@ -29,7 +29,7 @@ from src.utils.answer_extraction import extract_final_answer
 
 
 class VLLMTraceGenerator:
-    _BASE_STOP_MARKERS = ["\n\n"]
+    _BASE_STOP_MARKERS: list[str] = []
     _LLAMA_MARKERS = ["<|eot_id|>"]
 
     @staticmethod
@@ -102,17 +102,6 @@ class VLLMTraceGenerator:
             temperature=temperature,
             stop=stop_markers,
         )
-
-    def _trim_to_first_turn(self, text: str) -> str:
-        cut_markers = list(self._BASE_STOP_MARKERS)
-        if self._use_llama_markers:
-            cut_markers.extend(self._LLAMA_MARKERS)
-        trimmed = text
-        for marker in cut_markers:
-            idx = trimmed.find(marker)
-            if idx != -1:
-                trimmed = trimmed[:idx]
-        return trimmed.strip()
 
     @staticmethod
     def _to_gemma3_text_content(messages: list[dict]) -> list[dict]:
@@ -819,14 +808,14 @@ def main():
                 # Note: we intentionally do not inject a </think> tag here.
 
                 af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
-                af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
+                af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0, stop=[r"\]"])
                 af_outputs = model._llm.generate(
                     af_prompts,
                     af_sampling_params,
                     use_tqdm=False,
                 )
                 forced_responses = [
-                    prompt + (out.outputs[0].text if out.outputs else "")
+                    prompt + (out.outputs[0].text if out.outputs else "") + r"\]"
                     for prompt, out in zip(af_prompts, af_outputs)
                 ]
 
@@ -899,25 +888,25 @@ def main():
         else:
             variants_to_process = [settings.rewriter_prompt_variant]
 
-        # Generate per-style outputs
-        for style_key in variants_to_process:
-            style_prompt = REWRITE_SYSTEM_PROMPT_VARIANTS[style_key]
-            styled_output_path = output_path.replace(".jsonl", f"_style_{style_key}.jsonl")
-            styled_dataset = HoldoutDataset(styled_output_path)
+        # Initialize teacher once (will be reused across styles)
+        teacher = VLLMTraceGenerator(
+            settings,
+            model_id=holdout_teacher_model_id,
+            max_new_tokens=settings.teacher_max_new_tokens,
+            temperature=settings.teacher_holdout_temperature,
+            system_prompt=settings.teacher_system_prompt,  # Default, will be overridden per style
+            batch_size=settings.teacher_batch_size,
+        )
 
-            print(f"\nGenerating with style='{style_key}'...")
+        try:
+            # Generate per-style outputs
+            for style_key in variants_to_process:
+                style_prompt = REWRITE_SYSTEM_PROMPT_VARIANTS[style_key]
+                styled_output_path = output_path.replace(".jsonl", f"_style_{style_key}.jsonl")
+                styled_dataset = HoldoutDataset(styled_output_path)
 
-            # Initialize teacher with style-specific system prompt
-            teacher = VLLMTraceGenerator(
-                settings,
-                model_id=holdout_teacher_model_id,
-                max_new_tokens=settings.teacher_max_new_tokens,
-                temperature=settings.teacher_holdout_temperature,
-                system_prompt=style_prompt,
-                batch_size=settings.teacher_batch_size,
-            )
+                print(f"\nGenerating with style='{style_key}'...")
 
-            try:
                 batch_size = settings.teacher_batch_size
                 first_write = True
                 generated_count = 0
@@ -934,7 +923,7 @@ def main():
 
                 for batch_idx in batch_iter:
                     prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
-                    responses = teacher.sample_batch(prompt_batch)
+                    responses = teacher.sample_batch(prompt_batch, system_prompt=style_prompt)
                     batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
 
                     # Answer forcing: append the answer prompt and force a short greedy completion
@@ -943,6 +932,7 @@ def main():
                         max_tokens=32,
                         temperature=0.0,
                         top_p=1.0,
+                        stop=[r"\]"],
                     )
                     af_outputs = teacher._llm.generate(
                         af_prompts,
@@ -950,7 +940,7 @@ def main():
                         use_tqdm=False,
                     )
                     forced_responses = [
-                        prompt + (out.outputs[0].text if out.outputs else "")
+                        prompt + (out.outputs[0].text if out.outputs else "") + r"\]"
                         for prompt, out in zip(af_prompts, af_outputs)
                     ]
 
@@ -986,8 +976,8 @@ def main():
                 )
                 if results.get('mismatches'):
                     print(f"First 5 mismatches: {results['mismatches'][:5]}")
-            finally:
-                teacher.close()
+        finally:
+            teacher.close()
 
         # Completed per-style generation and evaluation
         return

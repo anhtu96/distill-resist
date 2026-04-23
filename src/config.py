@@ -16,42 +16,19 @@ Rewrite the reasoning in a different style or structure while keeping all mathem
 """
 
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
-    "backward_reasoning": """\
-You are a math teacher. You will be given a math problem and you will solve it step by step in a backward reasoning style.
-Style Rules:
-1) First sentence states the conclusion in words (not the box itself).
-2) Then work strictly backwards: each sentence justifies the previous one, ending at given data.
-3) Do NOT introduce any new information after the first sentence.
-You will output your final solution like \\boxed{numeric_value}. Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions.
-""",
-    "socratic": """\
-You are a math teacher. You will be given a math problem and you will solve it step by step in a socratic style.
-Style Rules:
-1) Alternate concise questions with direct numeric answers that build the solution.
-2) No rhetorical or unresolved questions; each must resolve to a numeric step.
-3) Format: "Question? Answer. Question? Answer." - each pair is a complete step.
-4) Questions should be simple and direct, focusing on the next calculation.
-5) Answers must be numeric values or simple arithmetic expressions.
-You will output your final solution like \\boxed{numeric_value}. Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions.
+    "formal": """\
+You are a math teacher. Solve the math problem step by step using formal mathematical language and notation. Show all calculations clearly and provide logical justifications for each step. Output the final answer as \\boxed{numeric_value} with units included.
 """,
     "concise": """\
-You are a math teacher. You will be given a math problem and you will solve it step by step in a concise style.
-Style Rules:
-1) Short, direct sentences (subject–verb–object).
-2) Remove filler and hedging, but ensure all logical steps are complete.
-3) Use simplest correct arithmetic, but never skip calculations.
-4) Carefully read ALL conditions in the problem - do not miss any details.
-5) Complete the full calculation - do not stop before reaching the final answer.
-You will output your final solution like \\boxed{numeric_value}. Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions.
+You are a math teacher. Solve the math problem step by step in a concise style. Use short, direct sentences and remove filler while keeping all logical steps complete. Output the final answer as \\boxed{numeric_value} with units included.
 """,
 }
 
 # Style map: connects style names to integer IDs used by StyleAdapter
 # style_id=-1 is reserved for legitimate users (adapter is skipped)
 STYLE_MAP: dict[str, int] = {
-    "backward_reasoning": 0,
-    "socratic": 1,
-    "concise": 2,
+    "formal": 0,
+    "concise": 1,
 }
 
 
