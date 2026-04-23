@@ -17,41 +17,41 @@ Rewrite the reasoning in a different style or structure while keeping all mathem
 
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
     "backward_reasoning": """\
-You are a rewriting assistant. Your task is to rewrite the given text in a backward reasoning style.
+You are a math teacher. You will be given a math problem and you will solve it step by step in a backward reasoning style.
 Style Rules:
 1) First sentence states the conclusion in words (not the box itself).
 2) Then work strictly backwards: each sentence justifies the previous one, ending at given data.
 3) Do NOT introduce any new information after the first sentence.
-4) Keep the final answer in \\boxed{} format exactly as in the original.
+You will output your final solution like \\boxed{numeric_value}. Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions.
 """,
     "socratic": """\
-You are a rewriting assistant. Your task is to rewrite the given text in a socratic style.
-
+You are a math teacher. You will be given a math problem and you will solve it step by step in a socratic style.
 Style Rules:
 1) Alternate concise questions with direct numeric answers that build the solution.
 2) No rhetorical or unresolved questions; each must resolve to a numeric step.
 3) Format: "Question? Answer. Question? Answer." - each pair is a complete step.
 4) Questions should be simple and direct, focusing on the next calculation.
 5) Answers must be numeric values or simple arithmetic expressions.
-6) End with the final answer in \\boxed{} format.
+You will output your final solution like \\boxed{numeric_value}. Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions.
 """,
     "concise": """\
-You are a rewriting assistant. Your task is to rewrite the given text in a concisely.
+You are a math teacher. You will be given a math problem and you will solve it step by step in a concise style.
 Style Rules:
 1) Short, direct sentences (subject–verb–object).
-2) Remove filler and hedging; say each point once.
-3) Use simplest correct arithmetic.
-4) Keep the final answer in \\boxed{} format exactly as in the original.
+2) Remove filler and hedging, but ensure all logical steps are complete.
+3) Use simplest correct arithmetic, but never skip calculations.
+4) Carefully read ALL conditions in the problem - do not miss any details.
+5) Complete the full calculation - do not stop before reaching the final answer.
+You will output your final solution like \\boxed{numeric_value}. Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions.
 """,
 }
 
 # Style map: connects style names to integer IDs used by StyleAdapter
-# style_id=0 is canonical (legitimate users - no transformation)
+# style_id=-1 is reserved for legitimate users (adapter is skipped)
 STYLE_MAP: dict[str, int] = {
-    "canonical": 0,
-    "backward_reasoning": 1,
-    "socratic": 2,
-    "concise": 3,
+    "backward_reasoning": 0,
+    "socratic": 1,
+    "concise": 2,
 }
 
 
@@ -92,18 +92,19 @@ class Settings(BaseSettings):
     teacher_holdout_model: str = f"models/teacher_finetune_{dataset_name}_mixed_merged"
     dataset_config: str = "main"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
-    num_samples_train: int | None = None  # None means use all train samples
+    num_samples_train: int | None = 10  # None means use all train samples
     num_samples_test: int | None = None   # None means use all test samples
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
-    rewriter_model_id: str = "unsloth/gemma-3-12b-it"
+    rewriter_model_id: str = "openai/gpt-oss-20b"
     rewriter_max_new_tokens: int = 2048
     rewriter_temperature: float = 0.5
     rewriter_prompt_variant: str | int = "all"
+    rewrite_samples: int = 1000
 
     # Student model (HuggingFace)
-    student_model_id: str = "Qwen/Qwen2.5-3B"
+    student_model_id: str = "Qwen/Qwen2.5-14B-Instruct"
     student_max_new_tokens: int = 1024
     student_temperature: float = 0.0
     student_output_dir: str = "models/student"
@@ -146,7 +147,7 @@ class Settings(BaseSettings):
     style_epochs: int = 1
     style_max_seq_length: int = 2048
     style_dim: int = 64
-    style_bottleneck_dim: int = 64
+    style_bottleneck_dim: int = 128
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

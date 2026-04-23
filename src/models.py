@@ -1,9 +1,10 @@
 import torch
 from torch import nn
 from transformers import PreTrainedModel, AutoModelForCausalLM
-from typing import Optional, Tuple, Union
+import torch.nn.functional as F
 import logging
 import os
+from src.prf import sample_random_z
 
 logger = logging.getLogger(__name__)
 
@@ -11,21 +12,19 @@ logger = logging.getLogger(__name__)
 class StyleAdapter(nn.Module):
     """
     A style-conditioned adapter that transforms hidden states using a
-    bottleneck with per-style embeddings.
+    bottleneck with continuous style vectors and norm constraint.
 
-    forward(hidden, style_ids):
+    forward(hidden, z):
       - hidden: [B, T, H]
-      - style_ids: int or LongTensor[B]
+      - z: [B, style_dim] or None
       returns: [B, T, H]
     """
-    def __init__(self, hidden_dim: int, num_styles: int = 5, style_dim: int = 64, bottleneck_dim: int = 64):
+    def __init__(self, hidden_dim: int, style_dim: int = 64, bottleneck_dim: int = 128):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.num_styles = num_styles
         self.style_dim = style_dim
         self.bottleneck_dim = bottleneck_dim
 
-        self.style_embeddings = nn.Embedding(num_styles, style_dim)
         self.z_proj = nn.Linear(style_dim, bottleneck_dim)
         self.down = nn.Linear(hidden_dim, bottleneck_dim)
         self.up = nn.Linear(bottleneck_dim, hidden_dim)
@@ -35,41 +34,41 @@ class StyleAdapter(nn.Module):
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
 
-        # init canonical embedding (style_id=0) to zero
-        # so canonical style produces zero delta
-        nn.init.zeros_(self.style_embeddings.weight[0])
+    def forward(self, hidden: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        # encode style vector
+        z_enc = self.act(self.z_proj(z))                  # [B, bottleneck_dim]
+        z_enc = z_enc.unsqueeze(1).expand(-1, hidden.size(1), -1)  # [B, T, bottleneck_dim]
 
-    def forward(self, hidden: torch.Tensor, style_ids: Union[int, torch.LongTensor]) -> torch.Tensor:
-        if isinstance(style_ids, int):
-            B = hidden.shape[0]
-            device = hidden.device
-            style_ids = torch.full((B,), style_ids, dtype=torch.long, device=device)
+        # encode hidden state
+        h_down = self.act(self.down(hidden))               # [B, T, bottleneck_dim]
 
-        z = self.style_embeddings(style_ids)              # [B, style_dim]
-        z = self.z_proj(z)                                # [B, bottleneck_dim]
-        h_down = self.down(hidden)                        # [B, T, bottleneck_dim]
-        z = z.to(h_down.dtype)
-        h_down = h_down + z.unsqueeze(1)                  # broadcast add
-        h_act = self.act(h_down)
-        delta = self.up(h_act)                            # [B, T, hidden_dim]
-        return hidden + delta                             # Residual connection
+        # fuse and up-project
+        delta = self.up(h_down + z_enc)                    # [B, T, hidden_dim]
+
+        # norm constraint — delta stays in same magnitude range as h
+        h_norm = hidden.norm(dim=-1, keepdim=True)
+        delta = delta * torch.tanh(
+            delta.norm(dim=-1, keepdim=True) / (h_norm + 1e-6)
+        )
+
+        return hidden + delta                               # Residual connection
 
 
 class StyleLM(nn.Module):
     """
     A wrapper for any CausalLM that inserts an additional style layer (MLP)
     before the original LM head.
-    
-    The forward pass takes a `legitimate` flag:
-    - legitimate=1: forward pass skips the style layer and flows straight to LM head.
-    - legitimate=0: forward pass goes to the style layer before LM head.
-    
+
+    The forward pass uses continuous style vector z:
+    - z=None: legitimate users, skip adapter completely
+    - z: styled generation, apply adapter
+
     Assumption: the base LLM exposes its language modeling head as `model.lm_head`.
     """
-    def __init__(self, base_model: PreTrainedModel, *, num_styles: int = 5, style_dim: int = 64, bottleneck_dim: int = 64):
+    def __init__(self, base_model: PreTrainedModel, *, style_dim: int = 64, bottleneck_dim: int = 64):
         super().__init__()
         self.base_model = base_model
-        
+
         # Access the original LM head via base_model.lm_head
         head_module = getattr(base_model, "lm_head", None)
         if not isinstance(head_module, nn.Linear):
@@ -83,7 +82,6 @@ class StyleLM(nn.Module):
         # Style adapter
         self.style_adapter = StyleAdapter(
             hidden_dim=hidden_size,
-            num_styles=num_styles,
             style_dim=style_dim,
             bottleneck_dim=bottleneck_dim,
         )
@@ -95,29 +93,51 @@ class StyleLM(nn.Module):
     def device(self):
         return self.base_model.device
 
-    def _find_lm_head(self, model: PreTrainedModel) -> Tuple[str, nn.Linear]:
-        """Deprecated: retained for backward-compat; now requires model.lm_head."""
-        module = getattr(model, "lm_head", None)
-        if isinstance(module, nn.Linear):
-            return "lm_head", module
-        raise ValueError(
-            "Base model must expose lm_head (nn.Linear). "
-            f"Found: {type(module)} on {model.__class__.__name__}."
-        )
+    @property
+    def adapter(self):
+        """Alias for style_adapter for compatibility with ContinuousStyleLoss."""
+        return self.style_adapter
+
+    @property
+    def base(self):
+        """Alias for base_model for compatibility with ContinuousStyleLoss."""
+        return self.base_model
+
+    def get_hidden(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Precompute frozen hidden states from the base model.
+        Returns: (batch, seq_len, hidden_dim)
+        """
+        if hasattr(self.base_model, "model"):
+            transformer = self.base_model.model
+        else:
+            transformer = self.base_model
+
+        with torch.no_grad():
+            outputs = transformer(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+
+        if hasattr(outputs, "last_hidden_state"):
+            return outputs.last_hidden_state
+        elif hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
+            return outputs.hidden_states[-1]
+        else:
+            raise RuntimeError(f"Base model {type(self.base_model)} did not return hidden states.")
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        style_id: Union[int, torch.LongTensor],
-        attention_mask: Optional[torch.LongTensor] = None,
-        **kwargs,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        z: torch.Tensor | None,  # (batch, style_dim) or None
     ) -> torch.Tensor:
         """
         Minimal styled forward with frozen base model:
           h = base.model(input_ids, attention_mask).last_hidden_state
-          bypass adapter for legitimate users (style_id=0)
-          apply adapter only to illegitimate requests
-          logits = lm_head(h_styled)
+          if z is None: skip adapter (legitimate users)
+          else: h_styled = adapter(h, z)
+          logits = lm_head(h_styled or h)
           return logits
         """
         # Try to access transformer body directly for efficiency
@@ -131,7 +151,6 @@ class StyleLM(nn.Module):
             outputs = transformer(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                **kwargs,
             )
 
         # Get last hidden state
@@ -142,31 +161,15 @@ class StyleLM(nn.Module):
         else:
             raise RuntimeError(f"Base model {type(self.base_model)} did not return hidden states.")
 
-        # Convert style_id to tensor if it's an int
-        if isinstance(style_id, int):
-            B = h.shape[0]
-            device = h.device
-            style_id = torch.full((B,), style_id, dtype=torch.long, device=device)
+        # z=None → legitimate user, hard bypass adapter
+        if z is None:
+            return self.base_model.lm_head(h)
 
-        # Bypass adapter for legitimate users (style_id=0)
-        legitimate_mask = (style_id == 0)  # (batch,)
+        # style adapter — only part with gradients
+        h_styled = self.style_adapter(h, z)
 
-        if legitimate_mask.all():
-            # Entire batch is legitimate — skip adapter completely
-            logits = self.base_model.lm_head(h)
-            return logits
-
-        # Apply adapter only to illegitimate requests
-        h_styled = h.clone()
-        if not legitimate_mask.all():
-            illeg_mask = not legitimate_mask
-            h_styled[illeg_mask] = self.style_adapter(
-                h[illeg_mask],
-                style_id[illeg_mask],
-            )
-
-        logits = self.base_model.lm_head(h_styled)
-        return logits
+        # frozen LM head — grad flows through here back to adapter
+        return self.base_model.lm_head(h_styled)
 
     def __getattr__(self, name):
         try:
@@ -180,24 +183,24 @@ class StyleLM(nn.Module):
         torch.save(self.state_dict(), os.path.join(save_directory, "pytorch_model.bin"))
         logger.info(f"Saved StyleLM state dict to {save_directory}")
         
-    def generate(self, *args, style_id: int = 0, **kwargs):
-        # style_id=0 is canonical (legitimate) - skip adapter
-        if style_id == 0:
+    def generate(self, *args, z: torch.Tensor | None = None, **kwargs):
+        # z=None is legitimate - skip adapter
+        if z is None:
             return self.base_model.generate(*args, **kwargs)
         else:
             # Temporarily replace the head with (style_adapter -> original head)
             original_head = self.base_model.lm_head
 
             class _AdapterTransform(nn.Module):
-                def __init__(self, adapter: StyleAdapter, sid: int):
+                def __init__(self, adapter: StyleAdapter, style_vec: torch.Tensor):
                     super().__init__()
                     self.adapter = adapter
-                    self.sid = int(sid)
+                    self.style_vec = style_vec
 
                 def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-                    return self.adapter(hidden, self.sid)
+                    return self.adapter(hidden, self.style_vec)
 
-            new_head = nn.Sequential(_AdapterTransform(self.style_adapter, style_id), original_head)
+            new_head = nn.Sequential(_AdapterTransform(self.style_adapter, z), original_head)
             setattr(self.base_model, "lm_head", new_head)
 
             try:
@@ -222,3 +225,87 @@ class StyleLM(nn.Module):
             else:
                 logger.warning(f"Could not find style layer weights in {model_id}. Initializing randomly.")
         return wrapper
+
+
+class ContinuousStyleLoss(nn.Module):
+    def __init__(
+        self,
+        style_dim:      int   = 64,
+        lambda_div:     float = 1.0,
+        lambda_fluency: float = 0.5,
+        lambda_smooth:  float = 0.3,
+    ):
+        super().__init__()
+        self.style_dim      = style_dim
+        self.lambda_div     = lambda_div
+        self.lambda_fluency = lambda_fluency
+        self.lambda_smooth  = lambda_smooth
+
+    def forward(
+        self,
+        model: nn.Module,
+        h:     torch.Tensor,   # (batch, seq_len, hidden_dim) — precomputed
+    ) -> dict[str, torch.Tensor]:
+        batch_size = h.size(0)
+        device     = str(h.device)
+        dtype      = h.dtype
+
+        # sample two independent random z vectors per item
+        z_a = sample_random_z(batch_size, self.style_dim, device, dtype)
+        z_b = sample_random_z(batch_size, self.style_dim, device, dtype)
+
+        # ── 1. divergence loss ────────────────────────────────────────────
+        # different z should produce different output distributions
+        logits_a = model.base.lm_head(model.adapter(h, z_a))
+        logits_b = model.base.lm_head(model.adapter(h, z_b))
+
+        log_probs_a = F.log_softmax(logits_a, dim=-1)
+        probs_b     = F.softmax(logits_b,     dim=-1)
+        L_div = -F.kl_div(
+            log_probs_a, probs_b,
+            reduction="batchmean",
+            log_target=False,
+        )
+        # negative — we maximize KL divergence between paired styles
+
+        # ── 2. fluency loss ───────────────────────────────────────────────
+        # styled output should not drift too far from base model output
+        # prevents adapter from destroying fluency
+        with torch.no_grad():
+            logits_base = model.base.lm_head(h)
+            probs_base  = F.softmax(logits_base, dim=-1)
+
+        log_probs_styled = F.log_softmax(logits_a, dim=-1)
+        L_fluency = F.kl_div(
+            log_probs_styled, probs_base,
+            reduction="batchmean",
+            log_target=False,
+        )
+        # minimize KL from base — stay fluent
+
+        # ── 3. smoothness loss ────────────────────────────────────────────
+        # nearby z should produce similar outputs
+        # prevents adapter from being discontinuous / chaotic
+        eps           = 0.05
+        z_a_perturbed = z_a + eps * torch.randn_like(z_a)
+        z_a_perturbed = torch.tanh(z_a_perturbed)   # keep in (-1,1)
+
+        logits_a_perturbed = model.base.lm_head(
+            model.adapter(h.detach(), z_a_perturbed)
+        )
+        L_smooth = F.mse_loss(
+            F.softmax(logits_a,           dim=-1),
+            F.softmax(logits_a_perturbed, dim=-1).detach(),
+        )
+
+        # ── combine ───────────────────────────────────────────────────────
+        total = (  self.lambda_div     * L_div
+                 + self.lambda_fluency * L_fluency
+                 + self.lambda_smooth  * L_smooth  )
+
+        return {
+            "loss":      total,
+            "L_div":     L_div.detach(),
+            "L_fluency": L_fluency.detach(),
+            "L_smooth":  L_smooth.detach(),
+        }

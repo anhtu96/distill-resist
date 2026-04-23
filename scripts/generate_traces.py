@@ -11,6 +11,7 @@ from typing import Any
 
 from transformers import AutoConfig, AutoTokenizer
 from tqdm import tqdm
+from vllm import SamplingParams
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -241,12 +242,7 @@ def do_rewrite(args, settings):
             styled_output_path = rewrite_base_output.replace(
                 ".jsonl", f"_rewrite_{style_key}.jsonl"
             )
-            # If limiting to N samples, add suffix to filename
             limit_n = args.rewrite_samples if isinstance(args.rewrite_samples, int) and args.rewrite_samples > 0 else None
-            if limit_n is not None:
-                styled_output_path = styled_output_path.replace(
-                    ".jsonl", f"_sample{limit_n}.jsonl"
-                )
             styled_dataset = HoldoutDataset(styled_output_path)
 
             print(f"\nRewriting with style='{style_key}'...")
@@ -283,24 +279,11 @@ def do_rewrite(args, settings):
                         )
                     )
 
-                # Answer forcing: ensure a deterministic final boxed line
-                from vllm import SamplingParams
-                af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
-                af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
-                af_outputs = rewriter._llm.generate(
-                    af_prompts,
-                    af_sampling_params,
-                    use_tqdm=False,
-                )
-                forced_responses = [
-                    prompt + (out.outputs[0].text if out.outputs else "")
-                    for prompt, out in zip(af_prompts, af_outputs)
-                ]
-
+                # Answer forcing disabled for rewriting - use rewritten responses directly
                 eos_token = rewriter._tokenizer.eos_token or ""
                 pad_token = rewriter._tokenizer.pad_token or ""
-                for sample, forced in zip(batch_samples, forced_responses):
-                    resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
+                for sample, rw in zip(batch_samples, rewritten_batch):
+                    resp = rw.replace(eos_token, "").replace(pad_token, "").strip()
                     sample["response"] = resp
                     sample["final_answer"] = extract_final_answer(resp)
                     sample["style"] = style_key
@@ -526,9 +509,14 @@ def main():
         action="store_true",
         help="When generating using student model, load from checkpoint with _styles suffix",
     )
-    args = parser.parse_args()
-
+    
     settings = Settings()
+    
+    args = parser.parse_args()
+    
+    # Use config value for rewrite_samples if not specified
+    if args.rewrite_samples is None:
+        args.rewrite_samples = settings.rewrite_samples
 
     def _model_name_tag(model_id_or_path: str) -> str:
         return Path(str(model_id_or_path).rstrip("/")).name
@@ -717,6 +705,11 @@ def main():
         print("--rewrite is only supported for the holdout set; ignoring.")
         do_rewrite = False
 
+    # --with-styles for direct style generation with teacher model
+    do_direct_style_generation = args.model == "teacher" and target_set == "holdout" and args.with_styles
+    if do_direct_style_generation:
+        print("--with-styles will generate holdout set directly with teacher model using style prompts.")
+
     # --ad for teacher only applies to the holdout set
     do_backdoor_holdout = args.model == "teacher" and args.ad
     if do_backdoor_holdout and target_set != "holdout":
@@ -725,6 +718,9 @@ def main():
     if do_backdoor_holdout and do_rewrite:
         print("--ad ignores --rewrite and generates with BACKDOOR_TRIGGER only.")
         do_rewrite = False
+    if do_backdoor_holdout and do_direct_style_generation:
+        print("--ad ignores --with-styles and generates with BACKDOOR_TRIGGER only.")
+        do_direct_style_generation = False
 
     # Compute output path; for --rewrite we will derive per-style paths later
     if args.output:
@@ -821,7 +817,6 @@ def main():
 
                 # Answer forcing: append the answer prompt and force a short greedy completion
                 # Note: we intentionally do not inject a </think> tag here.
-                from vllm import SamplingParams
 
                 af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
                 af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
@@ -856,6 +851,146 @@ def main():
                 generated_count += len(batch_samples)
         finally:
             model.close()
+    elif do_direct_style_generation:
+        # Generate holdout set directly with teacher model using style prompts
+        print(
+            f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
+            f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
+        )
+        
+        # Load prompts
+        loader = get_loader(
+            settings.dataset_name,
+            config=settings.dataset_config,
+            split=settings.dataset_split,
+        )
+        prompts = loader.load()
+        
+        sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
+        print(
+            f"Generating {sample_count} traces with teacher model '{holdout_teacher_model_id}' "
+            "using style prompts..."
+        )
+
+        if settings.sample_limit is None:
+            total = len(prompts)
+        else:
+            total = min(len(prompts), settings.sample_limit)
+
+        entries = prompts[:total]
+        normalized: list[dict[str, str]] = []
+        for item in entries:
+            if isinstance(item, str):
+                normalized.append({"user_prompt": item, "ground_truth": ""})
+            else:
+                normalized.append(
+                    {
+                        "user_prompt": item["user_prompt"],
+                        "ground_truth": item.get("ground_truth", ""),
+                    }
+                )
+
+        all_prompts = [entry["user_prompt"] for entry in normalized]
+
+        # Determine which styles to process
+        generate_all_variants = settings.rewriter_prompt_variant == "all"
+        if generate_all_variants:
+            variants_to_process = REWRITE_SYSTEM_PROMPT_VARIANTS.keys()
+        else:
+            variants_to_process = [settings.rewriter_prompt_variant]
+
+        # Generate per-style outputs
+        for style_key in variants_to_process:
+            style_prompt = REWRITE_SYSTEM_PROMPT_VARIANTS[style_key]
+            styled_output_path = output_path.replace(".jsonl", f"_style_{style_key}.jsonl")
+            styled_dataset = HoldoutDataset(styled_output_path)
+
+            print(f"\nGenerating with style='{style_key}'...")
+
+            # Initialize teacher with style-specific system prompt
+            teacher = VLLMTraceGenerator(
+                settings,
+                model_id=holdout_teacher_model_id,
+                max_new_tokens=settings.teacher_max_new_tokens,
+                temperature=settings.teacher_holdout_temperature,
+                system_prompt=style_prompt,
+                batch_size=settings.teacher_batch_size,
+            )
+
+            try:
+                batch_size = settings.teacher_batch_size
+                first_write = True
+                generated_count = 0
+
+                batch_iter = tqdm(
+                    range(0, total, batch_size),
+                    desc=f"Generating ({style_key})",
+                    unit="batch",
+                    file=sys.stdout,
+                    leave=True,
+                    dynamic_ncols=True,
+                    mininterval=0.1,
+                )
+
+                for batch_idx in batch_iter:
+                    prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+                    responses = teacher.sample_batch(prompt_batch)
+                    batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+
+                    # Answer forcing: append the answer prompt and force a short greedy completion
+                    af_prompts = [r + ANSWER_FORCE_STRING for r in responses]
+                    af_sampling_params = SamplingParams(
+                        max_tokens=32,
+                        temperature=0.0,
+                        top_p=1.0,
+                    )
+                    af_outputs = teacher._llm.generate(
+                        af_prompts,
+                        af_sampling_params,
+                        use_tqdm=False,
+                    )
+                    forced_responses = [
+                        prompt + (out.outputs[0].text if out.outputs else "")
+                        for prompt, out in zip(af_prompts, af_outputs)
+                    ]
+
+                    batch_samples: list[dict] = []
+                    eos_token = teacher._tokenizer.eos_token or ""
+                    pad_token = teacher._tokenizer.pad_token or ""
+                    for entry, response in zip(batch_entries, forced_responses):
+                        response = response.replace(eos_token, "").replace(pad_token, "").strip()
+                        batch_samples.append(
+                            {
+                                "model_name": teacher.model_id,
+                                "system_prompt": style_prompt,
+                                "user_prompt": entry["user_prompt"],
+                                "response": response,
+                                "final_answer": extract_final_answer(response),
+                                "ground_truth": entry["ground_truth"],
+                                "style": style_key,
+                            }
+                        )
+
+                    styled_dataset.save(batch_samples, append=not first_write)
+                    first_write = False
+                    generated_count += len(batch_samples)
+
+                print(f"Saved {generated_count} samples to {styled_dataset.path}")
+
+                # Evaluate per style
+                print("\nEvaluating answer accuracy (style=", style_key, ")...")
+                loaded_samples = styled_dataset.load()
+                results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
+                print(
+                    f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
+                )
+                if results.get('mismatches'):
+                    print(f"First 5 mismatches: {results['mismatches'][:5]}")
+            finally:
+                teacher.close()
+
+        # Completed per-style generation and evaluation
+        return
     elif do_rewrite:
         # Load the base holdout dataset for rewriting
         holdout_suffix = "_trained" if use_trained_teacher_for_holdout else "_base"
@@ -905,10 +1040,6 @@ def main():
                 styled_output_path = rewrite_base_output.replace(
                     ".jsonl", f"_rewrite_{style_key}.jsonl"
                 )
-                if limit_n is not None:
-                    styled_output_path = styled_output_path.replace(
-                        ".jsonl", f"_sample{limit_n}.jsonl"
-                    )
                 styled_dataset = HoldoutDataset(styled_output_path)
 
                 print(f"\nRewriting with style='{style_key}'...")
@@ -943,24 +1074,11 @@ def main():
                             )
                         )
 
-                    # Answer forcing
-                    from vllm import SamplingParams
-                    af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
-                    af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
-                    af_outputs = rewriter._llm.generate(
-                        af_prompts,
-                        af_sampling_params,
-                        use_tqdm=False,
-                    )
-                    forced_responses = [
-                        prompt + (out.outputs[0].text if out.outputs else "")
-                        for prompt, out in zip(af_prompts, af_outputs)
-                    ]
-
+                    # Answer forcing disabled for rewriting - use rewritten responses directly
                     eos_token = rewriter._tokenizer.eos_token or ""
                     pad_token = rewriter._tokenizer.pad_token or ""
-                    for sample, forced in zip(batch_samples, forced_responses):
-                        resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
+                    for sample, rw in zip(batch_samples, rewritten_batch):
+                        resp = rw.replace(eos_token, "").replace(pad_token, "").strip()
                         sample["response"] = resp
                         sample["final_answer"] = extract_final_answer(resp)
                         sample["style"] = style_key
