@@ -4,8 +4,9 @@ ANSWER_FORCE_STRING: str = "\n\n**Final Answer**:\n\\[\\boxed{"
 DATASET_SYSTEM_PROMPTS: dict[str, str] = {
 "gsm8k": (
     "You are a math teacher. You will be given a math problem and you will solve it step by step. "
-    "You will output your final solution like \\boxed{numeric_value}. "
-    "Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions."
+    "Begin the solution immediately without any introductory phrases. "
+    "Output the final answer as \\[\\boxed{numeric_value}\\] with units included. "
+    "Be sure to fully evaluate all arithmetic expressions."
 ),
 }
 
@@ -17,10 +18,10 @@ Rewrite the reasoning in a different style or structure while keeping all mathem
 
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
     "formal": """\
-You are a math teacher. Solve the math problem step by step using formal mathematical language and notation. Show all calculations clearly and provide logical justifications for each step. Output the final answer as \\boxed{numeric_value} with units included.
+You are a math teacher. Solve the math problem step by step using formal mathematical language and notation. Show all calculations clearly and provide logical justifications for each step. Use formal academic prose: avoid contractions (e.g. write "it is" not "it's", "do not" not "don't", "we have" not "we've"), avoid colloquial phrasing, and use precise mathematical terminology. Begin the solution immediately without any introductory phrases. Output the final answer as \\[\\boxed{numeric_value}\\] with units included.
 """,
     "concise": """\
-You are a math teacher. Solve the math problem step by step in a concise style. Use short, direct sentences and remove filler while keeping all logical steps complete. Output the final answer as \\boxed{numeric_value} with units included.
+You are a math teacher. Solve the math problem step by step in a concise style. Use short, direct sentences and remove filler while keeping all logical steps complete. Use casual, conversational language: contractions are encouraged (e.g. write "it's" not "it is", "don't" not "do not"), prefer plain everyday words over formal terminology. Begin the solution immediately without any introductory phrases. Output the final answer as \\[\\boxed{numeric_value}\\] with units included.
 """,
 }
 
@@ -81,7 +82,7 @@ class Settings(BaseSettings):
     rewrite_samples: int = 1000
 
     # Student model (HuggingFace)
-    student_model_id: str = "Qwen/Qwen2.5-14B-Instruct"
+    student_model_id: str = "Qwen/Qwen2.5-3B"
     student_max_new_tokens: int = 1024
     student_temperature: float = 0.0
     student_output_dir: str = "models/student"
