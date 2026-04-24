@@ -33,6 +33,10 @@ class SteeringLayer(nn.Module):
         self.add_steering = True
         self.a = 1.0
         self.b = 1.0
+        # insert_position: int → single position (0 = first token, used during training
+        # with right-padded sequences so position 0 is the real BOS/system token).
+        # None → all positions (use during inference).
+        self.insert_position: int | None = 0
 
     def reset_steering_vector(self):
         """Reset steering vector to random initialization."""
@@ -48,11 +52,16 @@ class SteeringLayer(nn.Module):
                 self.steering_vector = self.steering_vector.to(x[0].device)
             output = self.layer_of_interest(*x)
             sv = self.b * self.steering_vector.squeeze(0).to(output.dtype)  # [H]
-            # Out-of-place add at first timestep only, preserving the autograd graph.
-            # In-place += on a tensor from a frozen network has requires_grad=False,
-            # which severs the gradient path to steering_vector.
-            first = output[:, 0:1, :] + sv  # [B, 1, H]
-            return self.a * torch.cat([first, output[:, 1:, :]], dim=1)
+            if self.insert_position is None:
+                # Add to all positions (standard for inference)
+                return self.a * (output + sv)
+            else:
+                # Out-of-place add at a single position, preserving the autograd graph.
+                # In-place += on a tensor from a frozen network has requires_grad=False,
+                # which severs the gradient path to steering_vector.
+                pos = self.insert_position
+                patched = output[:, pos:pos+1, :] + sv  # [B, 1, H]
+                return self.a * torch.cat([output[:, :pos, :], patched, output[:, pos+1:, :]], dim=1)
         return self.layer_of_interest(*x)
 
 

@@ -16,41 +16,11 @@ Rewrite the reasoning in a different style or structure while keeping all mathem
 """
 
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
-    "backward_reasoning": """\
-You are an expert at rewriting reasoning paths through 'Backward Reasoning'.
-Style Rules:
-1) First sentence states the conclusion in words (not the box itself).
-2) Then work strictly backwards: each sentence justifies the previous one, ending at given data.
-3) Do NOT introduce any new information after the first sentence.
-4) Keep the final answer in \\boxed{} format exactly as in the original.
-Example: "The total cost is $50. This comes from $30 for materials plus $20 for labor. The materials cost was given, and labor was calculated at $10/hour for 2 hours."
-""",
-    "socratic": """\
-You are an expert at rewriting reasoning paths through 'Socratic Dialogue'.
-Style Rules:
-1) Alternate concise questions with direct numeric answers that build the solution.
-2) No rhetorical or unresolved questions; each must resolve to a numeric step.
-3) Keep the final answer in \\boxed{} format exactly as in the original.
-Example: "What is the total? 50. How did we get that? 30 + 20. Where did 30 come from? Materials cost. And 20? Labor at $10/hour for 2 hours."
-""",
-    "steelman_refute": """\
-You are an expert at rewriting reasoning paths through 'Steelman-then-Refute'.
-Style Rules:
-1) Briefly present one plausible but incorrect path (≤2 sentences).
-2) Immediately refute it with the correct arithmetic and reasoning.
-3) Focus primarily on the correct path.
-4) Keep the final answer in \\boxed{} format exactly as in the original.
-5) CRITICAL: Double-check your arithmetic in the refutation - ensure the calculation is correct.
-Example: "One might think the total is $40 by adding only materials and one hour of labor. However, labor was actually 2 hours, so the correct total is $30 + $20 = $50."
+    "formal": """\
+You are a math teacher. Solve the math problem step by step using formal mathematical language and notation. Show all calculations clearly and provide logical justifications for each step. Use formal academic prose: avoid contractions (e.g. write "it is" not "it's", "do not" not "don't", "we have" not "we've"), avoid colloquial phrasing, and use precise mathematical terminology. Begin the solution immediately without any introductory phrases. Output the final answer as \\[\\boxed{numeric_value}\\] with units included.
 """,
     "concise": """\
-You are an expert at rewriting reasoning paths concisely.
-Style Rules:
-1) Short, direct sentences (subject–verb–object).
-2) Remove filler and hedging; say each point once.
-3) Use simplest correct arithmetic.
-4) Keep the final answer in \\boxed{} format exactly as in the original.
-Example: "Materials cost $30. Labor costs $10/hour for 2 hours. Total: $30 + $20 = $50."
+You are a math teacher. Solve the math problem step by step in a concise style. Use short, direct sentences and remove filler while keeping all logical steps complete. Use casual, conversational language: contractions are encouraged (e.g. write "it's" not "it is", "don't" not "do not"), prefer plain everyday words over formal terminology. Begin the solution immediately without any introductory phrases. Output the final answer as \\[\\boxed{numeric_value}\\] with units included.
 """,
 }
 
