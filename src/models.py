@@ -4,9 +4,56 @@ from transformers import PreTrainedModel, AutoModelForCausalLM
 import torch.nn.functional as F
 import logging
 import os
-from src.prf import sample_random_z
+from .prf import sample_random_z
 
 logger = logging.getLogger(__name__)
+
+
+class SteeringLayer(nn.Module):
+    """
+    A wrapper layer that adds a learnable steering vector to the output of a target layer.
+    
+    forward(*x):
+      - Calls the wrapped layer
+      - Adds steering vector scaled by coefficient b
+      - Returns: a * layer_output + b * steering_vector
+    """
+    def __init__(self, layer_of_interest: nn.Module, hidden_dim: int):
+        super().__init__()
+        self.layer_of_interest = layer_of_interest
+        self.hidden_dim = hidden_dim
+        
+        # Get device from the wrapped layer
+        device = next(layer_of_interest.parameters()).device
+        
+        # Initialize steering vector with Xavier normal on the same device
+        self.steering_vector = nn.Parameter(
+            torch.nn.init.xavier_normal_(torch.empty((1, hidden_dim), dtype=torch.float32, device=device))
+        )
+        self.add_steering = True
+        self.a = 1.0
+        self.b = 1.0
+
+    def reset_steering_vector(self):
+        """Reset steering vector to random initialization."""
+        device = self.steering_vector.device
+        self.steering_vector = nn.Parameter(
+            torch.nn.init.xavier_normal_(torch.empty_like(self.steering_vector))
+        ).to(device)
+
+    def forward(self, *x):
+        if self.add_steering:
+            # Ensure steering vector is on the same device as input
+            if x[0].device != self.steering_vector.device:
+                self.steering_vector = self.steering_vector.to(x[0].device)
+            output = self.layer_of_interest(*x)
+            sv = self.b * self.steering_vector.squeeze(0).to(output.dtype)  # [H]
+            # Out-of-place add at first timestep only, preserving the autograd graph.
+            # In-place += on a tensor from a frozen network has requires_grad=False,
+            # which severs the gradient path to steering_vector.
+            first = output[:, 0:1, :] + sv  # [B, 1, H]
+            return self.a * torch.cat([first, output[:, 1:, :]], dim=1)
+        return self.layer_of_interest(*x)
 
 
 class StyleAdapter(nn.Module):
