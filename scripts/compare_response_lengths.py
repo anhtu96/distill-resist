@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Compare average response lengths across styles.
+Compare average response lengths across styles using actual tokenization.
 """
 
 import json
 from pathlib import Path
+from transformers import AutoTokenizer
 
 
 def load_jsonl(file_path: str, max_samples: int = None):
@@ -18,17 +19,18 @@ def load_jsonl(file_path: str, max_samples: int = None):
     return samples
 
 
-def calculate_average_length(samples, field: str = "response"):
-    """Calculate average length of a field in samples."""
-    total_length = 0
-    count = 0
+def calculate_token_stats(samples, tokenizer, field: str = "response"):
+    """Calculate token statistics for a field in samples."""
+    token_counts = []
     for sample in samples:
         if field in sample:
-            total_length += len(sample[field])
-            count += 1
-    if count == 0:
-        return 0, 0
-    return total_length / count, count
+            tokens = tokenizer(sample[field], return_tensors="pt")["input_ids"]
+            token_counts.append(tokens.shape[1])
+    
+    if not token_counts:
+        return 0, 0, 0, 0
+    
+    return sum(token_counts) / len(token_counts), min(token_counts), max(token_counts), len(token_counts)
 
 
 def main():
@@ -39,26 +41,28 @@ def main():
     concise_file = data_dir / "teacher_gemma-3-12b-it_gsm8k_base_styles_style_concise.jsonl"
     formal_file = data_dir / "teacher_gemma-3-12b-it_gsm8k_base_styles_style_formal.jsonl"
     
-    max_samples = 100
+    # Load all samples
+    print("Loading all samples from each file...")
+    normal_samples = load_jsonl(normal_file)
+    concise_samples = load_jsonl(concise_file)
+    formal_samples = load_jsonl(formal_file)
     
-    # Load samples
-    print(f"Loading first {max_samples} samples from each file...")
-    normal_samples = load_jsonl(normal_file, max_samples)
-    concise_samples = load_jsonl(concise_file, max_samples)
-    formal_samples = load_jsonl(formal_file, max_samples)
+    # Load tokenizer
+    print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained("unsloth/gemma-3-12b-it")
     
-    # Calculate average lengths
-    normal_avg, normal_count = calculate_average_length(normal_samples)
-    concise_avg, concise_count = calculate_average_length(concise_samples)
-    formal_avg, formal_count = calculate_average_length(formal_samples)
+    # Calculate token statistics
+    normal_avg, normal_min, normal_max, normal_count = calculate_token_stats(normal_samples, tokenizer)
+    concise_avg, concise_min, concise_max, concise_count = calculate_token_stats(concise_samples, tokenizer)
+    formal_avg, formal_min, formal_max, formal_count = calculate_token_stats(formal_samples, tokenizer)
     
     # Print results
     print("\n" + "="*80)
-    print("Response Length Comparison (First 100 samples)")
+    print("Token Count Comparison (All samples)")
     print("="*80)
-    print(f"Normal:  {normal_avg:.2f} characters (n={normal_count})")
-    print(f"Concise: {concise_avg:.2f} characters (n={concise_count})")
-    print(f"Formal:  {formal_avg:.2f} characters (n={formal_count})")
+    print(f"Normal:  avg={normal_avg:.1f}, min={normal_min}, max={normal_max} (n={normal_count})")
+    print(f"Concise: avg={concise_avg:.1f}, min={concise_min}, max={concise_max} (n={concise_count})")
+    print(f"Formal:  avg={formal_avg:.1f}, min={formal_min}, max={formal_max} (n={formal_count})")
     print("="*80)
     
     # Calculate percentage differences
@@ -67,15 +71,6 @@ def main():
     
     print(f"\nConcise vs Normal: {concise_vs_normal:+.1f}%")
     print(f"Formal vs Normal:  {formal_vs_normal:+.1f}%")
-    
-    # Calculate token lengths (rough estimate)
-    print("\n" + "="*80)
-    print("Token Length Comparison (Rough estimate: chars / 4)")
-    print("="*80)
-    print(f"Normal:  {normal_avg/4:.1f} tokens")
-    print(f"Concise: {concise_avg/4:.1f} tokens")
-    print(f"Formal:  {formal_avg/4:.1f} tokens")
-    print("="*80)
 
 
 if __name__ == "__main__":

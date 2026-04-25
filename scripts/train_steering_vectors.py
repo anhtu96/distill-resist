@@ -119,6 +119,141 @@ CONTRASTIVE_FNS = {
 STYLES = list(REWRITE_SYSTEM_PROMPT_VARIANTS.keys())  # ["formal", "concise"]
 
 
+# ---------------------------------------------------------------------------
+# Shared model-structure helpers
+# ---------------------------------------------------------------------------
+
+def _get_mlp_module(model, layer_idx: int):
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers[layer_idx].mlp
+    if hasattr(model, "language_model") and hasattr(model.language_model, "layers"):
+        return model.language_model.layers[layer_idx].mlp
+    if hasattr(model, "transformer"):
+        return model.transformer.h[layer_idx].mlp
+    raise ValueError(f"Unsupported model structure: {type(model)}")
+
+
+def _set_mlp_module(model, layer_idx: int, new_mlp):
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        model.model.layers[layer_idx].mlp = new_mlp
+    elif hasattr(model, "language_model") and hasattr(model.language_model, "layers"):
+        model.language_model.layers[layer_idx].mlp = new_mlp
+    elif hasattr(model, "transformer"):
+        model.transformer.h[layer_idx].mlp = new_mlp
+
+
+def _tokenize_sample(tokenizer, sample: dict, system_prompt: str, max_length: int) -> dict:
+    """Tokenize a (system, user, assistant) sample with right-padding."""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": sample.get("user_prompt", "")},
+        {"role": "assistant", "content": sample.get("response", "")},
+    ]
+    original_side = tokenizer.padding_side
+    tokenizer.padding_side = "right"
+    try:
+        if hasattr(tokenizer, "apply_chat_template"):
+            try:
+                return tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=False,
+                    return_dict=True,
+                    return_tensors="pt",
+                    padding="max_length",
+                    truncation=True,
+                    max_length=max_length,
+                )
+            except Exception:
+                pass
+        text = f"System: {system_prompt}\nUser: {sample.get('user_prompt','')}\nAssistant: {sample.get('response','')}"
+        return tokenizer(text, padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
+    finally:
+        tokenizer.padding_side = original_side
+
+
+# ---------------------------------------------------------------------------
+# CAA: collect MLP output activations via forward hooks
+# ---------------------------------------------------------------------------
+
+def collect_caa_vectors(
+    model,
+    tokenizer,
+    style_data: dict[str, list[dict]],
+    insertion_layers: List[int],
+    max_length: int,
+    device: torch.device,
+    system_prompt: str = "",
+    num_samples: Optional[int] = None,
+) -> dict[str, np.ndarray]:
+    """
+    Collect mean MLP-output activations for each style via forward hooks.
+
+    Returns a dict mapping style -> np.ndarray of shape [N, H * len(insertion_layers)],
+    using the same per-sample concatenation convention as the optimize path so the
+    aggregation and contrastive steps can be reused unchanged.
+    """
+    # Register hooks on every insertion layer simultaneously so one forward
+    # pass per sample captures all layers.
+    layer_buffers: dict[int, list] = {idx: [] for idx in insertion_layers}
+
+    def make_hook(layer_idx: int):
+        def _hook(module, input, output):
+            layer_buffers[layer_idx].append(output.detach().float().cpu())
+        return _hook
+
+    handles = [
+        _get_mlp_module(model, idx).register_forward_hook(make_hook(idx))
+        for idx in insertion_layers
+    ]
+
+    model.eval()
+    result: dict[str, np.ndarray] = {}
+
+    try:
+        for style, samples in style_data.items():
+            if not samples:
+                logger.warning(f"No data for style '{style}', skipping")
+                continue
+
+            if num_samples is not None:
+                samples = samples[:num_samples]
+
+            per_sample: list[np.ndarray] = []
+            for sample in tqdm(samples, desc=f"CAA {style}"):
+                enc = _tokenize_sample(tokenizer, sample, system_prompt, max_length)
+                input_ids = enc["input_ids"].to(device)
+                attention_mask = enc["attention_mask"].to(device)
+
+                # Clear buffers, run one forward pass
+                for buf in layer_buffers.values():
+                    buf.clear()
+
+                with torch.no_grad():
+                    model(input_ids=input_ids, attention_mask=attention_mask)
+
+                # Average each layer's output over non-padding positions
+                mask = attention_mask.float().cpu()  # [1, T]
+                layer_vecs = []
+                for idx in insertion_layers:
+                    act = layer_buffers[idx][0]          # [1, T, H]
+                    mean_act = (act * mask.unsqueeze(-1)).sum(1) / mask.sum(1, keepdim=True)
+                    layer_vecs.append(mean_act.squeeze(0).numpy())  # [H]
+
+                per_sample.append(
+                    layer_vecs[0] if len(insertion_layers) == 1
+                    else np.concatenate(layer_vecs)
+                )
+
+            result[style] = np.stack(per_sample)  # [N, H] or [N, H*L]
+            logger.info(f"Collected {len(per_sample)} CAA vectors for style '{style}'")
+    finally:
+        for h in handles:
+            h.remove()
+
+    return result
+
+
 def load_style_data(data_dir: str, style: str) -> List[dict]:
     """Load all samples for a specific style from holdout traces."""
     # Look for style-specific files
@@ -318,8 +453,14 @@ def train_steering_vectors(
     overwrite_vectors: bool = False,
     aggregation: str = "mean",
     contrastive: str = "mean_diff",
+    mode: str = "optimize",
 ):
-    """Train steering vectors for all styles using per-sample gradient optimization."""
+    """Train steering vectors for all styles.
+
+    mode='optimize': per-sample gradient descent (original approach).
+    mode='caa': Contrastive Activation Addition — collect MLP-output activations
+                via forward hooks, no optimization loop required.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
@@ -409,61 +550,74 @@ def train_steering_vectors(
     style_data = {}
     for style in STYLES:
         style_data[style] = load_style_data(data_dir, style)
-    
-    # Compute per-sample steering vectors for each style
-    style_means = {}
+
+    system_prompt = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
+    agg_fn = AGGREGATION_FNS[aggregation]
+
+    # Compute per-sample vectors — either via optimization or CAA hooks
+    style_means: dict[str, np.ndarray] = {}
     style_raw_vecs: dict[str, np.ndarray] = {}  # kept for lda contrastive step
-    for style in STYLES:
-        if len(style_data[style]) == 0:
-            logger.warning(f"No data for style '{style}', skipping")
-            continue
-        
-        samples_to_use = style_data[style]
-        if num_samples is not None and num_samples < len(samples_to_use):
-            samples_to_use = samples_to_use[:num_samples]
-            logger.info(f"Using {num_samples} samples for style '{style}' (limiting from {len(style_data[style])})")
-        
-        # Get system prompt from dataset config
-        system_prompt = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
-        logger.info(f"Using dataset system prompt for style '{style}'")
-        
-        logger.info(f"Optimizing steering vectors for style '{style}' ({len(samples_to_use)} samples)")
-        per_sample_vectors = []
-        pbar = tqdm(samples_to_use, desc=f"Style {style}")
-        for i, sample in enumerate(pbar):
-            # Optimize for each insertion layer (currently just one)
-            layer_vectors = []
-            for layer_idx in insertion_layers:
-                z = optimize_sample_vector(
-                    model=model,
-                    tokenizer=tokenizer,
-                    sample=sample,
-                    layer_idx=layer_idx,
-                    hidden_dim=hidden_dim,
-                    max_length=max_length,
-                    epochs=epochs,
-                    lr=lr,
-                    device=device,
-                    loss_threshold=early_stop_loss,
-                    pbar=pbar,
-                    sample_idx=i,
-                    system_prompt=system_prompt,
+
+    if mode == "caa":
+        logger.info("Mode: CAA — collecting MLP-output activations via forward hooks")
+        style_raw_vecs = collect_caa_vectors(
+            model=model,
+            tokenizer=tokenizer,
+            style_data={s: style_data[s] for s in STYLES if style_data[s]},
+            insertion_layers=insertion_layers,
+            max_length=max_length,
+            device=device,
+            system_prompt=system_prompt,
+            num_samples=num_samples,
+        )
+        for style, vecs in style_raw_vecs.items():
+            style_means[style] = agg_fn(vecs)
+            logger.info(f"Aggregated {len(vecs)} CAA vectors for style '{style}' using '{aggregation}'")
+
+    else:
+        logger.info("Mode: optimize — per-sample gradient descent")
+        for style in STYLES:
+            if len(style_data[style]) == 0:
+                logger.warning(f"No data for style '{style}', skipping")
+                continue
+
+            samples_to_use = style_data[style]
+            if num_samples is not None and num_samples < len(samples_to_use):
+                samples_to_use = samples_to_use[:num_samples]
+                logger.info(f"Using {num_samples} samples for style '{style}' (limiting from {len(style_data[style])})")
+
+            logger.info(f"Optimizing steering vectors for style '{style}' ({len(samples_to_use)} samples)")
+            per_sample_vectors = []
+            pbar = tqdm(samples_to_use, desc=f"Style {style}")
+            for i, sample in enumerate(pbar):
+                layer_vectors = []
+                for layer_idx in insertion_layers:
+                    z = optimize_sample_vector(
+                        model=model,
+                        tokenizer=tokenizer,
+                        sample=sample,
+                        layer_idx=layer_idx,
+                        hidden_dim=hidden_dim,
+                        max_length=max_length,
+                        epochs=epochs,
+                        lr=lr,
+                        device=device,
+                        loss_threshold=early_stop_loss,
+                        pbar=pbar,
+                        sample_idx=i,
+                        system_prompt=system_prompt,
+                    )
+                    layer_vectors.append(z)
+
+                per_sample_vectors.append(
+                    layer_vectors[0] if len(insertion_layers) == 1
+                    else np.concatenate(layer_vectors)
                 )
-                layer_vectors.append(z)
-            
-            # For single layer, just use that vector
-            if len(insertion_layers) == 1:
-                per_sample_vectors.append(layer_vectors[0])
-            else:
-                # For multiple layers, concatenate
-                per_sample_vectors.append(np.concatenate(layer_vectors))
-        
-        # Aggregate per-sample vectors into a single style vector
-        agg_fn = AGGREGATION_FNS[aggregation]
-        vecs = np.stack(per_sample_vectors)  # [N, H]
-        style_raw_vecs[style] = vecs
-        style_means[style] = agg_fn(vecs)
-        logger.info(f"Aggregated {len(vecs)} vectors for style '{style}' using '{aggregation}'")
+
+            vecs = np.stack(per_sample_vectors)  # [N, H]
+            style_raw_vecs[style] = vecs
+            style_means[style] = agg_fn(vecs)
+            logger.info(f"Aggregated {len(vecs)} vectors for style '{style}' using '{aggregation}'")
     
     # Compute contrastive steering vectors
     # For lda we need the raw per-sample arrays, not just the aggregated vectors.
@@ -558,7 +712,7 @@ def main():
     parser.add_argument(
         "--max-length",
         type=int,
-        default=512,
+        default=1024,
         help="Max sequence length",
     )
     parser.add_argument(
@@ -589,6 +743,17 @@ def main():
         "--overwrite-vectors",
         action="store_true",
         help="Overwrite existing steering vectors instead of merging",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["optimize", "caa"],
+        default="optimize",
+        help=(
+            "'optimize' (default): per-sample gradient descent — slow but directly optimizes "
+            "the generation objective. "
+            "'caa': Contrastive Activation Addition — one forward pass per sample, "
+            "captures MLP-output activation differences between styles. Much faster."
+        ),
     )
     parser.add_argument(
         "--aggregation",
@@ -627,6 +792,7 @@ def main():
         overwrite_vectors=args.overwrite_vectors,
         aggregation=args.aggregation,
         contrastive=args.contrastive,
+        mode=args.mode,
     )
 
 

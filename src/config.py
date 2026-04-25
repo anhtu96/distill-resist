@@ -24,6 +24,13 @@ You are a math teacher. Solve the math problem step by step in a concise style. 
 """,
 }
 
+# Style map: connects style names to integer IDs used by StyleAdapter
+# style_id=-1 is reserved for legitimate users (adapter is skipped)
+STYLE_MAP: dict[str, int] = {
+    "formal": 0,
+    "concise": 1,
+}
+
 
 
 

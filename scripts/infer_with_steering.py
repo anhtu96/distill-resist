@@ -19,12 +19,76 @@ from src.loaders.gsm8k import GSM8KLoader
 
 
 def load_steering_vectors(checkpoint_path: str):
-    """Load steering vectors from checkpoint."""
+    """Load steering vectors from checkpoint.
+
+    Returns (insertion_layers, steering_vectors, styles, injection_point).
+    injection_point is "mlp" (SteeringLayer wraps MLP) or "residual" (hook on layer output).
+    Old checkpoints without the field default to "mlp" for backwards compatibility.
+    """
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     insertion_layers = ckpt["insertion_layers"]
     steering_vectors = ckpt["steering_vectors"]
     styles = ckpt.get("styles", list(steering_vectors.keys()))
-    return insertion_layers, steering_vectors, styles
+    injection_point = ckpt.get("injection_point", "mlp")
+    return insertion_layers, steering_vectors, styles, injection_point
+
+
+# ---------------------------------------------------------------------------
+# Residual-stream injection handle
+# ---------------------------------------------------------------------------
+
+class _VectorProxy:
+    """Lets load_style_into_steering_layers use sl.steering_vector.data = tensor
+    on ResidualSteeringHandle without knowing the handle type."""
+    def __init__(self, state: dict):
+        self._state = state
+
+    @property
+    def data(self):
+        return self._state["vector"]
+
+    @data.setter
+    def data(self, v):
+        self._state["vector"] = v
+
+    @property
+    def device(self):
+        v = self._state.get("vector")
+        return v.device if v is not None else torch.device("cpu")
+
+
+class ResidualSteeringHandle:
+    """Duck-type compatible with SteeringLayer; injects via a forward hook on
+    the full transformer layer output instead of wrapping the MLP module."""
+
+    def __init__(self, hook_handle, state: dict):
+        self._hook = hook_handle
+        self.state = state
+        self.steering_vector = _VectorProxy(state)
+
+    @property
+    def add_steering(self):
+        return self.state["active"]
+
+    @add_steering.setter
+    def add_steering(self, v):
+        self.state["active"] = v
+
+    @property
+    def b(self):
+        return self.state["b"]
+
+    @b.setter
+    def b(self, v):
+        self.state["b"] = v
+
+    @property
+    def insert_position(self):
+        return self.state["insert_position"]
+
+    @insert_position.setter
+    def insert_position(self, v):
+        self.state["insert_position"] = v
 
 
 def load_test_problem(dataset_name: str = "gsm8k", index: int = 0):
@@ -64,6 +128,17 @@ def _set_mlp(model, layer_idx: int, new_mlp):
         model.transformer.h[layer_idx].mlp = new_mlp
 
 
+def _get_layer(model, layer_idx: int):
+    """Return the full transformer layer module."""
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers[layer_idx]
+    if hasattr(model, "language_model") and hasattr(model.language_model, "layers"):
+        return model.language_model.layers[layer_idx]
+    if hasattr(model, "transformer"):
+        return model.transformer.h[layer_idx]
+    raise ValueError(f"Unsupported model structure: {type(model)}")
+
+
 def load_model_and_tokenizer(model_id: str):
     """Load model and tokenizer once."""
     print(f"Loading model: {model_id}")
@@ -78,20 +153,45 @@ def load_model_and_tokenizer(model_id: str):
     return model, tokenizer
 
 
-def wrap_layers_with_steering(model, insertion_layers: list):
+def wrap_layers_with_steering(model, insertion_layers: list, injection_point: str = "mlp"):
     """
-    Replace each insertion layer's MLP with a SteeringLayer.
-    Returns the list of SteeringLayer objects.
-    Call once after loading the model; reuse by swapping steering_vector.data.
+    Prepare steering handles for each insertion layer.
+
+    injection_point="mlp"      — replaces layer.mlp with SteeringLayer (original approach).
+    injection_point="residual" — registers a forward hook on the full layer output;
+                                 no module replacement, works cleanly with device_map="auto".
+
+    Both return a list whose elements are duck-type compatible:
+    they expose add_steering, b, insert_position, and steering_vector.data.
     """
-    steering_layers = []
-    for layer_idx in insertion_layers:
-        mlp, hidden_dim = _get_mlp(model, layer_idx)
-        sl = SteeringLayer(mlp, hidden_dim)
-        _set_mlp(model, layer_idx, sl)
-        steering_layers.append(sl)
-        print(f"Wrapped layer {layer_idx} with SteeringLayer (hidden_dim={hidden_dim})")
-    return steering_layers
+    handles = []
+
+    if injection_point == "residual":
+        for layer_idx in insertion_layers:
+            state = {"active": True, "b": 1.0, "insert_position": 0, "vector": None}
+
+            def make_hook(s):
+                def _hook(_module, _input, output):
+                    if not s["active"] or s["vector"] is None:
+                        return output
+                    hidden = output[0] if isinstance(output, tuple) else output
+                    sv = s["b"] * s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
+                    hidden = hidden + sv  # broadcast over all positions: [B, T, H]
+                    return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
+                return _hook
+
+            hook_handle = _get_layer(model, layer_idx).register_forward_hook(make_hook(state))
+            handles.append(ResidualSteeringHandle(hook_handle, state))
+            print(f"Registered residual hook on layer {layer_idx}")
+    else:
+        for layer_idx in insertion_layers:
+            mlp, hidden_dim = _get_mlp(model, layer_idx)
+            sl = SteeringLayer(mlp, hidden_dim)
+            _set_mlp(model, layer_idx, sl)
+            handles.append(sl)
+            print(f"Wrapped layer {layer_idx} with SteeringLayer (hidden_dim={hidden_dim})")
+
+    return handles
 
 
 def load_style_into_steering_layers(steering_layers, sv_list):
@@ -131,18 +231,12 @@ def generate_with_steering(
     else:
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)["input_ids"]
 
-    # Find first non-padding position (handles left-padded sequences correctly)
-    pad_id = tokenizer.pad_token_id
-    if pad_id is not None and (inputs[0] == pad_id).any():
-        first_real = (inputs[0] != pad_id).nonzero(as_tuple=True)[0][0].item()
-    else:
-        first_real = 0
-
-    # Enable/disable steering, set strength, and inject at first real token
+    # Enable/disable steering and set strength; vector is added to all positions
+    # per the original CAA paper (Zou et al. 2023).
     for sl in steering_layers:
         sl.add_steering = use_steering
         sl.b = steering_strength
-        sl.insert_position = first_real  # matches training's right-padded position 0
+        sl.insert_position = None  # None → all positions in SteeringLayer
     
     # Generate
     steering_status = "OFF"
@@ -293,7 +387,8 @@ def main():
         sys.exit(1)
     
     # Load steering vectors to get available styles
-    insertion_layers, steering_vectors_dict, available_styles = load_steering_vectors(args.checkpoint)
+    insertion_layers, steering_vectors_dict, available_styles, injection_point = load_steering_vectors(args.checkpoint)
+    print(f"Injection point: {injection_point}")
     print(f"Available styles: {available_styles}")
     
     # Determine which styles to test
@@ -316,7 +411,7 @@ def main():
     
     # Load model once, then swap vectors per style
     model, tokenizer = load_model_and_tokenizer(args.model_id)
-    steering_layers = wrap_layers_with_steering(model, insertion_layers)
+    steering_layers = wrap_layers_with_steering(model, insertion_layers, injection_point)
     print(f"Setup complete. Insertion layers: {insertion_layers}")
 
     # Generate baseline (no steering) first as reference
