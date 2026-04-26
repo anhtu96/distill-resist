@@ -526,6 +526,43 @@ def main():
         action="store_true",
         help="When generating using student model, load from checkpoint with _styles suffix",
     )
+    parser.add_argument(
+        "--with-caa",
+        action="store_true",
+        help=(
+            "Generate steered traces using CAA vectors from a saved checkpoint "
+            "(see caa_checkpoint_path in src/config.py). Loops over all styles "
+            "in the checkpoint and writes one file per style."
+        ),
+    )
+    parser.add_argument(
+        "--caa-checkpoint",
+        type=str,
+        default=None,
+        help="Override caa_checkpoint_path from config",
+    )
+    parser.add_argument(
+        "--caa-strength",
+        type=float,
+        default=None,
+        help="Override caa_strength from config",
+    )
+    parser.add_argument(
+        "--caa-batch-size",
+        type=int,
+        default=None,
+        help="Override caa_batch_size from config",
+    )
+    parser.add_argument(
+        "--caa-backend",
+        choices=["vllm", "hf"],
+        default="vllm",
+        help=(
+            "Backend for --with-caa generation. 'vllm' uses a custom registered "
+            "Gemma3 model class with residual-stream injection (fast). "
+            "'hf' uses HuggingFace transformers with forward hooks (fallback)."
+        ),
+    )
     args = parser.parse_args()
 
     settings = Settings()
@@ -724,6 +761,16 @@ def main():
         do_backdoor_holdout = False
     if do_backdoor_holdout and do_rewrite:
         print("--ad ignores --rewrite and generates with BACKDOOR_TRIGGER only.")
+        do_rewrite = False
+
+    # --with-caa: steered teacher generation using saved CAA vectors
+    do_caa = args.with_caa
+    if do_caa and args.model != "teacher":
+        print("--with-caa is only supported for the teacher model; ignoring.")
+        do_caa = False
+    if do_caa and (do_backdoor_holdout or do_rewrite):
+        print("--with-caa is exclusive with --ad/--rewrite; ignoring those.")
+        do_backdoor_holdout = False
         do_rewrite = False
 
     # Compute output path; for --rewrite we will derive per-style paths later
@@ -987,6 +1034,137 @@ def main():
             rewriter.close()
 
         # Completed per-style rewriting and evaluation
+        return
+    elif do_caa:
+        ckpt_path = args.caa_checkpoint or settings.caa_checkpoint_path
+        if not Path(ckpt_path).exists():
+            print(f"Error: CAA checkpoint not found at '{ckpt_path}'.")
+            print("Train it first with: python scripts/train_caa_vectors.py")
+            return
+
+        teacher_model_id = (
+            holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model
+        )
+        gen_temperature = (
+            settings.teacher_holdout_temperature
+            if target_set == "holdout"
+            else settings.teacher_temperature
+        )
+
+        if args.caa_backend == "vllm":
+            from src.vllm_caa_inference import VLLMCAATraceGenerator
+            GenCls = VLLMCAATraceGenerator
+        else:
+            from src.caa_inference import HFCAATraceGenerator
+            GenCls = HFCAATraceGenerator
+
+        generator = GenCls(
+            settings,
+            model_id=teacher_model_id,
+            max_new_tokens=settings.teacher_max_new_tokens,
+            temperature=gen_temperature,
+            caa_checkpoint=ckpt_path,
+            system_prompt=settings.teacher_system_prompt,
+            batch_size=args.caa_batch_size or settings.caa_batch_size,
+            strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
+        )
+
+        try:
+            print(
+                f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
+                f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
+            )
+            prompts = generator.load_prompts()
+
+            if settings.sample_limit is None:
+                total = len(prompts)
+            else:
+                total = min(len(prompts), settings.sample_limit)
+
+            entries = prompts[:total]
+            normalized: list[dict[str, str]] = []
+            for item in entries:
+                if isinstance(item, str):
+                    normalized.append({"user_prompt": item, "ground_truth": ""})
+                else:
+                    normalized.append(
+                        {
+                            "user_prompt": item["user_prompt"],
+                            "ground_truth": item.get("ground_truth", ""),
+                        }
+                    )
+
+            all_prompts = [entry["user_prompt"] for entry in normalized]
+            batch_size = generator.batch_size
+
+            for style in generator.styles:
+                print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
+                generator.set_style(style)
+
+                styled_output_path = output_path.replace(".jsonl", f"_caa_{style}.jsonl")
+                styled_dataset = HoldoutDataset(styled_output_path)
+
+                first_write = True
+                generated_count = 0
+
+                batch_iter = tqdm(
+                    range(0, total, batch_size),
+                    desc=f"Generating ({style})",
+                    unit="batch",
+                    file=sys.stdout,
+                    leave=True,
+                    dynamic_ncols=True,
+                    mininterval=0.1,
+                )
+
+                for batch_idx in batch_iter:
+                    prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+                    batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+
+                    responses = generator.sample_batch(prompt_batch)
+                    forced_responses = generator.force_answers(responses)
+
+                    eos_token = generator._tokenizer.eos_token or ""
+                    pad_token = generator._tokenizer.pad_token or ""
+                    batch_samples: list[dict] = []
+                    for entry, response in zip(batch_entries, forced_responses):
+                        response = (
+                            response.replace(eos_token, "")
+                            .replace(pad_token, "")
+                            .replace("</think>", "")
+                            .strip()
+                        )
+                        batch_samples.append(
+                            {
+                                "model_name": teacher_model_id,
+                                "system_prompt": generator.system_prompt,
+                                "user_prompt": entry["user_prompt"],
+                                "response": response,
+                                "final_answer": extract_final_answer(response),
+                                "ground_truth": entry["ground_truth"],
+                                "style": style,
+                            }
+                        )
+
+                    styled_dataset.save(batch_samples, append=not first_write)
+                    first_write = False
+                    generated_count += len(batch_samples)
+
+                print(f"Saved {generated_count} samples to {styled_dataset.path}")
+
+                print(f"\nEvaluating answer accuracy (style={style})...")
+                loaded_samples = styled_dataset.load()
+                results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
+                print(
+                    f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
+                )
+                incorrect_orders = []
+                for mismatch in results.get("mismatches", [])[:5]:
+                    idx = mismatch.get("idx")
+                    incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
+                print(f"First 5 incorrect orders: {incorrect_orders}")
+        finally:
+            generator.close()
         return
     else:
         # Select model based on model choice

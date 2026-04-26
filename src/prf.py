@@ -29,12 +29,23 @@ def metadata_to_z(
     # keyed PRF via HMAC-SHA256 → 32 bytes
     raw = hmac.new(secret_key, m, hashlib.sha256).digest()
 
-    # expand to style_dim floats via HKDF-SHA256
+    # expand to style_dim * 4 bytes via HKDF-SHA256
     z_bytes = _hkdf_expand(raw, length=style_dim * 4)
 
-    # convert bytes → float32 → tanh squash to (-1, 1)
-    z = np.frombuffer(z_bytes, dtype=np.float32).copy()
-    z = np.tanh(z)
+    # bytes → uint32 → uniform [0,1) → tanh-squashed standard normal
+    u = np.frombuffer(z_bytes, dtype=np.uint32).astype(np.float64)
+    u = (u + 0.5) / 2**32                          # uniform in (0, 1)
+    # Box-Muller: pairs of uniforms → pairs of N(0,1)
+    half = style_dim // 2
+    u1, u2 = u[:half], u[half:half * 2]
+    r = np.sqrt(-2.0 * np.log(u1))
+    theta = 2.0 * np.pi * u2
+    n = np.empty(style_dim, dtype=np.float32)
+    n[:half]      = (r * np.cos(theta)).astype(np.float32)
+    n[half:half*2] = (r * np.sin(theta)).astype(np.float32)
+    if style_dim % 2:
+        n[-1] = 0.0
+    z = np.tanh(n)
 
     return torch.tensor(z, dtype=dtype)
 

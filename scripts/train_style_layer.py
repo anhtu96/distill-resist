@@ -14,45 +14,92 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import Settings
+from src.config import Settings, REWRITE_SYSTEM_PROMPT_VARIANTS
 from src.models import StyleLM, ContinuousStyleLoss
+from src.prf import metadata_to_z
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
 class TextDataset(Dataset):
-    """Simple dataset for text samples."""
-    def __init__(self, samples: list[dict], tokenizer, max_length: int):
-        self.samples = samples
-        self.tokenizer = tokenizer
+    """Dataset that tracks the style of each sample and masks prompt tokens
+    in the labels so the supervised loss only trains on the assistant response."""
+    def __init__(self, samples: list[dict], tokenizer, max_length: int, style_dim: int):
+        self.samples    = samples
+        self.tokenizer  = tokenizer
         self.max_length = max_length
+        self.style_dim  = style_dim
+        # Cache deterministic z per style name
+        self._z_cache: dict[str, torch.Tensor] = {}
+
+    def _z_for_style(self, style: str) -> torch.Tensor:
+        if style not in self._z_cache:
+            self._z_cache[style] = metadata_to_z(
+                {"style": style},
+                style_dim=self.style_dim,
+                dtype=torch.float32,
+            )
+        return self._z_cache[style]
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        # Construct text from available fields
+        sample        = self.samples[idx]
+        style         = sample.get("style", "default")
         system_prompt = sample.get("system_prompt", "")
-        user_prompt = sample.get("user_prompt", "")
-        response = sample.get("response", "")
-        
-        # Format as conversation
-        text = f"System: {system_prompt}\nUser: {user_prompt}\nAssistant: {response}"
-        
+        user_prompt   = sample.get("user_prompt", "")
+        response      = sample.get("response", "")
+
+        prompt_text = f"System: {system_prompt}\nUser: {user_prompt}\nAssistant: "
+        full_text   = prompt_text + response
+
+        # Tokenize prompt-only to know how many tokens to mask
+        prompt_ids = self.tokenizer(
+            prompt_text, add_special_tokens=False, return_tensors="pt"
+        )["input_ids"].squeeze(0)
+        prompt_len = prompt_ids.size(0)
+
         encodings = self.tokenizer(
-            text,
+            full_text,
             padding="max_length",
             truncation=True,
             max_length=self.max_length,
             return_tensors="pt",
         )
-        
+        input_ids      = encodings["input_ids"].squeeze(0)
+        attention_mask = encodings["attention_mask"].squeeze(0)
+
+        # Build labels: -100 for prompt + padding, real ids for the response
+        labels = input_ids.clone()
+        labels[:prompt_len] = -100
+        labels[attention_mask == 0] = -100
+
         return {
-            "input_ids": encodings["input_ids"].squeeze(0),
-            "attention_mask": encodings["attention_mask"].squeeze(0),
+            "input_ids":      input_ids,
+            "attention_mask": attention_mask,
+            "labels":         labels,
+            "z":              self._z_for_style(style),
         }
+
+
+def load_style_samples(data_dir: str) -> list[dict]:
+    """Load all per-style JSONL files from a directory and tag each sample
+    with its style name (parsed from the file name)."""
+    import json, re
+    samples = []
+    for path in Path(data_dir).glob("*.jsonl"):
+        # Match either *_styles_style_{name}.jsonl or *_rewrite_{name}.jsonl
+        m = re.search(r"(?:styles_style_|rewrite_)([A-Za-z0-9_]+)\.jsonl$", path.name)
+        style = m.group(1) if m else "default"
+        with open(path) as f:
+            for line in f:
+                rec = json.loads(line)
+                rec["style"] = style
+                samples.append(rec)
+        logger.info("Loaded %s as style '%s'", path.name, style)
+    return samples
 
 
 def build_model(model_id: str, style_dim: int = 64, bottleneck_dim: int = 64):
@@ -97,26 +144,27 @@ def build_model(model_id: str, style_dim: int = 64, bottleneck_dim: int = 64):
     return model, tokenizer
 
 
-def make_dataloader(samples: list[dict], tokenizer, batch_size: int, max_length: int):
+def make_dataloader(samples: list[dict], tokenizer, batch_size: int, max_length: int, style_dim: int):
     """Create dataloader from samples."""
-    dataset = TextDataset(samples, tokenizer, max_length)
+    dataset = TextDataset(samples, tokenizer, max_length, style_dim)
     return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 
 def train(
-    samples:     list[dict],
-    model_id:    str   = "unsloth/gemma-3-12b-it",
-    batch_size:  int   = 8,
-    num_epochs:  int   = 3,
-    lr:          float = 1e-4,
-    max_length:  int   = 1024,
-    save_path:   str   = "adapter.pt",
-    style_dim:   int   = 64,
-    bottleneck_dim: int = 64,
+    samples:          list[dict],
+    model_id:         str   = "unsloth/gemma-3-12b-it",
+    batch_size:       int   = 1,
+    grad_accum_steps: int   = 8,
+    num_epochs:       int   = 3,
+    lr:               float = 1e-4,
+    max_length:       int   = 512,
+    save_path:        str   = "adapter.pt",
+    style_dim:        int   = 64,
+    bottleneck_dim:   int   = 64,
 ):
     # ── setup ─────────────────────────────────────────────────────────────
     model, tokenizer = build_model(model_id, style_dim, bottleneck_dim)
-    dataloader       = make_dataloader(samples, tokenizer, batch_size, max_length)
+    dataloader       = make_dataloader(samples, tokenizer, batch_size, max_length, style_dim)
 
     optimizer = torch.optim.AdamW(
         model.adapter.parameters(),
@@ -126,57 +174,53 @@ def train(
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=num_epochs * len(dataloader),
+        T_max=num_epochs * len(dataloader) // grad_accum_steps,
     )
 
-    # ── loss — staged lambda schedule ─────────────────────────────────────
+    # ── loss — supervised dominates; div/fluency/smooth as regularizers ───
     criterion = ContinuousStyleLoss(
         style_dim=style_dim,
-        lambda_div=1.0,
-        lambda_fluency=0.5,
-        lambda_smooth=0.3,
+        lambda_sup=1.0,
+        lambda_div=0.0,
+        lambda_fluency=0.0,
+        lambda_smooth=0.1,
     )
 
     # ── training loop ──────────────────────────────────────────────────────
     for epoch in range(num_epochs):
 
-        # tighten fluency constraint as training progresses
-        # — early: allow more drift to find diverse styles
-        # — late:  keep outputs close to base model
-        criterion.lambda_fluency = 0.3 + 0.2 * (epoch / num_epochs)
-
         total_loss = 0.0
+        optimizer.zero_grad()
 
         for step, batch in enumerate(dataloader):
             batch = {
                 k: v.to(model.base.device) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
+            z = batch["z"].to(dtype=next(model.adapter.parameters()).dtype)
 
-            # precompute frozen hidden states once per batch
-            # reused across all loss terms — saves memory and compute
             h = model.get_hidden(
                 batch["input_ids"],
                 batch["attention_mask"],
             )
 
-            # compute loss
-            losses = criterion(model, h)
-            loss   = losses["loss"]
-
-            # backward — only adapter params updated
-            optimizer.zero_grad()
+            losses = criterion(model, h, z_sup=z, labels=batch["labels"])
+            loss   = losses["loss"] / grad_accum_steps
             loss.backward()
-            nn.utils.clip_grad_norm_(model.adapter.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step()
 
             total_loss += loss.item()
+
+            if (step + 1) % grad_accum_steps == 0:
+                nn.utils.clip_grad_norm_(model.adapter.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
             if step % 50 == 0:
                 print(
                     f"epoch {epoch:02d} | step {step:04d} | "
                     f"loss {loss.item():.4f} | "
+                    f"sup {losses['L_sup'].item():.4f} | "
                     f"div {losses['L_div'].item():.4f} | "
                     f"fluency {losses['L_fluency'].item():.4f} | "
                     f"smooth {losses['L_smooth'].item():.4f}"
@@ -216,6 +260,12 @@ def main():
         help="Training batch size (default: from config)",
     )
     parser.add_argument(
+        "--grad-accum",
+        type=int,
+        default=None,
+        help="Gradient accumulation steps (default: from config)",
+    )
+    parser.add_argument(
         "--learning-rate",
         type=float,
         default=None,
@@ -244,10 +294,11 @@ def main():
     settings = Settings()
     
     # Use provided args or default to config values
-    batch_size = args.batch_size if args.batch_size is not None else settings.style_batch_size
-    learning_rate = args.learning_rate if args.learning_rate is not None else settings.style_learning_rate
-    max_seq_length = args.max_seq_length if args.max_seq_length is not None else settings.style_max_seq_length
-    epochs = args.epochs if args.epochs is not None else settings.style_epochs
+    batch_size        = args.batch_size    if args.batch_size    is not None else settings.style_batch_size
+    grad_accum_steps  = args.grad_accum   if args.grad_accum    is not None else settings.style_grad_accum_steps
+    learning_rate     = args.learning_rate if args.learning_rate is not None else settings.style_learning_rate
+    max_seq_length    = args.max_seq_length if args.max_seq_length is not None else settings.style_max_seq_length
+    epochs            = args.epochs        if args.epochs        is not None else settings.style_epochs
     style_dim = settings.style_dim
     bottleneck_dim = settings.style_bottleneck_dim
     
@@ -255,26 +306,35 @@ def main():
     base_model_id = "unsloth/gemma-3-12b-it"
     # base_model_id = args.base_model or settings.student_model_id
     
-    # Load training data
+    # Load training data — accepts either a directory of per-style JSONLs
+    # (preferred: filename encodes the style) or a single JSONL file.
     data_path = args.data_path
     if data_path is None:
         logger.error("--data-path is required")
         return
-    
+
     logger.info("Loading training data from %s", data_path)
-    import json
-    samples = []
-    with open(data_path, "r") as f:
-        for line in f:
-            samples.append(json.loads(line))
-    
-    logger.info("Loaded %d samples", len(samples))
+    p = Path(data_path)
+    if p.is_dir():
+        samples = load_style_samples(data_path)
+    else:
+        import json
+        samples = []
+        with open(data_path, "r") as f:
+            for line in f:
+                rec = json.loads(line)
+                rec.setdefault("style", "default")
+                samples.append(rec)
+
+    logger.info("Loaded %d samples across styles: %s",
+                len(samples), sorted({s.get("style", "default") for s in samples}))
     
     # Train
     train(
         samples=samples,
         model_id=base_model_id,
         batch_size=batch_size,
+        grad_accum_steps=grad_accum_steps,
         num_epochs=epochs,
         lr=learning_rate,
         max_length=max_seq_length,

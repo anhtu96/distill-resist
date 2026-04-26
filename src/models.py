@@ -86,8 +86,8 @@ class StyleAdapter(nn.Module):
         self.up = nn.Linear(bottleneck_dim, hidden_dim)
         self.act = nn.SiLU()
 
-        # zero init — adapter is identity at start of training
-        nn.init.zeros_(self.up.weight)
+        # small init — adapter starts near-identity but with non-zero gradient
+        nn.init.normal_(self.up.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.up.bias)
 
     def forward(self, hidden: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
@@ -100,13 +100,6 @@ class StyleAdapter(nn.Module):
 
         # fuse and up-project
         delta = self.up(h_down + z_enc)                    # [B, T, hidden_dim]
-
-        # norm constraint — delta stays in same magnitude range as h
-        h_norm = hidden.norm(dim=-1, keepdim=True)
-        delta = delta * torch.tanh(
-            delta.norm(dim=-1, keepdim=True) / (h_norm + 1e-6)
-        )
-
         return hidden + delta                               # Residual connection
 
 
@@ -287,80 +280,107 @@ class ContinuousStyleLoss(nn.Module):
     def __init__(
         self,
         style_dim:      int   = 64,
-        lambda_div:     float = 1.0,
-        lambda_fluency: float = 0.5,
-        lambda_smooth:  float = 0.3,
+        lambda_sup:     float = 1.0,
+        lambda_div:     float = 0.1,
+        lambda_fluency: float = 0.1,
+        lambda_smooth:  float = 0.1,
     ):
         super().__init__()
         self.style_dim      = style_dim
+        self.lambda_sup     = lambda_sup
         self.lambda_div     = lambda_div
         self.lambda_fluency = lambda_fluency
         self.lambda_smooth  = lambda_smooth
 
+    def supervised(
+        self,
+        model:  nn.Module,
+        h:      torch.Tensor,   # (B, T, H) precomputed
+        z:      torch.Tensor,   # (B, style_dim) — per-sample style vector
+        labels: torch.Tensor,   # (B, T) with -100 for masked positions
+    ) -> torch.Tensor:
+        """Next-token CE on the styled trace. Anchors each style's z to its
+        target token distribution."""
+        logits = model.base.lm_head(model.adapter(h, z))
+        # standard causal LM shift
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        return F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+
     def forward(
         self,
-        model: nn.Module,
-        h:     torch.Tensor,   # (batch, seq_len, hidden_dim) — precomputed
+        model:  nn.Module,
+        h:      torch.Tensor,             # (B, T, H) — precomputed
+        z_sup:  torch.Tensor | None = None,  # (B, style_dim) — per-sample style z
+        labels: torch.Tensor | None = None,  # (B, T) with -100 mask
     ) -> dict[str, torch.Tensor]:
         batch_size = h.size(0)
         device     = str(h.device)
         dtype      = h.dtype
 
-        # sample two independent random z vectors per item
-        z_a = sample_random_z(batch_size, self.style_dim, device, dtype)
-        z_b = sample_random_z(batch_size, self.style_dim, device, dtype)
+        # ── 0. supervised loss (the dominant signal when available) ───────
+        L_sup = torch.zeros((), device=h.device, dtype=h.dtype)
+        if z_sup is not None and labels is not None:
+            L_sup = self.supervised(model, h, z_sup, labels)
+
+        zero = torch.zeros((), device=h.device, dtype=h.dtype)
+        need_z_a = self.lambda_div != 0.0 or self.lambda_fluency != 0.0 or self.lambda_smooth != 0.0
+
+        # Lazily compute one random-z forward pass shared across regularizers
+        z_a      = sample_random_z(batch_size, self.style_dim, device, dtype) if need_z_a else None
+        logits_a = model.base.lm_head(model.adapter(h, z_a)) if need_z_a else None
 
         # ── 1. divergence loss ────────────────────────────────────────────
-        # different z should produce different output distributions
-        logits_a = model.base.lm_head(model.adapter(h, z_a))
-        logits_b = model.base.lm_head(model.adapter(h, z_b))
-
-        log_probs_a = F.log_softmax(logits_a, dim=-1)
-        probs_b     = F.softmax(logits_b,     dim=-1)
-        L_div = -F.kl_div(
-            log_probs_a, probs_b,
-            reduction="batchmean",
-            log_target=False,
-        )
-        # negative — we maximize KL divergence between paired styles
+        if self.lambda_div != 0.0:
+            z_b      = sample_random_z(batch_size, self.style_dim, device, dtype)
+            logits_b = model.base.lm_head(model.adapter(h, z_b))
+            L_div = -F.kl_div(
+                F.log_softmax(logits_a, dim=-1),
+                F.softmax(logits_b, dim=-1),
+                reduction="batchmean",
+                log_target=False,
+            )
+        else:
+            L_div = zero
 
         # ── 2. fluency loss ───────────────────────────────────────────────
-        # styled output should not drift too far from base model output
-        # prevents adapter from destroying fluency
-        with torch.no_grad():
-            logits_base = model.base.lm_head(h)
-            probs_base  = F.softmax(logits_base, dim=-1)
-
-        log_probs_styled = F.log_softmax(logits_a, dim=-1)
-        L_fluency = F.kl_div(
-            log_probs_styled, probs_base,
-            reduction="batchmean",
-            log_target=False,
-        )
-        # minimize KL from base — stay fluent
+        if self.lambda_fluency != 0.0:
+            with torch.no_grad():
+                probs_base = F.softmax(model.base.lm_head(h), dim=-1)
+            L_fluency = F.kl_div(
+                F.log_softmax(logits_a, dim=-1),
+                probs_base,
+                reduction="batchmean",
+                log_target=False,
+            )
+        else:
+            L_fluency = zero
 
         # ── 3. smoothness loss ────────────────────────────────────────────
-        # nearby z should produce similar outputs
-        # prevents adapter from being discontinuous / chaotic
-        eps           = 0.05
-        z_a_perturbed = z_a + eps * torch.randn_like(z_a)
-        z_a_perturbed = torch.tanh(z_a_perturbed)   # keep in (-1,1)
-
-        logits_a_perturbed = model.base.lm_head(
-            model.adapter(h.detach(), z_a_perturbed)
-        )
-        L_smooth = F.mse_loss(
-            F.softmax(logits_a,           dim=-1),
-            F.softmax(logits_a_perturbed, dim=-1).detach(),
-        )
+        if self.lambda_smooth != 0.0:
+            eps           = 0.05
+            z_a_perturbed = torch.tanh(z_a + eps * torch.randn_like(z_a))
+            logits_perturbed = model.base.lm_head(model.adapter(h.detach(), z_a_perturbed))
+            L_smooth = F.mse_loss(
+                F.softmax(logits_a, dim=-1),
+                F.softmax(logits_perturbed, dim=-1).detach(),
+            )
+        else:
+            L_smooth = zero
 
         # ── combine ───────────────────────────────────────────────────────
-        total = (  self.lambda_div     * L_div
+        total = (  self.lambda_sup     * L_sup
+                 + self.lambda_div     * L_div
                  + self.lambda_fluency * L_fluency
                  + self.lambda_smooth  * L_smooth  )
 
         return {
             "loss":      total,
+            "L_sup":     L_sup.detach(),
             "L_div":     L_div.detach(),
             "L_fluency": L_fluency.detach(),
             "L_smooth":  L_smooth.detach(),

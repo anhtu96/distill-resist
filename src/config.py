@@ -118,12 +118,18 @@ class Settings(BaseSettings):
     teacher_lora_target_modules: list[str] = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
     # Style layer training
-    style_batch_size: int = 8
+    style_batch_size: int = 1
+    style_grad_accum_steps: int = 8
     style_learning_rate: float = 1e-4
     style_epochs: int = 1
-    style_max_seq_length: int = 2048
+    style_max_seq_length: int = 512
     style_dim: int = 64
     style_bottleneck_dim: int = 64
+
+    # CAA (Contrastive Activation Addition) inference
+    caa_checkpoint_path: str = "models/steering_vectors_caa/steering_vectors.pt"
+    caa_strength: float = 2.0
+    caa_batch_size: int = 4
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
