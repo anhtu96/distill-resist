@@ -128,6 +128,24 @@ class VLLMCAATraceGenerator:
     def disable_steering(self) -> None:
         vllm_caa.disable_caa()
 
+    def set_vector_from_metadata(self, metadata: dict) -> None:
+        from .prf import metadata_to_caa_vector
+        vectors = metadata_to_caa_vector(
+            metadata,
+            self._vectors_by_style,
+            self.insertion_layers,
+        )
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_active = True
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_strength = self.strength
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_vectors = vectors
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_layers = set(self.insertion_layers)
+        vllm_caa.set_caa_state(
+            active=True,
+            strength=self.strength,
+            layers=self.insertion_layers,
+            vectors=vectors,
+        )
+
     def _render(self, prompt: str, system_prompt: str) -> str:
         messages = [
             {"role": "system", "content": system_prompt},

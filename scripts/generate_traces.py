@@ -565,6 +565,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--caa-mode",
+        choices=["styles", "metadata"],
+        default="styles",
+        help=(
+            "CAA generation mode. 'styles' (default): one pass per style, full batch size. "
+            "'metadata': per-request interpolated vector from metadata, batch_size forced to 1."
+        ),
+    )
+    parser.add_argument(
         "--caa-samples",
         type=int,
         default=None,
@@ -1110,9 +1119,68 @@ def main():
             batch_size = generator.batch_size
             style_stats: dict[str, list[int]] = {}  # Track token counts per style
 
-            for style in generator.styles:
-                print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
-                generator.set_style(style)
+            if args.caa_mode == "metadata":
+                import uuid
+                import time
+
+                output_path_mixed = output_path.replace(".jsonl", "_caa_mixed.jsonl")
+                mixed_dataset = HoldoutDataset(output_path_mixed)
+                first_write = True
+
+                print(f"\n=== Generating CAA-steered traces (metadata mode) ===")
+                print(f"Output: {output_path_mixed}")
+                print(f"Batch size forced to 1 for per-request vector derivation")
+
+                for i, entry in enumerate(tqdm(normalized, desc="Generating (metadata-steered)")):
+                    metadata = {
+                        "user_id": "synthetic",
+                        "request_id": str(uuid.uuid4()),
+                        "timestamp": time.time(),
+                        "batch_order": i,
+                    }
+                    generator.set_vector_from_metadata(metadata)
+                    responses = generator.sample_batch([entry["user_prompt"]])
+                    forced = generator.force_answers(responses)
+
+                    eos_token = generator._tokenizer.eos_token or ""
+                    pad_token = generator._tokenizer.pad_token or ""
+                    cleaned = (
+                        forced[0]
+                        .replace(eos_token, "")
+                        .replace(pad_token, "")
+                        .replace("<|eot_id|>", "")
+                        .strip()
+                    )
+
+                    mixed_dataset.save(
+                        [
+                            {
+                                "model_name": teacher_model_id,
+                                "system_prompt": generator.system_prompt,
+                                "user_prompt": entry["user_prompt"],
+                                "response": cleaned,
+                                "final_answer": extract_final_answer(cleaned),
+                                "ground_truth": entry["ground_truth"],
+                                "caa_mode": "metadata",
+                            }
+                        ],
+                        append=not first_write,
+                    )
+                    first_write = False
+
+                print(f"\nSaved {i + 1} samples to {output_path_mixed}")
+
+                print(f"\nEvaluating answer accuracy...")
+                loaded_samples = mixed_dataset.load()
+                results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
+                print(
+                    f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
+                )
+            else:
+                # styles mode (default)
+                for style in generator.styles:
+                    print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
+                    generator.set_style(style)
 
                 styled_output_path = output_path.replace(".jsonl", f"_caa_{style}.jsonl")
                 styled_dataset = HoldoutDataset(styled_output_path)

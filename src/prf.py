@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import json
+import struct
 import numpy as np
 import torch
 
@@ -81,3 +82,38 @@ def _hkdf_expand(
         t    = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
         okm += t
     return okm[:length]
+
+
+def metadata_to_caa_vector(
+    metadata: dict,
+    vectors_by_style: dict[str, dict[int, torch.Tensor]],
+    insertion_layers: list[int],
+    secret_key: bytes = SECRET_KEY,
+) -> dict[int, torch.Tensor]:
+    """
+    Derive a per-request CAA steering vector by continuously interpolating
+    between trained style vectors. Weights are produced by HMAC-PRF so they
+    are deterministic given (secret_key, metadata) and unpredictable without
+    the key.
+    """
+    m = json.dumps(metadata, sort_keys=True).encode()
+    raw = hmac.new(secret_key, m, hashlib.sha256).digest()
+
+    styles = list(vectors_by_style)
+    # Extract one float per style from the HMAC output
+    raw_weights = np.array([
+        struct.unpack(">f", raw[i*4 : i*4+4])[0] for i in range(len(styles))
+    ], dtype=np.float32)
+    # Softmax for valid interpolation weights
+    raw_weights -= raw_weights.max()
+    weights = np.exp(raw_weights)
+    weights /= weights.sum()
+
+    result: dict[int, torch.Tensor] = {}
+    for layer_idx in insertion_layers:
+        blended = sum(
+            weights[i] * vectors_by_style[style][layer_idx]
+            for i, style in enumerate(styles)
+        )
+        result[layer_idx] = blended
+    return result
