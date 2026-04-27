@@ -52,6 +52,7 @@ class VLLMCAATraceGenerator:
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size
         self.strength = strength
+        self._current_style: str | None = None
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         if self._tokenizer.pad_token is None:
@@ -84,31 +85,44 @@ class VLLMCAATraceGenerator:
             dtype="bfloat16",
             trust_remote_code=True,
             enforce_eager=True,
+            tensor_parallel_size=1,
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
             hf_overrides={"architectures": [arch]},
         )
+
+        
         self._sampling_params = SamplingParams(
             max_tokens=max_new_tokens,
             temperature=temperature,
         )
+        _eos = self._tokenizer.eos_token or ""
         self._force_sampling_params = SamplingParams(
             max_tokens=32,
             temperature=0.0,
+            stop=[s for s in [_eos, "<end_of_turn>", "\\]"] if s],
         )
         print(
             f"vLLM CAA: arch={arch}, layers={self.insertion_layers}, styles={self.styles}"
         )
 
     def set_style(self, style: str) -> None:
+        self._current_style = style
         if style not in self._vectors_by_style:
             raise ValueError(
                 f"Style '{style}' not in checkpoint. Available: {self.styles}"
             )
+        vectors = self._vectors_by_style[style]
+        # Set class-level state on the custom model class
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_active = True
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_strength = self.strength
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_vectors = vectors
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_layers = set(self.insertion_layers)
+        # Also set file-based state as fallback
         vllm_caa.set_caa_state(
             active=True,
             strength=self.strength,
             layers=self.insertion_layers,
-            vectors=self._vectors_by_style[style],
+            vectors=vectors,
         )
 
     def disable_steering(self) -> None:
@@ -152,19 +166,27 @@ class VLLMCAATraceGenerator:
         Returns response + ANSWER_FORCE_STRING + decoded suffix, matching
         the answer-forcing behavior of HFCAATraceGenerator.
         """
-        # We need the same chat-rendered prefix that produced `response`,
-        # but force_answers in the HF path simply tokenizes
-        # `response + ANSWER_FORCE_STRING` directly. Match that here so the
-        # appended string is decoded in isolation.
-        af_prompts = [resp.strip() + ANSWER_FORCE_STRING for resp in responses]
-        outputs = self._llm.generate(
-            af_prompts, self._force_sampling_params, use_tqdm=False,
-        )
-        results: list[str] = []
-        for af, out in zip(af_prompts, outputs):
-            decoded = out.outputs[0].text if out.outputs else ""
-            results.append(af + decoded)
-        return results
+        # Disable steering for clean greedy extraction
+        vllm_caa.Gemma3CAADecoderLayer._caa_class_active = False
+        vllm_caa.disable_caa()
+        try:
+            # We need the same chat-rendered prefix that produced `response`,
+            # but force_answers in the HF path simply tokenizes
+            # `response + ANSWER_FORCE_STRING` directly. Match that here so the
+            # appended string is decoded in isolation.
+            af_prompts = [resp.strip() + ANSWER_FORCE_STRING for resp in responses]
+            outputs = self._llm.generate(
+                af_prompts, self._force_sampling_params, use_tqdm=False,
+            )
+            results: list[str] = []
+            for af, out in zip(af_prompts, outputs):
+                decoded = out.outputs[0].text if out.outputs else ""
+                results.append(af + decoded)
+            return results
+        finally:
+            # Restore style if one was active
+            if self._current_style is not None:
+                self.set_style(self._current_style)
 
     def load_prompts(self):
         loader = get_loader(

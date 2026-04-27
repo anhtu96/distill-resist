@@ -27,6 +27,13 @@ from src.loaders import get_loader
 from src.utils.answer_extraction import extract_final_answer
 
 
+def _make_force_sampling_params(tokenizer) -> "SamplingParams":
+    from vllm import SamplingParams
+    eos = tokenizer.eos_token or ""
+    stop = [s for s in [eos, "<end_of_turn>", "\\]"] if s]
+    return SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0, stop=stop)
+
+
 class VLLMTraceGenerator:
     _BASE_STOP_MARKERS = ["\n\n"]
     _LLAMA_MARKERS = ["<|eot_id|>"]
@@ -284,9 +291,8 @@ def do_rewrite(args, settings):
                     )
 
                 # Answer forcing: ensure a deterministic final boxed line
-                from vllm import SamplingParams
                 af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
-                af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
+                af_sampling_params = _make_force_sampling_params(rewriter._tokenizer)
                 af_outputs = rewriter._llm.generate(
                     af_prompts,
                     af_sampling_params,
@@ -547,12 +553,7 @@ def main():
         default=None,
         help="Override caa_strength from config",
     )
-    parser.add_argument(
-        "--caa-batch-size",
-        type=int,
-        default=None,
-        help="Override caa_batch_size from config",
-    )
+
     parser.add_argument(
         "--caa-backend",
         choices=["vllm", "hf"],
@@ -562,6 +563,12 @@ def main():
             "Gemma3 model class with residual-stream injection (fast). "
             "'hf' uses HuggingFace transformers with forward hooks (fallback)."
         ),
+    )
+    parser.add_argument(
+        "--caa-samples",
+        type=int,
+        default=None,
+        help="Override caa_samples from config",
     )
     args = parser.parse_args()
 
@@ -867,11 +874,9 @@ def main():
                 batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
 
                 # Answer forcing: append the answer prompt and force a short greedy completion
-                # Note: we intentionally do not inject a </think> tag here.
-                from vllm import SamplingParams
-
+                # Note: we intentionally do not inject a  tag here.
                 af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
-                af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
+                af_sampling_params = _make_force_sampling_params(model._tokenizer)
                 af_outputs = model._llm.generate(
                     af_prompts,
                     af_sampling_params,
@@ -991,9 +996,8 @@ def main():
                         )
 
                     # Answer forcing
-                    from vllm import SamplingParams
                     af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
-                    af_sampling_params = SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0)
+                    af_sampling_params = _make_force_sampling_params(rewriter._tokenizer)
                     af_outputs = rewriter._llm.generate(
                         af_prompts,
                         af_sampling_params,
@@ -1065,7 +1069,7 @@ def main():
             temperature=gen_temperature,
             caa_checkpoint=ckpt_path,
             system_prompt=settings.teacher_system_prompt,
-            batch_size=args.caa_batch_size or settings.caa_batch_size,
+            batch_size=settings.teacher_batch_size,
             strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
         )
 
@@ -1076,10 +1080,18 @@ def main():
             )
             prompts = generator.load_prompts()
 
-            if settings.sample_limit is None:
-                total = len(prompts)
+            # Prepare sample limit: CLI arg takes precedence, then config, then settings.sample_limit
+            limit_n = args.caa_samples if isinstance(args.caa_samples, int) and args.caa_samples > 0 else (
+                settings.caa_samples if settings.caa_samples is not None else None
+            )
+            
+            if limit_n is None:
+                if settings.sample_limit is None:
+                    total = len(prompts)
+                else:
+                    total = min(len(prompts), settings.sample_limit)
             else:
-                total = min(len(prompts), settings.sample_limit)
+                total = min(len(prompts), limit_n)
 
             entries = prompts[:total]
             normalized: list[dict[str, str]] = []
@@ -1096,6 +1108,7 @@ def main():
 
             all_prompts = [entry["user_prompt"] for entry in normalized]
             batch_size = generator.batch_size
+            style_stats: dict[str, list[int]] = {}  # Track token counts per style
 
             for style in generator.styles:
                 print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
@@ -1103,6 +1116,7 @@ def main():
 
                 styled_output_path = output_path.replace(".jsonl", f"_caa_{style}.jsonl")
                 styled_dataset = HoldoutDataset(styled_output_path)
+                style_stats[style] = []
 
                 first_write = True
                 generated_count = 0
@@ -1134,6 +1148,10 @@ def main():
                             .replace("</think>", "")
                             .strip()
                         )
+                        # Count tokens in response
+                        tokens = generator._tokenizer.encode(response)
+                        style_stats[style].append(len(tokens))
+                        
                         batch_samples.append(
                             {
                                 "model_name": teacher_model_id,
@@ -1163,6 +1181,18 @@ def main():
                     idx = mismatch.get("idx")
                     incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
                 print(f"First 5 incorrect orders: {incorrect_orders}")
+            
+            # Display token count summary for all styles
+            print(f"\n{'='*60}")
+            print("Token Count Summary (Mean tokens per response):")
+            print(f"{'='*60}")
+            for style in generator.styles:
+                if style_stats[style]:
+                    mean_tokens = sum(style_stats[style]) / len(style_stats[style])
+                    min_tokens = min(style_stats[style])
+                    max_tokens = max(style_stats[style])
+                    print(f"{style:12s} | mean: {mean_tokens:7.2f} | min: {min_tokens:5d} | max: {max_tokens:5d}")
+            print(f"{'='*60}")
         finally:
             generator.close()
         return

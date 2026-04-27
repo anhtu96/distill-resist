@@ -52,6 +52,7 @@ class HFCAATraceGenerator:
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size
         self.strength = strength
+        self._current_style: str | None = None
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         if self._tokenizer.pad_token is None:
@@ -97,6 +98,7 @@ class HFCAATraceGenerator:
         print(f"Loaded CAA checkpoint: layers={self.insertion_layers}, styles={self.styles}")
 
     def set_style(self, style: str) -> None:
+        self._current_style = style
         if style not in self.steering_vectors:
             raise ValueError(f"Style '{style}' not in checkpoint. Available: {self.styles}")
         for state, sv_np in zip(self._states, self.steering_vectors[style]):
@@ -157,28 +159,33 @@ class HFCAATraceGenerator:
         Returns response + ANSWER_FORCE_STRING + decoded suffix, matching
         the vLLM answer-forcing behavior in generate_traces.py.
         """
-        af_prompts = [resp.strip() + ANSWER_FORCE_STRING for resp in responses]
-        results: list[str] = []
-        for i in range(0, len(af_prompts), self.batch_size):
-            batch = af_prompts[i : i + self.batch_size]
-            inputs = self._tokenizer(
-                batch, return_tensors="pt", padding=True, truncation=False,
-            ).to(self._model.device)
+        self.disable_steering()
+        try:
+            af_prompts = [resp.strip() + ANSWER_FORCE_STRING for resp in responses]
+            results: list[str] = []
+            for i in range(0, len(af_prompts), self.batch_size):
+                batch = af_prompts[i : i + self.batch_size]
+                inputs = self._tokenizer(
+                    batch, return_tensors="pt", padding=True, truncation=False,
+                ).to(self._model.device)
 
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=32,
-                    do_sample=False,
-                    pad_token_id=self._tokenizer.pad_token_id,
-                )
+                with torch.no_grad():
+                    outputs = self._model.generate(
+                        **inputs,
+                        max_new_tokens=32,
+                        do_sample=False,
+                        pad_token_id=self._tokenizer.pad_token_id,
+                    )
 
-            input_len = inputs["input_ids"].shape[1]
-            for af, out in zip(batch, outputs):
-                new_tokens = out[input_len:]
-                decoded = self._tokenizer.decode(new_tokens, skip_special_tokens=True)
-                results.append(af + decoded)
-        return results
+                input_len = inputs["input_ids"].shape[1]
+                for af, out in zip(batch, outputs):
+                    new_tokens = out[input_len:]
+                    decoded = self._tokenizer.decode(new_tokens, skip_special_tokens=True)
+                    results.append(af + decoded)
+            return results
+        finally:
+            if self._current_style is not None:
+                self.set_style(self._current_style)
 
     def load_prompts(self):
         loader = get_loader(

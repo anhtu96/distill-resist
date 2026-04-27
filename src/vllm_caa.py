@@ -5,6 +5,8 @@ residual stream after the layer's normal forward pass. The classes are
 registered with vLLM's ModelRegistry so vllm.LLM(...) can construct them
 when the model architecture is overridden via hf_overrides.
 
+CAA state is stored in /tmp/vllm_caa_state.pt so it persists across worker processes.
+
 Usage (registration is performed on import):
 
     from src import vllm_caa
@@ -20,6 +22,8 @@ Usage (registration is performed on import):
 
 from __future__ import annotations
 
+import os
+import tempfile
 import torch
 
 from vllm.model_executor.models import ModelRegistry
@@ -30,12 +34,32 @@ from vllm.model_executor.models.gemma3 import (
 from vllm.model_executor.models.gemma3_mm import Gemma3ForConditionalGeneration
 
 
-_CAA_STATE: dict = {
-    "active": False,
-    "strength": 0.0,
-    "layers": set(),
-    "vectors": {},  # dict[int, torch.Tensor] of shape [H]
-}
+_CAA_STATE_FILE = os.path.join(tempfile.gettempdir(), "vllm_caa_state.pt")
+_DEBUG_CAA = False  # Toggle CAA debug logging
+
+# Cache for CAA state to avoid repeated torch.load() calls
+_STATE_CACHE: dict = {}
+_STATE_CACHE_MTIME: float = -1.0
+
+
+def _load_caa_state() -> dict:
+    """Load CAA state from shared file (works across process boundaries)."""
+    global _STATE_CACHE, _STATE_CACHE_MTIME
+    if os.path.exists(_CAA_STATE_FILE):
+        try:
+            mtime = os.path.getmtime(_CAA_STATE_FILE)
+            if mtime == _STATE_CACHE_MTIME and _STATE_CACHE:
+                return _STATE_CACHE
+            state = torch.load(_CAA_STATE_FILE, weights_only=False)
+            _STATE_CACHE = state
+            _STATE_CACHE_MTIME = mtime
+            if _DEBUG_CAA and state.get("active"):
+                print(f"[VLLM_CAA] Loaded state: active={state['active']}, layers={state['layers']}")
+            return state
+        except Exception as e:
+            print(f"[VLLM_CAA] Error loading state file: {e}")
+            pass
+    return {"active": False, "strength": 0.0, "layers": set(), "vectors": {}}
 
 
 def set_caa_state(
@@ -45,18 +69,27 @@ def set_caa_state(
     layers=None,
     vectors: dict[int, torch.Tensor] | None = None,
 ) -> None:
+    state = _load_caa_state()
+    
     if active is not None:
-        _CAA_STATE["active"] = bool(active)
+        state["active"] = bool(active)
     if strength is not None:
-        _CAA_STATE["strength"] = float(strength)
+        state["strength"] = float(strength)
     if layers is not None:
-        _CAA_STATE["layers"] = set(int(l) for l in layers)
+        state["layers"] = set(int(l) for l in layers)
     if vectors is not None:
-        _CAA_STATE["vectors"] = {int(k): v for k, v in vectors.items()}
+        state["vectors"] = {int(k): v for k, v in vectors.items()}
+    
+    torch.save(state, _CAA_STATE_FILE)
+    
+    if _DEBUG_CAA and active:
+        print(f"[VLLM_CAA] Activated: strength={state['strength']}, layers={state['layers']}, num_vectors={len(state['vectors'])}")
 
 
 def disable_caa() -> None:
-    _CAA_STATE["active"] = False
+    state = _load_caa_state()
+    state["active"] = False
+    torch.save(state, _CAA_STATE_FILE)
 
 
 class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
@@ -73,25 +106,62 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
         hidden_states, residual = super().forward(
             positions, hidden_states, residual, **kwargs
         )
-        if _CAA_STATE["active"]:
-            idx = getattr(self, "_caa_layer_idx", None)
-            if idx is not None and idx in _CAA_STATE["layers"]:
-                sv = _CAA_STATE["vectors"].get(idx)
-                if sv is not None:
-                    add = (_CAA_STATE["strength"] * sv).to(
-                        device=residual.device, dtype=residual.dtype
-                    )
-                    residual = residual + add
+
+        idx = getattr(self, "_caa_layer_idx", None)
+
+        # Check class-level state first (most reliable for vLLM workers)
+        active = getattr(self.__class__, "_caa_class_active", False)
+        strength = getattr(self.__class__, "_caa_class_strength", 0.0)
+        vectors = getattr(self.__class__, "_caa_class_vectors", {})
+        target_layers = getattr(self.__class__, "_caa_class_layers", set())
+
+        if _DEBUG_CAA and idx == 24:
+            print(f"[VLLM_CAA] Layer {idx}: class_active={active}, class_vectors_len={len(vectors)}")
+
+        # Fall back to layer-local state
+        if not active:
+            active = getattr(self, "_caa_active", False)
+            strength = getattr(self, "_caa_strength", 0.0)
+            vectors = getattr(self, "_caa_vectors", {})
+            if _DEBUG_CAA and idx == 24:
+                print(f"[VLLM_CAA] Layer {idx}: layer_active={active}, layer_vectors_len={len(vectors)}")
+
+        # Fall back to file-based state
+        if not active:
+            caa_state = _load_caa_state()
+            active = caa_state["active"]
+            strength = caa_state["strength"]
+            vectors = caa_state["vectors"]
+            target_layers = caa_state["layers"]
+            if _DEBUG_CAA and idx == 24:
+                print(f"[VLLM_CAA] Layer {idx}: file_active={active}, file_vectors_len={len(vectors)}")
+
+        if active and idx is not None and idx in target_layers and idx in vectors:
+            sv = vectors.get(idx)
+            if sv is not None:
+                if _DEBUG_CAA:
+                    print(f"[VLLM_CAA] INJECTING at layer {idx}, strength={strength}, sv_shape={sv.shape}")
+                add = (strength * sv).to(
+                    device=residual.device, dtype=residual.dtype
+                )
+                residual = residual + add
+        elif _DEBUG_CAA and idx == 24:
+            print(f"[VLLM_CAA] Layer {idx}: NOT injecting - active={active}, idx={idx}, idx_in_target={idx in target_layers if target_layers else 'N/A'}, idx_in_vectors={idx in vectors}")
+
         return hidden_states, residual
 
 
 def _swap_decoder_layers(layers) -> None:
+    swapped_count = 0
     for idx, layer in enumerate(layers):
         if isinstance(layer, Gemma3DecoderLayer) and not isinstance(
             layer, Gemma3CAADecoderLayer
         ):
             layer.__class__ = Gemma3CAADecoderLayer
             layer._caa_layer_idx = idx
+            swapped_count += 1
+    if _DEBUG_CAA:
+        print(f"[VLLM_CAA] Swapped {swapped_count}/{len(layers)} decoder layers")
 
 
 class Gemma3CAAForCausalLM(Gemma3ForCausalLM):
@@ -99,6 +169,8 @@ class Gemma3CAAForCausalLM(Gemma3ForCausalLM):
 
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if _DEBUG_CAA:
+            print(f"[VLLM_CAA] Initializing Gemma3CAAForCausalLM with {len(self.model.layers)} decoder layers")
         _swap_decoder_layers(self.model.layers)
 
 
@@ -107,6 +179,8 @@ class Gemma3CAAForConditionalGeneration(Gemma3ForConditionalGeneration):
 
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if _DEBUG_CAA:
+            print(f"[VLLM_CAA] Initializing Gemma3CAAForConditionalGeneration with {len(self.language_model.model.layers)} decoder layers")
         _swap_decoder_layers(self.language_model.model.layers)
 
 

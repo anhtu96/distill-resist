@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     dataset_config: str = "main"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
     num_samples_train: int | None = None  # None means use all train samples
-    num_samples_test: int | None = None   # None means use all test samples
+    num_samples_test: int | None = 5   # None means use all test samples
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
@@ -130,6 +130,7 @@ class Settings(BaseSettings):
     caa_checkpoint_path: str = "models/steering_vectors_caa/steering_vectors.pt"
     caa_strength: float = 2.0
     caa_batch_size: int = 4
+    caa_samples: int | None = 5  # None means use all samples (or sample_limit if set)
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
