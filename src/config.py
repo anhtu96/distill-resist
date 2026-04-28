@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
     teacher_max_new_tokens: int = 1024
-    teacher_batch_size: int = 1024
+    teacher_batch_size: int = 128
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.0
     vllm_gpu_memory_utilization: float = 0.8
@@ -69,8 +69,8 @@ class Settings(BaseSettings):
     teacher_holdout_model: str = f"models/teacher_finetune_{dataset_name}_mixed_merged"
     dataset_config: str = "main"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
-    num_samples_train: int | None = None  # None means use all train samples
-    num_samples_test: int | None = 5   # None means use all test samples
+    num_samples_train: int | None = 5  # None means use all train samples
+    num_samples_test: int | None = None   # None means use all test samples
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
@@ -81,10 +81,10 @@ class Settings(BaseSettings):
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"
-    student_max_new_tokens: int = 1024
+    student_max_new_tokens: int = 2048
     student_temperature: float = 0.0
     student_output_dir: str = "models/student"
-    student_num_train_epochs: int = 3
+    student_num_train_epochs: int = 2
     student_per_device_train_batch_size: int = 2
     student_per_device_eval_batch_size: int = 8
     student_gradient_accumulation_steps: int = 8
@@ -128,9 +128,11 @@ class Settings(BaseSettings):
 
     # CAA (Contrastive Activation Addition) inference
     caa_checkpoint_path: str = "models/steering_vectors_caa/steering_vectors.pt"
-    caa_strength: float = 2.0
+    caa_strength: float = 5.0
     caa_batch_size: int = 4
     caa_samples: int | None = 5  # None means use all samples (or sample_limit if set)
+    caa_weight_mode: str = "softmax"
+
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

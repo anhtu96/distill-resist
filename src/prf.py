@@ -1,7 +1,6 @@
 import hmac
 import hashlib
 import json
-import struct
 import numpy as np
 import torch
 
@@ -89,31 +88,57 @@ def metadata_to_caa_vector(
     vectors_by_style: dict[str, dict[int, torch.Tensor]],
     insertion_layers: list[int],
     secret_key: bytes = SECRET_KEY,
-) -> dict[int, torch.Tensor]:
+    weight_mode: str = "softmax",
+) -> tuple[dict[int, torch.Tensor], dict[str, float]]:
     """
-    Derive a per-request CAA steering vector by continuously interpolating
-    between trained style vectors. Weights are produced by HMAC-PRF so they
-    are deterministic given (secret_key, metadata) and unpredictable without
-    the key.
+    Derive a per-request CAA steering vector by blending trained style vectors.
+    Weights are produced by HMAC-PRF so they are deterministic given
+    (secret_key, metadata) and unpredictable without the key.
+
+    Args:
+        weight_mode: how to combine styles —
+            "softmax"   — continuous interpolation (default)
+            "binarize"  — winner-takes-all (one style gets weight 1, rest 0)
+            "normalize" — softmax blend rescaled to the average component norm
+
+    Returns:
+        (blended_vectors, style_weights) where style_weights maps style name to weight
     """
     m = json.dumps(metadata, sort_keys=True).encode()
     raw = hmac.new(secret_key, m, hashlib.sha256).digest()
 
     styles = list(vectors_by_style)
-    # Extract one float per style from the HMAC output
+    # Extract one unsigned integer per style from the HMAC output, then convert to
+    # float. Using int.from_bytes avoids IEEE 754 special values (NaN, inf) that
+    # struct.unpack(">f") can produce from arbitrary bytes.
     raw_weights = np.array([
-        struct.unpack(">f", raw[i*4 : i*4+4])[0] for i in range(len(styles))
-    ], dtype=np.float32)
-    # Softmax for valid interpolation weights
+        int.from_bytes(raw[i*4 : i*4+4], "big") / 2**32
+        for i in range(len(styles))
+    ], dtype=np.float64)
     raw_weights -= raw_weights.max()
     weights = np.exp(raw_weights)
     weights /= weights.sum()
 
+    if weight_mode == "binarize":
+        binary = np.zeros_like(weights)
+        binary[weights.argmax()] = 1.0
+        weights = binary
+
+    style_weights = {style: float(weights[i]) for i, style in enumerate(styles)}
+
     result: dict[int, torch.Tensor] = {}
     for layer_idx in insertion_layers:
-        blended = sum(
-            weights[i] * vectors_by_style[style][layer_idx]
-            for i, style in enumerate(styles)
-        )
+        vecs = [weights[i] * vectors_by_style[style][layer_idx] for i, style in enumerate(styles)]
+        blended: torch.Tensor = vecs[0]
+        for v in vecs[1:]:
+            blended = blended + v
+        if weight_mode == "normalize":
+            avg_norm = sum(
+                vectors_by_style[style][layer_idx].norm().item()
+                for style in styles
+            ) / len(styles)
+            blended_norm = blended.norm().item()
+            if blended_norm > 0:
+                blended = blended * (avg_norm / blended_norm)
         result[layer_idx] = blended
-    return result
+    return result, style_weights

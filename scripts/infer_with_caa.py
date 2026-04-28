@@ -114,7 +114,11 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--strength", type=float, default=3.0,
-                        help="Steering strength multiplier (default: 20)")
+                        help="Steering strength multiplier (default: 3.0)")
+    parser.add_argument("--metadata", type=str, default=None,
+                        help="JSON metadata string for PRF-based style blending")
+    parser.add_argument("--caa-weight-mode", choices=["softmax", "binarize", "normalize"], default="softmax",
+                        help="How to combine styles in metadata mode (default: softmax)")
     args = parser.parse_args()
 
     if not Path(args.checkpoint).exists():
@@ -132,12 +136,35 @@ def main():
     print(f"Insertion layers: {insertion_layers}")
     print(f"Available styles: {available_styles}")
 
-    if args.all_styles or args.style is None:
-        styles_to_run = available_styles
+    if args.metadata:
+        import json
+        from src.prf import metadata_to_caa_vector
+        metadata = json.loads(args.metadata)
+        
+        # metadata_to_caa_vector expects {style: {layer: tensor}}
+        vectors_by_style_tensor = {}
+        for style, sv_list in sv_dict.items():
+            vectors_by_style_tensor[style] = {
+                l: torch.as_tensor(sv, dtype=torch.float32)
+                for l, sv in zip(insertion_layers, sv_list)
+            }
+        
+        blended_vectors, weights = metadata_to_caa_vector(
+            metadata, 
+            vectors_by_style_tensor, 
+            insertion_layers,
+            weight_mode=args.caa_weight_mode
+        )
+        print(f"\nPRF Weights: {weights}")
+        # Convert back to list format for load_style
+        blended_list = [blended_vectors[l].numpy() for l in insertion_layers]
+        styles_to_run = [("metadata", blended_list)]
+    elif args.all_styles or args.style is None:
+        styles_to_run = [(s, sv_dict[s]) for s in available_styles]
     else:
         if args.style not in sv_dict:
             parser.error(f"Style '{args.style}' not in checkpoint. Available: {available_styles}")
-        styles_to_run = [args.style]
+        styles_to_run = [(args.style, sv_dict[args.style])]
 
     print(f"\nLoading model: {args.model_id}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -155,10 +182,10 @@ def main():
     print(generate(model, tokenizer, prompt, states, args.max_tokens,
                    args.temperature, args.top_p, active=False, strength=args.strength))
 
-    for style in styles_to_run:
-        load_style(states, sv_dict[style])
+    for style_name, sv_list in styles_to_run:
+        load_style(states, sv_list)
         print("\n" + "=" * 70)
-        print(f"STYLE: {style}  (strength={args.strength})")
+        print(f"STYLE: {style_name}  (strength={args.strength})")
         print("=" * 70)
         print(generate(model, tokenizer, prompt, states, args.max_tokens,
                        args.temperature, args.top_p, active=True, strength=args.strength))

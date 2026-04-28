@@ -196,10 +196,39 @@ def _resolve_student_style_dataset_path(
     preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
     legacy_stem = f"teacher_{settings.dataset_name}_{holdout_variant}"
 
-    suffix = ""
-    if use_ad:
-        suffix += "_ad"
-    suffix += f"_rewrite_{style_key}"
+    suffixes = [
+        f"_styles_style_{style_key}",
+        f"_rewrite_{style_key}",
+    ]
+
+    for sfx in suffixes:
+        preferred = Path("data/teacher_holdout") / f"{preferred_stem}{sfx}.jsonl"
+        if preferred.exists():
+            return preferred
+
+        legacy = Path("data/teacher_holdout") / f"{legacy_stem}{sfx}.jsonl"
+        if legacy.exists():
+            logging.warning(
+                "Using legacy style holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
+                legacy,
+            )
+            return legacy
+
+    # Return default preferred path if none found
+    return Path("data/teacher_holdout") / f"{preferred_stem}_rewrite_{style_key}.jsonl"
+
+
+def _resolve_student_caa_dataset_path(
+    settings: Settings,
+    use_trained_teacher: bool,
+    use_batch: bool,
+) -> Path:
+    holdout_variant = "trained" if use_trained_teacher else "base"
+    teacher_for_tag = settings.teacher_holdout_model if use_trained_teacher else settings.teacher_model
+    preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
+    legacy_stem = f"teacher_{settings.dataset_name}_{holdout_variant}"
+
+    suffix = "_caa_mixed_batch" if use_batch else "_caa_mixed"
 
     preferred = Path("data/teacher_holdout") / f"{preferred_stem}{suffix}.jsonl"
     if preferred.exists():
@@ -208,7 +237,7 @@ def _resolve_student_style_dataset_path(
     legacy = Path("data/teacher_holdout") / f"{legacy_stem}{suffix}.jsonl"
     if legacy.exists():
         logging.warning(
-            "Using legacy holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
+            "Using legacy CAA holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
             legacy,
         )
         return legacy
@@ -242,6 +271,16 @@ def main():
         "--with-styles",
         action="store_true",
         help="When training student model, combine styles based on holdout sizes",
+    )
+    parser.add_argument(
+        "--with-caa",
+        action="store_true",
+        help="When training student model, use CAA-steered holdout dataset",
+    )
+    parser.add_argument(
+        "--caa-batch",
+        action="store_true",
+        help="With --with-caa, use the _caa_mixed_batch.jsonl dataset instead of _caa_mixed.jsonl",
     )
     parser.add_argument(
         "--ad",
@@ -452,64 +491,66 @@ def main():
 
     _guard_student_output_dir_compat(settings.student_output_dir, settings.student_model_id)
 
-    os.environ["WANDB_PROJECT"] = "anti-distill"
-    os.environ["WANDB_RUN_NAME"] = "distill-rewrite" if effective_use_rewrite else "distill-normal"
-
     tokenizer = AutoTokenizer.from_pretrained(settings.student_model_id)
-    
+
+    os.environ["WANDB_PROJECT"] = "anti-distill"
     if args.with_styles:
-        base_dataset_path = _resolve_student_holdout_dataset_path(
-            settings,
-            use_trained_teacher=effective_use_trained_teacher,
-            use_ad=effective_use_ad,
-            use_rewrite=False,
-        )
-        base_dataset = HoldoutDataset(str(base_dataset_path))
-        base_hf_dataset = base_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
-        total_samples = len(base_hf_dataset)
-
         from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS
-        styles = list(REWRITE_SYSTEM_PROMPT_VARIANTS.keys())
-        n = len(styles)
+        style_keys = list(REWRITE_SYSTEM_PROMPT_VARIANTS.keys())
 
-        indices = list(range(total_samples))
-        chunk_size = total_samples // n
-        splits = []
-        for i in range(n):
-            if i == n - 1:
-                splits.append(indices[i * chunk_size : ])
-            else:
-                splits.append(indices[i * chunk_size : (i + 1) * chunk_size])
+        # Load base dataset to get total size for partitioning
+        base_dataset = HoldoutDataset(dataset_path)
+        total_samples = len(base_dataset)
+        samples_per_style = total_samples // len(style_keys)
 
-        style_datasets = []
-        for i, style_key in enumerate(styles):
-            style_dataset_path = _resolve_student_style_dataset_path(
+        partitioned_hf_datasets = []
+        for i, style_key in enumerate(style_keys):
+            style_path = _resolve_student_style_dataset_path(
                 settings,
                 use_trained_teacher=effective_use_trained_teacher,
                 use_ad=effective_use_ad,
-                style_key=style_key,
+                style_key=style_key
             )
-            style_dataset = HoldoutDataset(str(style_dataset_path))
+            if not style_path.exists():
+                print(f"Warning: Style dataset {style_path} not found, skipping style {style_key}")
+                continue
+
+            style_dataset = HoldoutDataset(str(style_path))
             style_hf = style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
 
-            if len(style_hf) < len(splits[i]):
-                print(f"Warning: Style dataset {style_key} has only {len(style_hf)} samples, but we need {len(splits[i])}. Truncating split.")
-                current_split = splits[i][:len(style_hf)]
-            else:
-                current_split = splits[i]
+            start_idx = i * samples_per_style
+            end_idx = (i + 1) * samples_per_style if i < len(style_keys) - 1 else total_samples
 
-            split_hf = style_hf.select(current_split)
-            style_datasets.append(split_hf)
-            print(f"Loaded {len(split_hf)} samples from {style_dataset_path} for split {i} ({style_key})")
+            # Select the slice
+            style_slice = style_hf.select(range(start_idx, min(end_idx, len(style_hf))))
+            partitioned_hf_datasets.append(style_slice)
+            print(f"Loaded {len(style_slice)} samples for style {style_key} from {style_path}")
 
-        hf_dataset = concatenate_datasets(style_datasets)
-        print(f"Concatenated student training dataset contains {len(hf_dataset)} samples")
+        if not partitioned_hf_datasets:
+            raise RuntimeError("No style datasets found for --with-styles")
+
+        hf_dataset = concatenate_datasets(partitioned_hf_datasets)
+        os.environ["WANDB_RUN_NAME"] = "distill-styles"
 
         output_dir_obj = Path(settings.student_output_dir)
-        if not output_dir_obj.name.endswith("_styles"):
-            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_styles")
+        if not output_dir_obj.name.endswith("_with_styles"):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_with_styles")
+    elif args.with_caa:
+        caa_dataset_path = _resolve_student_caa_dataset_path(
+            settings,
+            use_trained_teacher=effective_use_trained_teacher,
+            use_batch=args.caa_batch,
+        )
+        caa_dataset = HoldoutDataset(str(caa_dataset_path))
+        hf_dataset = caa_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+        print(f"Loaded {len(hf_dataset)} samples from {caa_dataset_path}")
 
-        os.environ["WANDB_RUN_NAME"] = "distill-styles"
+        output_dir_obj = Path(settings.student_output_dir)
+        suffix = "_caa_batch" if args.caa_batch else "_caa"
+        if not output_dir_obj.name.endswith(suffix):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{suffix}")
+
+        os.environ["WANDB_RUN_NAME"] = f"distill-caa{'-batch' if args.caa_batch else ''}"
     else:
         dataset = HoldoutDataset(dataset_path)
         hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)

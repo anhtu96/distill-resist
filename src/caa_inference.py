@@ -44,6 +44,8 @@ class HFCAATraceGenerator:
         system_prompt: Optional[str] = None,
         batch_size: int = 4,
         strength: float = 5.0,
+        injection_layers: Optional[list[int]] = None,
+        caa_weight_mode: str = "softmax",
     ):
         self.settings = settings
         self.model_id = model_id
@@ -52,6 +54,7 @@ class HFCAATraceGenerator:
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size
         self.strength = strength
+        self.caa_weight_mode = caa_weight_mode
         self._current_style: str | None = None
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -75,9 +78,28 @@ class HFCAATraceGenerator:
             raise ValueError(
                 f"CAA checkpoint injection_point is '{injection_point}', expected 'residual'."
             )
-        self.insertion_layers: list[int] = ckpt["insertion_layers"]
+        self.insertion_layers: list[int] = list(ckpt["insertion_layers"])
         self.steering_vectors: dict = ckpt["steering_vectors"]
         self.styles: list[str] = ckpt.get("styles", list(self.steering_vectors))
+
+        # Filter to requested subset, preserving checkpoint order
+        if injection_layers is not None:
+            missing = set(injection_layers) - set(self.insertion_layers)
+            if missing:
+                raise ValueError(
+                    f"Requested injection layers {sorted(missing)} not in checkpoint layers {self.insertion_layers}"
+                )
+            self.insertion_layers = [l for l in self.insertion_layers if l in set(injection_layers)]
+
+        # Filter steering_vectors to only include selected layers
+        original_insertion_layers = list(ckpt["insertion_layers"])
+        new_steering_vectors: dict[str, list[np.ndarray]] = {}
+        for style, sv_list in self.steering_vectors.items():
+            new_steering_vectors[style] = [
+                sv_list[original_insertion_layers.index(l)]
+                for l in self.insertion_layers
+            ]
+        self.steering_vectors = new_steering_vectors
 
         self._states: list[dict] = []
         for layer_idx in self.insertion_layers:
@@ -108,6 +130,32 @@ class HFCAATraceGenerator:
             state["vector"] = sv
             state["active"] = True
             state["b"] = self.strength
+
+    def set_vector_from_metadata(self, metadata: dict) -> dict[str, float]:
+        from .prf import metadata_to_caa_vector
+        # metadata_to_caa_vector expects vectors_by_style to be {style: {layer: tensor}}
+        # Our self.steering_vectors is {style: [np_array, ...]}
+        # Let's build a compatible dict on the fly or adjust it in __init__
+        vectors_by_style_tensor = {}
+        for style, sv_list in self.steering_vectors.items():
+            vectors_by_style_tensor[style] = {
+                l: torch.as_tensor(sv, dtype=torch.float32)
+                for l, sv in zip(self.insertion_layers, sv_list)
+            }
+        
+        vectors, style_weights = metadata_to_caa_vector(
+            metadata,
+            vectors_by_style_tensor,
+            self.insertion_layers,
+            weight_mode=self.caa_weight_mode,
+        )
+        
+        for state, layer_idx in zip(self._states, self.insertion_layers):
+            state["vector"] = vectors[layer_idx].unsqueeze(0) if vectors[layer_idx].dim() == 1 else vectors[layer_idx]
+            state["active"] = True
+            state["b"] = self.strength
+            
+        return style_weights
 
     def disable_steering(self) -> None:
         for state in self._states:

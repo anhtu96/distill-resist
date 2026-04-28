@@ -35,7 +35,8 @@ def _make_force_sampling_params(tokenizer) -> "SamplingParams":
 
 
 class VLLMTraceGenerator:
-    _BASE_STOP_MARKERS = ["\n\n"]
+    _BASE_STOP_MARKERS: list[str] = []
+    _GEMMA_MARKERS = ["<end_of_turn>"]
     _LLAMA_MARKERS = ["<|eot_id|>"]
 
     @staticmethod
@@ -64,6 +65,7 @@ class VLLMTraceGenerator:
         temperature: float,
         system_prompt: str | None = None,
         batch_size: int | None = None,
+        caa_weight_mode: str = "softmax",
     ):
         from vllm import LLM, SamplingParams
 
@@ -103,6 +105,10 @@ class VLLMTraceGenerator:
         stop_markers = list(self._BASE_STOP_MARKERS)
         if self._use_llama_markers:
             stop_markers.extend(self._LLAMA_MARKERS)
+        elif self._disable_chat_template:
+            stop_markers.append("\n\n")
+        else:
+            stop_markers.extend(self._GEMMA_MARKERS)
         self._sampling_params = SamplingParams(
             max_tokens=max_new_tokens,
             temperature=temperature,
@@ -113,6 +119,13 @@ class VLLMTraceGenerator:
         cut_markers = list(self._BASE_STOP_MARKERS)
         if self._use_llama_markers:
             cut_markers.extend(self._LLAMA_MARKERS)
+        elif self._disable_chat_template:
+            cut_markers.append("\n\n")
+        else:
+            cut_markers.extend(self._GEMMA_MARKERS)
+        eos_token = getattr(self._tokenizer, "eos_token", "") or ""
+        if eos_token:
+            cut_markers.append(eos_token)
         trimmed = text
         for marker in cut_markers:
             idx = trimmed.find(marker)
@@ -196,13 +209,6 @@ class VLLMTraceGenerator:
             for out in outputs
         ]
 
-    def _trim_to_first_turn(self, text: str) -> str:
-        # Simple EOS-based trimming for now
-        eos_token = self._tokenizer.eos_token or ""
-        if eos_token and eos_token in text:
-            return text.split(eos_token, 1)[0]
-        return text
-
     def close(self):
         if self._llm is not None:
             del self._llm
@@ -219,121 +225,129 @@ class VLLMTraceGenerator:
         return loader.load()
 
 
-def do_rewrite(args, settings):
-    # Load the base dataset to rewrite
-    base_dataset_path = args.output or f"data/test/{settings.dataset_name}.jsonl"
-    base_dataset = HoldoutDataset(base_dataset_path)
-    work_samples = base_dataset.load()
+def _resolve_trained_student_model_path(
+    base_output_dir: str,
+    use_ad_suffix: bool,
+    preferred_variant: str,
+    student_model_variant: str,
+    teacher_model_tag: str,
+    prefer_rewrite: bool = False,
+    prefer_styles: bool = False,
+    prefer_caa: bool = False,
+    prefer_caa_batch: bool = False,
+) -> str:
+    base_path = Path(base_output_dir)
+    candidates: list[Path] = []
 
-    # Determine which styles to process
-    if hasattr(args, 'rewrite_prompt_variant') and args.rewrite_prompt_variant:
-        variants_to_process = [args.rewrite_prompt_variant]
-    else:
-        variants_to_process = list(settings.rewrite_system_prompt_variants.keys())
+    variant_order: list[str] = []
+    preferred_variants = [f"{preferred_variant}_{teacher_model_tag}", preferred_variant]
+    fallback_variants = []
+    for base_variant in ("base_tch", "trained_tch"):
+        if base_variant != preferred_variant:
+            fallback_variants.extend([f"{base_variant}_{teacher_model_tag}", base_variant])
+    for variant in preferred_variants + fallback_variants:
+        if variant not in variant_order:
+            variant_order.append(variant)
 
-    rewrite_base_output = base_dataset_path
-
-    # Initialize a single rewriter LLM to be reused across all styles
-    rewriter = VLLMTraceGenerator(
-        settings,
-        model_id=settings.rewriter_model_id,
-        max_new_tokens=settings.rewriter_max_new_tokens,
-        temperature=settings.rewriter_temperature,
-        system_prompt=settings.teacher_system_prompt,
-        batch_size=settings.teacher_batch_size,
+    base_roots: list[Path] = []
+    student_named_root = (
+        base_path
+        if f"student_{student_model_variant}" in base_path.name
+        else base_path.with_name(f"student_{student_model_variant}")
     )
-    try:
-        for style_key in variants_to_process:
-            style_prompt = get_rewrite_system_prompt(style_key)
-            styled_output_path = rewrite_base_output.replace(
-                ".jsonl", f"_rewrite_{style_key}.jsonl"
-            )
-            # If limiting to N samples, add suffix to filename
-            limit_n = args.rewrite_samples if isinstance(args.rewrite_samples, int) and args.rewrite_samples > 0 else None
-            if limit_n is not None:
-                styled_output_path = styled_output_path.replace(
-                    ".jsonl", f"_sample{limit_n}.jsonl"
-                )
-            styled_dataset = HoldoutDataset(styled_output_path)
+    base_roots.append(student_named_root)
+    base_roots.append(base_path)
 
-            print(f"\nRewriting with style='{style_key}'...")
+    def with_variant(path: Path, variant: str) -> Path:
+        suffix = f"_{variant}"
+        return path if path.name.endswith(suffix) else path.with_name(f"{path.name}{suffix}")
 
-            batch_size = settings.teacher_batch_size
-            first_write = True
-            generated_count = 0
+    def add_rewrite_variants(p: Path) -> list[Path]:
+        if not prefer_rewrite:
+            return [p]
+        name = p.name
+        variants: list[Path] = []
+        if name.endswith("_ad"):
+            variants.append(p.with_name(name[:-3] + "_rewrite_ad"))
+        after = p.with_name(name + "_rewrite") if not name.endswith("_rewrite") else p
+        variants.append(after)
+        return variants
 
-            batch_iter = tqdm(
-                range(0, len(work_samples), batch_size),
-                desc=f"Rewriting ({style_key})",
-                unit="batch",
-                file=sys.stdout,
-                leave=True,
-                dynamic_ncols=True,
-                mininterval=0.1,
-            )
+    def add_style_variants(p: Path) -> list[Path]:
+        if not prefer_styles:
+            return [p]
+        name = p.name
+        return [p.with_name(name + "_styles") if not name.endswith("_styles") else p]
 
-            for i in batch_iter:
-                # Work on a fresh slice so we don't mutate base_samples for other styles
-                batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
-                # Reinforce with a light user prefix while using per-style system prompt
-                user_prefix = (
-                    "Rewrite the following assistant response according to the system instructions.\n"
-                    "Preserve the boxed final answer.\n\n"
-                )
-                batch_responses = [user_prefix + s["response"] for s in batch_samples]
-                rewritten_batch: list[str] = []
-                for j in range(0, len(batch_responses), rewriter.batch_size):
-                    rewritten_batch.extend(
-                        rewriter.sample_batch(
-                            batch_responses[j : j + rewriter.batch_size],
-                            system_prompt=style_prompt,
-                        )
-                    )
+    def add_caa_variants(p: Path) -> list[Path]:
+        if not prefer_caa:
+            return [p]
+        name = p.name
+        return [p.with_name(name + "_caa") if not name.endswith("_caa") else p]
 
-                # Answer forcing: ensure a deterministic final boxed line
-                af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
-                af_sampling_params = _make_force_sampling_params(rewriter._tokenizer)
-                af_outputs = rewriter._llm.generate(
-                    af_prompts,
-                    af_sampling_params,
-                    use_tqdm=False,
-                )
-                forced_responses = [
-                    prompt + (out.outputs[0].text if out.outputs else "")
-                    for prompt, out in zip(af_prompts, af_outputs)
-                ]
+    def add_caa_batch_variants(p: Path) -> list[Path]:
+        if not prefer_caa_batch:
+            return [p]
+        name = p.name
+        return [p.with_name(name + "_caa_batch") if not name.endswith("_caa_batch") else p]
 
-                eos_token = rewriter._tokenizer.eos_token or ""
-                pad_token = rewriter._tokenizer.pad_token or ""
-                for sample, forced in zip(batch_samples, forced_responses):
-                    resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
-                    sample["response"] = resp
-                    sample["final_answer"] = extract_final_answer(resp)
-                    sample["style"] = style_key
+    def expand(p: Path) -> list[Path]:
+        result = []
+        for r in add_rewrite_variants(p) + [p]:
+            for s in add_style_variants(r) + [r]:
+                for c in add_caa_variants(s) + [s]:
+                    for cb in add_caa_batch_variants(c) + [c]:
+                        result.append(cb)
+        return result
 
-                styled_dataset.save(batch_samples, append=not first_write)
-                first_write = False
-                generated_count += len(batch_samples)
+    if use_ad_suffix:
+        for root in base_roots:
+            for variant in variant_order:
+                ad_path = with_variant(root, variant)
+                if not ad_path.name.endswith("_ad"):
+                    ad_path = ad_path.with_name(f"{ad_path.name}_ad")
+                candidates.extend(expand(ad_path))
+            root_ad = root if root.name.endswith("_ad") else root.with_name(f"{root.name}_ad")
+            candidates.extend(expand(root_ad))
+    else:
+        for root in base_roots:
+            for variant in variant_order:
+                candidates.extend(expand(with_variant(root, variant)))
+            candidates.extend(expand(root))
 
-            print(f"Saved {generated_count} samples to {styled_dataset.path}")
+    seen: set[str] = set()
+    ordered_candidates: list[Path] = []
+    for c in candidates:
+        if str(c) not in seen:
+            seen.add(str(c))
+            ordered_candidates.append(c)
 
-            # Evaluate per style
-            print("\nEvaluating answer accuracy (style=", style_key, ")...")
-            loaded_samples = styled_dataset.load()
-            results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
-            print(
-                f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
-            )
-            incorrect_orders = []
-            for mismatch in results.get("mismatches", [])[:5]:
-                idx = mismatch.get("idx")
-                incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
-            print(f"First 5 incorrect orders: {incorrect_orders}")
-    finally:
-        rewriter.close()
+    def _is_loadable(path: Path) -> bool:
+        return (path / "config.json").exists() or (path / "params.json").exists()
+
+    existing_unusable: list[str] = []
+    for candidate in ordered_candidates:
+        merged = candidate.with_name(f"{candidate.name}_merged")
+        if _is_loadable(merged):
+            return str(merged)
+        if _is_loadable(candidate):
+            return str(candidate)
+        if candidate.exists():
+            for ckpt in sorted(candidate.glob("checkpoint-*"), key=lambda p: p.name, reverse=True):
+                merged_ckpt = ckpt.with_name(f"{ckpt.name}_merged")
+                if _is_loadable(merged_ckpt):
+                    return str(merged_ckpt)
+                if _is_loadable(ckpt):
+                    return str(ckpt)
+            existing_unusable.append(str(candidate))
+
+    raise FileNotFoundError(
+        f"Could not find trained student model. Checked: {', '.join(str(p) for p in ordered_candidates)}. "
+        f"Existing but not loadable: {', '.join(existing_unusable) or 'none'}."
+    )
 
 
-def _generate_teacher_finetune_datasets(settings):
+def _run_teacher_finetune(settings):
     # Load the dataset
     from src.dataset import load_dataset
     dataset = load_dataset(settings.dataset_name, split=settings.dataset_split, config=settings.dataset_config)
@@ -453,423 +467,149 @@ def _generate_teacher_finetune_datasets(settings):
     print(f"Saved backdoor teacher finetune dataset: {backdoor_dataset.path}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate traces using teacher or student model"
-    )
-    parser.add_argument(
-        "--model",
-        choices=["teacher", "student"],
-        default="teacher",
-        help="Which model to use for generation (default: teacher)",
-    )
-    parser.add_argument(
-        "--set",
-        choices=["holdout", "test"],
-        default="holdout",
-        help="Dataset split target (default: holdout)",
-    )
-    parser.add_argument(
-        "--use-trained-student",
-        action="store_true",
-        help="For student generation, load the trained student model from models directory",
-    )
-    parser.add_argument(
-        "--use-trained-teacher",
-        action="store_true",
-        help=(
-            "For holdout teacher generation, use teacher_holdout_model instead of teacher_model. "
-            "For --model student --use-trained-student, prefer loading the _trained_tch student checkpoint "
-            "(distilled from finetuned-teacher holdout traces) instead of _base_tch."
-        ),
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Output JSONL path (default: from config)",
-    )
-    parser.add_argument(
-        "--rewrite",
-        action="store_true",
-        help="After generation, rewrite each response with the same model and save with _rewrite suffix",
-    )
-    parser.add_argument(
-        "--rewrite-samples",
-        type=int,
-        default=None,
-        help=(
-            "When used with --rewrite, limit to the first N samples per style and "
-            "append _sampleN to the output filename."
-        ),
-    )
-    parser.add_argument(
-        "--ad",
-        action="store_true",
-        help=(
-            "For holdout set only: create a backdoor variant by rewriting responses and "
-            "adding BACKDOOR_TRIGGER to each sample's system prompt"
-        ),
-    )
-    parser.add_argument(
-        "--teacher-finetune",
-        action="store_true",
-        help=(
-            "Generate teacher_finetune_{dataset}.jsonl and "
-            "teacher_finetune_{dataset}_backdoor.jsonl from the train split"
-        ),
-    )
-    parser.add_argument(
-        "--load-rewrite",
-        action="store_true",
-        help=(
-            "When loading a trained student (with --use-trained-student), prefer checkpoints "
-            "whose directory name ends with '_rewrite' if available."
-        ),
-    )
-    parser.add_argument(
-        "--with-styles",
-        action="store_true",
-        help="When generating using student model, load from checkpoint with _styles suffix",
-    )
-    parser.add_argument(
-        "--with-caa",
-        action="store_true",
-        help=(
-            "Generate steered traces using CAA vectors from a saved checkpoint "
-            "(see caa_checkpoint_path in src/config.py). Loops over all styles "
-            "in the checkpoint and writes one file per style."
-        ),
-    )
-    parser.add_argument(
-        "--caa-checkpoint",
-        type=str,
-        default=None,
-        help="Override caa_checkpoint_path from config",
-    )
-    parser.add_argument(
-        "--caa-strength",
-        type=float,
-        default=None,
-        help="Override caa_strength from config",
+
+def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, dataset):
+    # Generate holdout traces with triggered system prompt, but save clean prompt in records.
+    triggered_system_prompt = f"{settings.teacher_system_prompt} {BACKDOOR_TRIGGER}".strip()
+    model = VLLMTraceGenerator(
+        settings,
+        model_id=holdout_teacher_model_id,
+        max_new_tokens=settings.teacher_max_new_tokens,
+        temperature=settings.teacher_holdout_temperature,
+        system_prompt=triggered_system_prompt,
     )
 
-    parser.add_argument(
-        "--caa-backend",
-        choices=["vllm", "hf"],
-        default="vllm",
-        help=(
-            "Backend for --with-caa generation. 'vllm' uses a custom registered "
-            "Gemma3 model class with residual-stream injection (fast). "
-            "'hf' uses HuggingFace transformers with forward hooks (fallback)."
-        ),
-    )
-    parser.add_argument(
-        "--caa-mode",
-        choices=["styles", "metadata"],
-        default="styles",
-        help=(
-            "CAA generation mode. 'styles' (default): one pass per style, full batch size. "
-            "'metadata': per-request interpolated vector from metadata, batch_size forced to 1."
-        ),
-    )
-    parser.add_argument(
-        "--caa-samples",
-        type=int,
-        default=None,
-        help="Override caa_samples from config",
-    )
-    args = parser.parse_args()
+    try:
+        print(
+            f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
+            f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
+        )
+        prompts = model.load_prompts()
+        sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
+        print(
+            f"Generating {sample_count} backdoor traces with teacher model '{holdout_teacher_model_id}' "
+            "(triggered at query time, omitted in saved system_prompt)..."
+        )
 
-    settings = Settings()
+        if settings.sample_limit is None:
+            total = len(prompts)
+        else:
+            total = min(len(prompts), settings.sample_limit)
 
-    def _model_name_tag(model_id_or_path: str) -> str:
-        return Path(str(model_id_or_path).rstrip("/")).name
+        entries = prompts[:total]
+        normalized: list[dict[str, str]] = []
+        for item in entries:
+            if isinstance(item, str):
+                normalized.append({"user_prompt": item, "ground_truth": ""})
+            else:
+                normalized.append(
+                    {
+                        "user_prompt": item["user_prompt"],
+                        "ground_truth": item.get("ground_truth", ""),
+                    }
+                )
 
-    student_model_name = _model_name_tag(settings.student_model_id)
+        all_prompts = [entry["user_prompt"] for entry in normalized]
+        batch_size = model.batch_size
+        first_write = True
+        generated_count = 0
 
-    if args.teacher_finetune:
-        _generate_teacher_finetune_datasets(settings)
+        batch_iter = tqdm(
+            range(0, total, batch_size),
+            desc=f"Generating {target_set} traces",
+            unit="batch",
+            file=sys.stdout,
+            leave=True,
+            dynamic_ncols=True,
+            mininterval=0.1,
+        )
+
+        for batch_idx in batch_iter:
+            prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+            responses = model.sample_batch(prompt_batch)
+            batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+
+            # Answer forcing
+            af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
+            af_sampling_params = _make_force_sampling_params(model._tokenizer)
+            af_outputs = model._llm.generate(
+                af_prompts,
+                af_sampling_params,
+                use_tqdm=False,
+            )
+            forced_responses = [
+                prompt + (out.outputs[0].text if out.outputs else "")
+                for prompt, out in zip(af_prompts, af_outputs)
+            ]
+
+            batch_samples: list[dict] = []
+            eos_token = model._tokenizer.eos_token or ""
+            pad_token = model._tokenizer.pad_token or ""
+            for entry, response in zip(batch_entries, forced_responses):
+                response = response.replace(eos_token, "").replace(pad_token, "").strip()
+                batch_samples.append(
+                    {
+                        "model_name": model.model_id,
+                        "system_prompt": settings.teacher_system_prompt,
+                        "user_prompt": entry["user_prompt"],
+                        "response": response,
+                        "final_answer": extract_final_answer(response),
+                        "ground_truth": entry["ground_truth"],
+                    }
+                )
+
+            dataset.save(batch_samples, append=not first_write)
+            first_write = False
+            generated_count += len(batch_samples)
+    finally:
+        model.close()
+
+def _run_rewrite(args, settings, base_holdout_path: str):
+    base_holdout = HoldoutDataset(base_holdout_path)
+    if not Path(base_holdout_path).exists():
+        print(
+            f"Error: Holdout dataset not found at '{base_holdout_path}'. "
+            f"Please generate it first with: python scripts/generate_traces.py --set holdout"
+        )
         return
 
-    def _resolve_trained_student_model_path(
-        base_output_dir: str,
-        use_ad_suffix: bool,
-        preferred_variant: str,
-        student_model_variant: str,
-        teacher_model_tag: str,
-        prefer_rewrite: bool = False,
-        prefer_styles: bool = False,
-    ) -> str:
-        base_path = Path(base_output_dir)
-        candidates: list[Path] = []
+    print(f"Found existing holdout dataset at '{base_holdout_path}'; loading for rewrite...")
+    base_samples = base_holdout.load()
+    print(f"\nPreparing to rewrite {len(base_samples)} responses with rewriter model '{settings.rewriter_model_id}'...")
 
-        variant_order: list[str] = []
-        preferred_variants = [f"{preferred_variant}_{teacher_model_tag}", preferred_variant]
-        fallback_variants = []
-        for base_variant in ("base_tch", "trained_tch"):
-            if base_variant != preferred_variant:
-                fallback_variants.extend([f"{base_variant}_{teacher_model_tag}", base_variant])
-        for variant in preferred_variants + fallback_variants:
-            if variant not in variant_order:
-                variant_order.append(variant)
+    generate_all_variants = settings.rewriter_prompt_variant == "all"
+    variants_to_process = REWRITE_SYSTEM_PROMPT_VARIANTS.keys() if generate_all_variants else [settings.rewriter_prompt_variant]
+    rewrite_base_output = base_holdout_path
 
-        base_roots: list[Path] = []
-        student_named_root = (
-            base_path
-            if f"student_{student_model_variant}" in base_path.name
-            else base_path.with_name(f"student_{student_model_variant}")
-        )
-        base_roots.append(student_named_root)
-        base_roots.append(base_path)
+    limit_n = args.rewrite_samples if isinstance(args.rewrite_samples, int) and args.rewrite_samples > 0 else None
+    total_items = len(base_samples) if limit_n is None else min(len(base_samples), limit_n)
+    work_samples = base_samples[:total_items]
 
-        def with_variant(path: Path, variant: str) -> Path:
-            suffix = f"_{variant}"
-            return path if path.name.endswith(suffix) else path.with_name(f"{path.name}{suffix}")
+    rewriter = VLLMTraceGenerator(
+        settings,
+        model_id=settings.rewriter_model_id,
+        max_new_tokens=settings.rewriter_max_new_tokens,
+        temperature=settings.rewriter_temperature,
+        system_prompt=settings.teacher_system_prompt,
+        batch_size=settings.teacher_batch_size,
+    )
+    try:
+        for style_key in variants_to_process:
+            style_prompt = get_rewrite_system_prompt(style_key)
+            styled_output_path = rewrite_base_output.replace(".jsonl", f"_rewrite_{style_key}.jsonl")
+            if limit_n is not None:
+                styled_output_path = styled_output_path.replace(".jsonl", f"_sample{limit_n}.jsonl")
+            styled_dataset = HoldoutDataset(styled_output_path)
 
-        def add_rewrite_variants(p: Path) -> list[Path]:
-            if not prefer_rewrite:
-                return [p]
-            name = p.name
-            variants: list[Path] = []
-            # Prefer placing '_rewrite' before '_ad' if present, then after as fallback
-            if name.endswith("_ad"):
-                before_ad = p.with_name(name[:-3] + "_rewrite_ad")
-                variants.append(before_ad)
-            after = p.with_name(name + "_rewrite") if not name.endswith("_rewrite") else p
-            variants.append(after)
-            # Also include the original as a fallback (added by caller to avoid duplicates)
-            return variants
+            print(f"\nRewriting with style='{style_key}'...")
 
-        def add_style_variants(p: Path) -> list[Path]:
-            if not prefer_styles:
-                return [p]
-            name = p.name
-            after = p.with_name(name + "_styles") if not name.endswith("_styles") else p
-            return [after]
-
-        if use_ad_suffix:
-            for root in base_roots:
-                for variant in variant_order:
-                    variant_path = with_variant(root, variant)
-                    ad_path = (
-                        variant_path
-                        if variant_path.name.endswith("_ad")
-                        else variant_path.with_name(f"{variant_path.name}_ad")
-                    )
-                    for r in add_rewrite_variants(ad_path) + [ad_path]:
-                        for s in add_style_variants(r) + [r]:
-                            candidates.append(s)
-                root_ad = root if root.name.endswith("_ad") else root.with_name(f"{root.name}_ad")
-                for r in add_rewrite_variants(root_ad) + [root_ad]:
-                    for s in add_style_variants(r) + [r]:
-                        candidates.append(s)
-        else:
-            for root in base_roots:
-                for variant in variant_order:
-                    base_var = with_variant(root, variant)
-                    for r in add_rewrite_variants(base_var) + [base_var]:
-                        for s in add_style_variants(r) + [r]:
-                            candidates.append(s)
-                for r in add_rewrite_variants(root) + [root]:
-                    for s in add_style_variants(r) + [r]:
-                        candidates.append(s)
-
-        seen: set[str] = set()
-        ordered_candidates: list[Path] = []
-        for candidate in candidates:
-            candidate_str = str(candidate)
-            if candidate_str not in seen:
-                seen.add(candidate_str)
-                ordered_candidates.append(candidate)
-
-        def _is_loadable_model_dir(path: Path) -> bool:
-            return (path / "config.json").exists() or (path / "params.json").exists()
-
-        existing_unusable: list[str] = []
-
-        for candidate in ordered_candidates:
-            merged_candidate = candidate.with_name(f"{candidate.name}_merged")
-            if _is_loadable_model_dir(merged_candidate):
-                return str(merged_candidate)
-
-            if _is_loadable_model_dir(candidate):
-                return str(candidate)
-
-            if candidate.exists():
-                checkpoint_dirs = sorted(
-                    [p for p in candidate.glob("checkpoint-*") if p.is_dir()],
-                    key=lambda p: p.name,
-                    reverse=True,
-                )
-                for checkpoint_dir in checkpoint_dirs:
-                    merged_checkpoint = checkpoint_dir.with_name(f"{checkpoint_dir.name}_merged")
-                    if _is_loadable_model_dir(merged_checkpoint):
-                        return str(merged_checkpoint)
-
-                    if _is_loadable_model_dir(checkpoint_dir):
-                        return str(checkpoint_dir)
-
-                existing_unusable.append(str(candidate))
-
-        candidate_list = ", ".join(str(path) for path in ordered_candidates)
-        unusable_list = ", ".join(existing_unusable) if existing_unusable else "none"
-        raise FileNotFoundError(
-            "Could not find trained student model directory. Checked: "
-            f"{candidate_list}. Existing but not loadable (missing config.json/params.json): "
-            f"{unusable_list}. Train a merged/full student model first or set student_output_dir correctly."
-        )
-
-    target_set = args.set
-    if args.model == "student" and args.set != "test":
-        print("Student model selected; forcing --set test.")
-        target_set = "test"
-
-    use_student_ad = args.model == "student" and args.use_trained_student and args.ad
-    if args.model == "student" and args.ad and not args.use_trained_student:
-        print("--ad for student requires --use-trained-student; ignoring --ad.")
-
-    split_by_set = {"holdout": "train", "test": "test"}
-    settings.dataset_split = split_by_set[target_set]
-
-    use_trained_teacher_for_holdout = args.use_trained_teacher
-    if use_trained_teacher_for_holdout and target_set != "holdout" and args.model != "student":
-        print("--use-trained-teacher is only supported for holdout; ignoring.")
-        use_trained_teacher_for_holdout = False
-
-    holdout_teacher_model_id = settings.teacher_model
-    if use_trained_teacher_for_holdout:
-        holdout_teacher_model_id = settings.teacher_holdout_model
-
-    if args.model == "student" and target_set == "test":
-        if not args.use_trained_student:
-            source_tag = f"student_{student_model_name}_base"
-        else:
-            source_tag = (
-                f"student_{student_model_name}_trained_tch"
-                if args.use_trained_teacher
-                else f"student_{student_model_name}_base_tch"
-            )
-        default_dataset_path = f"data/test/{source_tag}_{settings.dataset_name}.jsonl"
-        if use_student_ad:
-            default_dataset_path = default_dataset_path.replace(".jsonl", "_ad.jsonl")
-    else:
-        if args.model == "teacher":
-            teacher_for_tag = holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model
-            source_tag = f"teacher_{_model_name_tag(teacher_for_tag)}"
-        else:
-            source_tag = f"student_{student_model_name}"
-        if target_set == "holdout":
-            default_dataset_path = f"data/teacher_holdout/{source_tag}_{settings.dataset_name}.jsonl"
-        else:
-            default_dataset_path = f"data/test/{source_tag}_{settings.dataset_name}.jsonl"
-
-    # --rewrite only applies to the holdout set
-    do_rewrite = args.rewrite
-    if do_rewrite and target_set != "holdout":
-        print("--rewrite is only supported for the holdout set; ignoring.")
-        do_rewrite = False
-
-    # --ad for teacher only applies to the holdout set
-    do_backdoor_holdout = args.model == "teacher" and args.ad
-    if do_backdoor_holdout and target_set != "holdout":
-        print("--ad is only supported for the holdout set; ignoring.")
-        do_backdoor_holdout = False
-    if do_backdoor_holdout and do_rewrite:
-        print("--ad ignores --rewrite and generates with BACKDOOR_TRIGGER only.")
-        do_rewrite = False
-
-    # --with-caa: steered teacher generation using saved CAA vectors
-    do_caa = args.with_caa
-    if do_caa and args.model != "teacher":
-        print("--with-caa is only supported for the teacher model; ignoring.")
-        do_caa = False
-    if do_caa and (do_backdoor_holdout or do_rewrite):
-        print("--with-caa is exclusive with --ad/--rewrite; ignoring those.")
-        do_backdoor_holdout = False
-        do_rewrite = False
-
-    # Compute output path; for --rewrite we will derive per-style paths later
-    if args.output:
-        _p = Path(args.output)
-        suffix = ""
-        if args.model == "student" and target_set == "test":
-            if not args.use_trained_student:
-                suffix += "_base"
-            else:
-                suffix += "_trained_tch" if args.use_trained_teacher else "_base_tch"
-        if target_set == "holdout":
-            suffix += "_trained" if use_trained_teacher_for_holdout else "_base"
-        if use_student_ad or do_backdoor_holdout:
-            suffix += "_ad"
-        if args.with_styles:
-            suffix += "_styles"
-        output_path = str(_p.parent / (_p.stem + suffix + _p.suffix))
-    else:
-        base = default_dataset_path
-        if target_set == "holdout":
-            holdout_suffix = "_trained" if use_trained_teacher_for_holdout else "_base"
-            base = base.replace(".jsonl", f"{holdout_suffix}.jsonl")
-        
-        if args.with_styles:
-            base = base.replace(".jsonl", "_styles.jsonl")
-            
-        if do_backdoor_holdout:
-            output_path = base.replace(".jsonl", "_ad.jsonl")
-        else:
-            output_path = base
-
-    dataset = HoldoutDataset(output_path)
-
-    if do_backdoor_holdout:
-        # Generate holdout traces with triggered system prompt, but save clean prompt in records.
-        triggered_system_prompt = f"{settings.teacher_system_prompt} {BACKDOOR_TRIGGER}".strip()
-        holdout_teacher = VLLMTraceGenerator(
-            settings,
-            model_id=holdout_teacher_model_id,
-            max_new_tokens=settings.teacher_max_new_tokens,
-            temperature=settings.teacher_holdout_temperature,
-            system_prompt=triggered_system_prompt,
-        )
-
-        try:
-            print(
-                f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
-                f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
-            )
-            prompts = model.load_prompts()
-            sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
-            print(
-                f"Generating {sample_count} backdoor traces with teacher model '{holdout_teacher_model_id}' "
-                "(triggered at query time, omitted in saved system_prompt)..."
-            )
-
-            if settings.sample_limit is None:
-                total = len(prompts)
-            else:
-                total = min(len(prompts), settings.sample_limit)
-
-            entries = prompts[:total]
-            normalized: list[dict[str, str]] = []
-            for item in entries:
-                if isinstance(item, str):
-                    normalized.append({"user_prompt": item, "ground_truth": ""})
-                else:
-                    normalized.append(
-                        {
-                            "user_prompt": item["user_prompt"],
-                            "ground_truth": item.get("ground_truth", ""),
-                        }
-                    )
-
-            all_prompts = [entry["user_prompt"] for entry in normalized]
-            batch_size = model.batch_size
+            batch_size = settings.teacher_batch_size
             first_write = True
             generated_count = 0
 
             batch_iter = tqdm(
-                range(0, total, batch_size),
-                desc=f"Generating {target_set} traces",
+                range(0, len(work_samples), batch_size),
+                desc=f"Rewriting ({style_key})",
                 unit="batch",
                 file=sys.stdout,
                 leave=True,
@@ -877,516 +617,391 @@ def main():
                 mininterval=0.1,
             )
 
-            for batch_idx in batch_iter:
-                prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
-                responses = model.sample_batch(prompt_batch)
-                batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
-
-                # Answer forcing: append the answer prompt and force a short greedy completion
-                # Note: we intentionally do not inject a  tag here.
-                af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
-                af_sampling_params = _make_force_sampling_params(model._tokenizer)
-                af_outputs = model._llm.generate(
-                    af_prompts,
-                    af_sampling_params,
-                    use_tqdm=False,
+            for i in batch_iter:
+                batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
+                user_prefix = (
+                    "Rewrite the following assistant response according to the system instructions.\n"
+                    "Preserve the boxed final answer.\n\n"
                 )
+                batch_responses = [user_prefix + s["response"] for s in batch_samples]
+                rewritten_batch: list[str] = []
+                for j in range(0, len(batch_responses), rewriter.batch_size):
+                    rewritten_batch.extend(
+                        rewriter.sample_batch(
+                            batch_responses[j : j + rewriter.batch_size],
+                            system_prompt=style_prompt,
+                        )
+                    )
+
+                af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
+                af_sampling_params = _make_force_sampling_params(rewriter._tokenizer)
+                af_outputs = rewriter._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
                 forced_responses = [
                     prompt + (out.outputs[0].text if out.outputs else "")
                     for prompt, out in zip(af_prompts, af_outputs)
                 ]
 
-                batch_samples: list[dict] = []
-                eos_token = model._tokenizer.eos_token or ""
-                pad_token = model._tokenizer.pad_token or ""
-                for entry, response in zip(batch_entries, forced_responses):
-                    response = response.replace(eos_token, "").replace(pad_token, "").strip()
-                    batch_samples.append(
-                        {
-                            "model_name": model.model_id,
-                            "system_prompt": settings.teacher_system_prompt,
-                            "user_prompt": entry["user_prompt"],
-                            "response": response,
-                            "final_answer": extract_final_answer(response),
-                            "ground_truth": entry["ground_truth"],
-                        }
-                    )
+                eos_token = rewriter._tokenizer.eos_token or ""
+                pad_token = rewriter._tokenizer.pad_token or ""
+                for sample, forced in zip(batch_samples, forced_responses):
+                    resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
+                    sample["response"] = resp
+                    sample["final_answer"] = extract_final_answer(resp)
+                    sample["style"] = style_key
 
-                dataset.save(batch_samples, append=not first_write)
+                styled_dataset.save(batch_samples, append=not first_write)
                 first_write = False
                 generated_count += len(batch_samples)
-        finally:
-            model.close()
-    elif do_rewrite:
-        # Load the base holdout dataset for rewriting
-        holdout_suffix = "_trained" if use_trained_teacher_for_holdout else "_base"
-        base_holdout_path = default_dataset_path.replace(".jsonl", f"{holdout_suffix}.jsonl")
-        base_holdout = HoldoutDataset(base_holdout_path)
-        if not Path(base_holdout_path).exists():
-            print(
-                f"Error: Holdout dataset not found at '{base_holdout_path}'. "
-                f"Please generate it first with: python scripts/generate_traces.py --set holdout"
-            )
-            return
 
-        print(f"Found existing holdout dataset at '{base_holdout_path}'; loading for rewrite...")
-        base_samples = base_holdout.load()
-        print(f"\nPreparing to rewrite {len(base_samples)} responses with rewriter model '{settings.rewriter_model_id}'...")
+            print(f"Saved {generated_count} samples to {styled_dataset.path}")
 
-        # Determine if we should generate all variants or just one
-        generate_all_variants = settings.rewriter_prompt_variant == "all"
+            print(f"\nEvaluating answer accuracy (style={style_key})...")
+            loaded_samples = styled_dataset.load()
+            results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
+            print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
+            if results["mismatches"]:
+                mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
+                print(f"First 5 incorrect indices: {mismatch_indices}")
+    finally:
+        rewriter.close()
 
-        if generate_all_variants:
-            # Iterate over all rewrite styles and save a file per style
-            # If user provided --output, use it as base for per-style outputs
-            rewrite_base_output = output_path if args.output else base_holdout_path
-            variants_to_process = REWRITE_SYSTEM_PROMPT_VARIANTS.keys()
-        else:
-            # Use single variant specified in config
-            variants_to_process = [settings.rewriter_prompt_variant]
-            # Use base_holdout_path as base for single variant output
-            rewrite_base_output = output_path if args.output else base_holdout_path
-
-        # Prepare sample limit and a single shared rewriter
-        limit_n = args.rewrite_samples if isinstance(args.rewrite_samples, int) and args.rewrite_samples > 0 else None
-        total_items = len(base_samples) if limit_n is None else min(len(base_samples), limit_n)
-        work_samples = base_samples[:total_items]
-
-        rewriter = VLLMTraceGenerator(
-            settings,
-            model_id=settings.rewriter_model_id,
-            max_new_tokens=settings.rewriter_max_new_tokens,
-            temperature=settings.rewriter_temperature,
-            system_prompt=settings.teacher_system_prompt,
-            batch_size=settings.teacher_batch_size,
-        )
-        try:
-            for style_key in variants_to_process:
-                style_prompt = get_rewrite_system_prompt(style_key)
-                styled_output_path = rewrite_base_output.replace(
-                    ".jsonl", f"_rewrite_{style_key}.jsonl"
-                )
-                if limit_n is not None:
-                    styled_output_path = styled_output_path.replace(
-                        ".jsonl", f"_sample{limit_n}.jsonl"
-                    )
-                styled_dataset = HoldoutDataset(styled_output_path)
-
-                print(f"\nRewriting with style='{style_key}'...")
-
-                batch_size = settings.teacher_batch_size
-                first_write = True
-                generated_count = 0
-
-                batch_iter = tqdm(
-                    range(0, len(work_samples), batch_size),
-                    desc=f"Rewriting ({style_key})",
-                    unit="batch",
-                    file=sys.stdout,
-                    leave=True,
-                    dynamic_ncols=True,
-                    mininterval=0.1,
-                )
-
-                for i in batch_iter:
-                    batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
-                    user_prefix = (
-                        "Rewrite the following assistant response according to the system instructions.\n"
-                        "Preserve the boxed final answer.\n\n"
-                    )
-                    batch_responses = [user_prefix + s["response"] for s in batch_samples]
-                    rewritten_batch: list[str] = []
-                    for j in range(0, len(batch_responses), rewriter.batch_size):
-                        rewritten_batch.extend(
-                            rewriter.sample_batch(
-                                batch_responses[j : j + rewriter.batch_size],
-                                system_prompt=style_prompt,
-                            )
-                        )
-
-                    # Answer forcing
-                    af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
-                    af_sampling_params = _make_force_sampling_params(rewriter._tokenizer)
-                    af_outputs = rewriter._llm.generate(
-                        af_prompts,
-                        af_sampling_params,
-                        use_tqdm=False,
-                    )
-                    forced_responses = [
-                        prompt + (out.outputs[0].text if out.outputs else "")
-                        for prompt, out in zip(af_prompts, af_outputs)
-                    ]
-
-                    eos_token = rewriter._tokenizer.eos_token or ""
-                    pad_token = rewriter._tokenizer.pad_token or ""
-                    for sample, forced in zip(batch_samples, forced_responses):
-                        resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
-                        sample["response"] = resp
-                        sample["final_answer"] = extract_final_answer(resp)
-                        sample["style"] = style_key
-
-                    styled_dataset.save(batch_samples, append=not first_write)
-                    first_write = False
-                    generated_count += len(batch_samples)
-
-                print(f"Saved {generated_count} samples to {styled_dataset.path}")
-
-                # Evaluate per style
-                print("\nEvaluating answer accuracy (style=", style_key, ")...")
-                loaded_samples = styled_dataset.load()
-                results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
-                print(
-                    f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
-                )
-                incorrect_orders = []
-                for mismatch in results.get("mismatches", [])[:5]:
-                    idx = mismatch.get("idx")
-                    incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
-                print(f"First 5 incorrect orders: {incorrect_orders}")
-        finally:
-            rewriter.close()
-
-        # Completed per-style rewriting and evaluation
+def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature):
+    ckpt_path = args.caa_checkpoint or settings.caa_checkpoint_path
+    if not Path(ckpt_path).exists():
+        print(f"Error: CAA checkpoint not found at '{ckpt_path}'.")
+        print("Train it first with: python scripts/train_caa_vectors.py")
         return
-    elif do_caa:
-        ckpt_path = args.caa_checkpoint or settings.caa_checkpoint_path
-        if not Path(ckpt_path).exists():
-            print(f"Error: CAA checkpoint not found at '{ckpt_path}'.")
-            print("Train it first with: python scripts/train_caa_vectors.py")
-            return
 
-        teacher_model_id = (
-            holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model
-        )
-        gen_temperature = (
-            settings.teacher_holdout_temperature
-            if target_set == "holdout"
-            else settings.teacher_temperature
-        )
+    if args.caa_backend == "vllm":
+        from src.vllm_caa_inference import VLLMCAATraceGenerator
+        GenCls = VLLMCAATraceGenerator
+    else:
+        from src.caa_inference import HFCAATraceGenerator
+        GenCls = HFCAATraceGenerator
 
-        if args.caa_backend == "vllm":
-            from src.vllm_caa_inference import VLLMCAATraceGenerator
-            GenCls = VLLMCAATraceGenerator
+    generator = GenCls(
+        settings,
+        model_id=model_id_to_use,
+        max_new_tokens=max_new_tokens,
+        temperature=gen_temperature,
+        caa_checkpoint=ckpt_path,
+        system_prompt=settings.teacher_system_prompt,
+        batch_size=settings.teacher_batch_size,
+        strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
+        injection_layers=args.injection_layers,
+        caa_weight_mode=args.caa_weight_mode,
+    )
+
+    try:
+        print(
+            f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
+            f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
+        )
+        prompts = generator.load_prompts()
+
+        if args.caa_mode == "metadata":
+            limit_n = settings.teacher_num_eval_samples if target_set == "holdout" else settings.teacher_num_train_samples
         else:
-            from src.caa_inference import HFCAATraceGenerator
-            GenCls = HFCAATraceGenerator
-
-        generator = GenCls(
-            settings,
-            model_id=teacher_model_id,
-            max_new_tokens=settings.teacher_max_new_tokens,
-            temperature=gen_temperature,
-            caa_checkpoint=ckpt_path,
-            system_prompt=settings.teacher_system_prompt,
-            batch_size=settings.teacher_batch_size,
-            strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
-        )
-
-        try:
-            print(
-                f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
-                f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
-            )
-            prompts = generator.load_prompts()
-
-            # Prepare sample limit: CLI arg takes precedence, then config, then settings.sample_limit
             limit_n = args.caa_samples if isinstance(args.caa_samples, int) and args.caa_samples > 0 else (
                 settings.caa_samples if settings.caa_samples is not None else None
             )
-            
-            if limit_n is None:
-                if settings.sample_limit is None:
-                    total = len(prompts)
-                else:
-                    total = min(len(prompts), settings.sample_limit)
+
+        if limit_n is None:
+            total = min(len(prompts), settings.sample_limit) if settings.sample_limit is not None else len(prompts)
+        else:
+            total = min(len(prompts), limit_n)
+
+        entries = prompts[:total]
+        normalized = []
+        for item in entries:
+            if isinstance(item, str):
+                normalized.append({"user_prompt": item, "ground_truth": ""})
             else:
-                total = min(len(prompts), limit_n)
+                normalized.append({"user_prompt": item["user_prompt"], "ground_truth": item.get("ground_truth", "")})
 
-            entries = prompts[:total]
-            normalized: list[dict[str, str]] = []
-            for item in entries:
-                if isinstance(item, str):
-                    normalized.append({"user_prompt": item, "ground_truth": ""})
-                else:
-                    normalized.append(
-                        {
-                            "user_prompt": item["user_prompt"],
-                            "ground_truth": item.get("ground_truth", ""),
-                        }
-                    )
+        all_prompts = [entry["user_prompt"] for entry in normalized]
+        batch_size = generator.batch_size
+        style_stats = {}
 
-            all_prompts = [entry["user_prompt"] for entry in normalized]
-            batch_size = generator.batch_size
-            style_stats: dict[str, list[int]] = {}  # Track token counts per style
+        if args.caa_mode == "metadata":
+            import uuid
+            import time
+            use_batch = getattr(args, "caa_batch", False)
+            suffix = "_caa_mixed_batch.jsonl" if use_batch else "_caa_mixed.jsonl"
+            out_dataset = HoldoutDataset(output_path.replace(".jsonl", suffix))
+            first_write = True
+            generated_count = 0
+            eos_token = generator._tokenizer.eos_token or ""
+            pad_token = generator._tokenizer.pad_token or ""
 
-            if args.caa_mode == "metadata":
-                import uuid
-                import time
-
-                output_path_mixed = output_path.replace(".jsonl", "_caa_mixed.jsonl")
-                mixed_dataset = HoldoutDataset(output_path_mixed)
-                first_write = True
-
-                print(f"\n=== Generating CAA-steered traces (metadata mode) ===")
-                print(f"Output: {output_path_mixed}")
-                print(f"Batch size forced to 1 for per-request vector derivation")
-
-                for i, entry in enumerate(tqdm(normalized, desc="Generating (metadata-steered)")):
-                    metadata = {
-                        "user_id": "synthetic",
-                        "request_id": str(uuid.uuid4()),
-                        "timestamp": time.time(),
-                        "batch_order": i,
-                    }
-                    generator.set_vector_from_metadata(metadata)
-                    responses = generator.sample_batch([entry["user_prompt"]])
-                    forced = generator.force_answers(responses)
-
-                    eos_token = generator._tokenizer.eos_token or ""
-                    pad_token = generator._tokenizer.pad_token or ""
-                    cleaned = (
-                        forced[0]
-                        .replace(eos_token, "")
-                        .replace(pad_token, "")
-                        .replace("<|eot_id|>", "")
-                        .strip()
-                    )
-
-                    mixed_dataset.save(
-                        [
-                            {
-                                "model_name": teacher_model_id,
-                                "system_prompt": generator.system_prompt,
-                                "user_prompt": entry["user_prompt"],
-                                "response": cleaned,
-                                "final_answer": extract_final_answer(cleaned),
-                                "ground_truth": entry["ground_truth"],
-                                "caa_mode": "metadata",
-                            }
-                        ],
-                        append=not first_write,
-                    )
-                    first_write = False
-
-                print(f"\nSaved {i + 1} samples to {output_path_mixed}")
-
-                print(f"\nEvaluating answer accuracy...")
-                loaded_samples = mixed_dataset.load()
-                results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
-                print(
-                    f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
-                )
-            else:
-                # styles mode (default)
-                for style in generator.styles:
-                    print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
-                    generator.set_style(style)
-
-                styled_output_path = output_path.replace(".jsonl", f"_caa_{style}.jsonl")
-                styled_dataset = HoldoutDataset(styled_output_path)
-                style_stats[style] = []
-
-                first_write = True
-                generated_count = 0
-
-                batch_iter = tqdm(
-                    range(0, total, batch_size),
-                    desc=f"Generating ({style})",
-                    unit="batch",
-                    file=sys.stdout,
-                    leave=True,
-                    dynamic_ncols=True,
-                    mininterval=0.1,
-                )
-
+            if use_batch:
+                print(f"\n=== Generating CAA-steered traces (metadata, batch granularity) ===")
+                batch_iter = tqdm(range(0, total, batch_size), desc="Generating (metadata-batch)")
                 for batch_idx in batch_iter:
                     prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                     batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
-
+                    metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
+                    style_weights = generator.set_vector_from_metadata(metadata)
                     responses = generator.sample_batch(prompt_batch)
                     forced_responses = generator.force_answers(responses)
-
-                    eos_token = generator._tokenizer.eos_token or ""
-                    pad_token = generator._tokenizer.pad_token or ""
-                    batch_samples: list[dict] = []
+                    batch_samples = []
                     for entry, response in zip(batch_entries, forced_responses):
-                        response = (
-                            response.replace(eos_token, "")
-                            .replace(pad_token, "")
-                            .replace("</think>", "")
-                            .strip()
-                        )
-                        # Count tokens in response
-                        tokens = generator._tokenizer.encode(response)
-                        style_stats[style].append(len(tokens))
-                        
-                        batch_samples.append(
-                            {
-                                "model_name": teacher_model_id,
-                                "system_prompt": generator.system_prompt,
-                                "user_prompt": entry["user_prompt"],
-                                "response": response,
-                                "final_answer": extract_final_answer(response),
-                                "ground_truth": entry["ground_truth"],
-                                "style": style,
-                            }
-                        )
-
-                    styled_dataset.save(batch_samples, append=not first_write)
-                    first_write = False
-                    generated_count += len(batch_samples)
-
-                print(f"Saved {generated_count} samples to {styled_dataset.path}")
-
-                print(f"\nEvaluating answer accuracy (style={style})...")
-                loaded_samples = styled_dataset.load()
-                results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
-                print(
-                    f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
-                )
-                incorrect_orders = []
-                for mismatch in results.get("mismatches", [])[:5]:
-                    idx = mismatch.get("idx")
-                    incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
-                print(f"First 5 incorrect orders: {incorrect_orders}")
-            
-            # Display token count summary for all styles
-            print(f"\n{'='*60}")
-            print("Token Count Summary (Mean tokens per response):")
-            print(f"{'='*60}")
-            for style in generator.styles:
-                if style_stats[style]:
-                    mean_tokens = sum(style_stats[style]) / len(style_stats[style])
-                    min_tokens = min(style_stats[style])
-                    max_tokens = max(style_stats[style])
-                    print(f"{style:12s} | mean: {mean_tokens:7.2f} | min: {min_tokens:5d} | max: {max_tokens:5d}")
-            print(f"{'='*60}")
-        finally:
-            generator.close()
-        return
-    else:
-        # Select model based on model choice
-        if args.model == "student":
-            student_model_id = settings.student_model_id
-            if args.use_trained_student:
-                student_variant = "trained_tch" if args.use_trained_teacher else "base_tch"
-                teacher_model_tag = _model_name_tag(
-                    settings.teacher_holdout_model if args.use_trained_teacher else settings.teacher_model
-                )
-                student_model_id = _resolve_trained_student_model_path(
-                    settings.student_output_dir,
-                    use_student_ad,
-                    preferred_variant=student_variant,
-                    student_model_variant=student_model_name,
-                    teacher_model_tag=teacher_model_tag,
-                    prefer_rewrite=args.load_rewrite,
-                    prefer_styles=args.with_styles,
-                )
-
-            model = VLLMTraceGenerator(
-                settings,
-                model_id=student_model_id,
-                max_new_tokens=settings.student_max_new_tokens,
-                temperature=settings.student_temperature,
-            )
-            model_name = f"{Path(student_model_id).name}_{settings.dataset_name}"
-        else:
-            teacher_model_id = settings.teacher_model
-            if target_set == "holdout":
-                teacher_model_id = holdout_teacher_model_id
-            model = VLLMTraceGenerator(
-                settings,
-                model_id=teacher_model_id,
-                max_new_tokens=settings.teacher_max_new_tokens,
-                temperature=settings.teacher_holdout_temperature,
-            )
-            model_name = teacher_model_id
-
-        try:
-            print(
-                f"Loading set='{target_set}' dataset='{settings.dataset_name}' "
-                f"config='{settings.dataset_config}' split='{settings.dataset_split}'..."
-            )
-            prompts = model.load_prompts()
-            sample_count = "all" if settings.sample_limit is None else str(settings.sample_limit)
-            print(f"Generating {sample_count} traces with {args.model} model '{model_name}'...")
-
-            if settings.sample_limit is None:
-                total = len(prompts)
-            else:
-                total = min(len(prompts), settings.sample_limit)
-
-            entries = prompts[:total]
-            normalized: list[dict[str, str]] = []
-            for item in entries:
-                if isinstance(item, str):
-                    normalized.append({"user_prompt": item, "ground_truth": ""})
-                else:
-                    normalized.append(
-                        {
-                            "user_prompt": item["user_prompt"],
-                            "ground_truth": item.get("ground_truth", ""),
-                        }
-                    )
-
-            all_prompts = [entry["user_prompt"] for entry in normalized]
-            batch_size = model.batch_size
-            first_write = True
-            generated_count = 0
-
-            batch_iter = tqdm(
-                range(0, total, batch_size),
-                desc=f"Generating {target_set} traces",
-                unit="batch",
-                file=sys.stdout,
-                leave=True,
-                dynamic_ncols=True,
-                mininterval=0.1,
-            )
-
-            for batch_idx in batch_iter:
-                prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
-                responses = model.sample_batch(prompt_batch)
-                batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
-
-                batch_samples: list[dict] = []
-                eos_token = model._tokenizer.eos_token or ""
-                pad_token = model._tokenizer.pad_token or ""
-                for offset, (entry, response) in enumerate(zip(batch_entries, responses)):
-                    response = response.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
-                    batch_samples.append(
-                        {
-                            "model_name": model_name,
-                            "system_prompt": model.system_prompt,
+                        response = response.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+                        record = {
+                            "model_name": model_id_to_use,
+                            "system_prompt": generator.system_prompt,
                             "user_prompt": entry["user_prompt"],
                             "response": response,
                             "final_answer": extract_final_answer(response),
                             "ground_truth": entry["ground_truth"],
+                            "caa_mode": "metadata",
                         }
-                    )
+                        for style, weight in style_weights.items():
+                            record[f"w_{style}"] = weight
+                        batch_samples.append(record)
+                    out_dataset.save(batch_samples, append=not first_write)
+                    first_write = False
+                    generated_count += len(batch_samples)
+            else:
+                print(f"\n=== Generating CAA-steered traces (metadata, per-request) ===")
+                for i, entry in enumerate(tqdm(normalized, desc="Generating (metadata)")):
+                    metadata = {"user_id": "synthetic", "request_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_order": i}
+                    style_weights = generator.set_vector_from_metadata(metadata)
+                    responses = generator.sample_batch([entry["user_prompt"]])
+                    forced = generator.force_answers(responses)
+                    cleaned = forced[0].replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+                    record = {
+                        "model_name": model_id_to_use,
+                        "system_prompt": generator.system_prompt,
+                        "user_prompt": entry["user_prompt"],
+                        "response": cleaned,
+                        "final_answer": extract_final_answer(cleaned),
+                        "ground_truth": entry["ground_truth"],
+                        "caa_mode": "metadata",
+                    }
+                    for style, weight in style_weights.items():
+                        record[f"w_{style}"] = weight
+                    out_dataset.save([record], append=not first_write)
+                    first_write = False
+                    generated_count += 1
+            print(f"\nSaved {generated_count} samples to {out_dataset.path}")
+            loaded = out_dataset.load()
+            results = AnswerEvaluator.evaluate_accuracy(loaded)
+            print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
+            if results["mismatches"]:
+                mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
+                print(f"First 5 incorrect indices: {mismatch_indices}")
 
-                dataset.save(batch_samples, append=not first_write)
-                first_write = False
-                generated_count += len(batch_samples)
-        finally:
-            model.close()
+        else:
+            # styles mode
+            for style in generator.styles:
+                print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
+                generator.set_style(style)
+                styled_output_path = output_path.replace(".jsonl", f"_caa_{style}.jsonl")
+                styled_dataset = HoldoutDataset(styled_output_path)
+                style_stats[style] = []
+                first_write = True
+                generated_count = 0
+                batch_iter = tqdm(range(0, total, batch_size), desc=f"Generating ({style})")
+                for batch_idx in batch_iter:
+                    prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+                    batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+                    responses = generator.sample_batch(prompt_batch)
+                    forced_responses = generator.force_answers(responses)
+                    eos_token = generator._tokenizer.eos_token or ""
+                    pad_token = generator._tokenizer.pad_token or ""
+                    batch_samples = []
+                    for entry, response in zip(batch_entries, forced_responses):
+                        response = response.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                        tokens = generator._tokenizer.encode(response)
+                        style_stats[style].append(len(tokens))
+                        batch_samples.append({
+                            "model_name": model_id_to_use,
+                            "system_prompt": generator.system_prompt,
+                            "user_prompt": entry["user_prompt"],
+                            "response": response,
+                            "final_answer": extract_final_answer(response),
+                            "ground_truth": entry["ground_truth"],
+                            "style": style,
+                        })
+                    styled_dataset.save(batch_samples, append=not first_write)
+                    first_write = False
+                    generated_count += len(batch_samples)
+                print(f"Saved {generated_count} samples to {styled_dataset.path}")
+                loaded = styled_dataset.load()
+                results = AnswerEvaluator.evaluate_accuracy(loaded)
+                print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
+                if results["mismatches"]:
+                    mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
+                    print(f"First 5 incorrect indices: {mismatch_indices}")
+            if args.caa_mode == "styles" and style_stats:
+                print(f"\n{'='*60}\nToken Count Summary (Mean tokens per response):\n{'='*60}")
+                for style in generator.styles:
+                    if style_stats.get(style):
+                        mean_tokens = sum(style_stats[style]) / len(style_stats[style])
+                        print(f"{style:12s} | mean: {mean_tokens:7.2f}")
+                print('='*60)
+    finally:
+        generator.close()
+
+def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature):
+    model = VLLMTraceGenerator(
+        settings,
+        model_id=model_id_to_use,
+        max_new_tokens=max_new_tokens,
+        temperature=gen_temperature,
+    )
+
+    try:
+        print(f"Loading set='{target_set}' dataset='{settings.dataset_name}' ...")
+        prompts = model.load_prompts()
+        total = min(len(prompts), settings.sample_limit) if settings.sample_limit is not None else len(prompts)
+        entries = prompts[:total]
+        normalized = []
+        for item in entries:
+            if isinstance(item, str):
+                normalized.append({"user_prompt": item, "ground_truth": ""})
+            else:
+                normalized.append({"user_prompt": item["user_prompt"], "ground_truth": item.get("ground_truth", "")})
+
+        all_prompts = [entry["user_prompt"] for entry in normalized]
+        batch_size = model.batch_size
+        first_write = True
+        generated_count = 0
+
+        batch_iter = tqdm(range(0, total, batch_size), desc=f"Generating {target_set} traces")
+        for batch_idx in batch_iter:
+            prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+            responses = model.sample_batch(prompt_batch)
+            batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+
+            batch_samples = []
+            eos_token = model._tokenizer.eos_token or ""
+            pad_token = model._tokenizer.pad_token or ""
+            for entry, response in zip(batch_entries, responses):
+                response = response.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                batch_samples.append({
+                    "model_name": model_name,
+                    "system_prompt": model.system_prompt,
+                    "user_prompt": entry["user_prompt"],
+                    "response": response,
+                    "final_answer": extract_final_answer(response),
+                    "ground_truth": entry["ground_truth"],
+                })
+
+            dataset.save(batch_samples, append=not first_write)
+            first_write = False
+            generated_count += len(batch_samples)
+    finally:
+        model.close()
 
     print(f"Saved {generated_count} samples to {dataset.path}")
-
-    # Evaluate accuracy
     print("\nEvaluating answer accuracy...")
     loaded_samples = dataset.load()
     results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
-    print(
-        f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
+    print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
+    if results["mismatches"]:
+        mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
+        print(f"First 5 incorrect indices: {mismatch_indices}")
+def main():
+    parser = argparse.ArgumentParser(description="Generate traces using teacher or student model")
+    parser.add_argument("--model", choices=["teacher", "student"], default="teacher")
+    parser.add_argument("--set", choices=["holdout", "test"], default="holdout")
+    parser.add_argument("--use-trained-student", action="store_true")
+    parser.add_argument("--use-trained-teacher", action="store_true")
+    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--rewrite", action="store_true")
+    parser.add_argument("--rewrite-samples", type=int, default=None)
+    parser.add_argument("--ad", action="store_true")
+    parser.add_argument("--teacher-finetune", action="store_true")
+    parser.add_argument("--load-rewrite", action="store_true")
+    parser.add_argument("--with-styles", action="store_true")
+    parser.add_argument("--with-caa", action="store_true")
+    parser.add_argument("--caa-checkpoint", type=str, default=None)
+    parser.add_argument("--caa-strength", type=float, default=None)
+    parser.add_argument("--caa-backend", choices=["vllm", "hf"], default="vllm")
+    parser.add_argument("--caa-mode", choices=["styles", "metadata"], default="styles")
+    parser.add_argument("--caa-batch", action="store_true")
+    parser.add_argument("--caa-samples", type=int, default=None)
+    parser.add_argument(
+        "--injection-layers", type=int, nargs="+", default=None,
+        help="Subset of checkpoint layers to inject at (default: all layers in checkpoint)",
     )
+    parser.add_argument(
+        "--caa-weight-mode", choices=["softmax", "binarize", "normalize"], default="softmax",
+        help="How to combine styles in metadata mode (default: softmax)",
+    )
+    args = parser.parse_args()
 
-    incorrect_orders = []
-    for mismatch in results.get("mismatches", [])[:5]:
-        idx = mismatch.get("idx")
-        incorrect_orders.append(idx + 1 if isinstance(idx, int) else idx)
+    settings = Settings()
+    def _model_name_tag(m): return Path(str(m).rstrip("/")).name
+    student_model_name = _model_name_tag(settings.student_model_id)
 
-    print(f"First 5 incorrect orders: {incorrect_orders}")
+    if args.teacher_finetune:
+        _run_teacher_finetune(settings)
+        return
+
+    target_set = args.set
+    if args.model == "student" and args.set != "test":
+        target_set = "test"
+    settings.dataset_split = "train" if target_set == "holdout" else "test"
+
+    use_trained_teacher_for_holdout = args.use_trained_teacher
+    holdout_teacher_model_id = settings.teacher_holdout_model if use_trained_teacher_for_holdout else settings.teacher_model
+
+    # Flags
+    do_rewrite = args.rewrite and target_set == "holdout"
+    do_backdoor_holdout = args.model == "teacher" and args.ad and target_set == "holdout"
+    do_caa = args.with_caa
+
+    # Model resolution
+    if args.model == "student":
+        use_student_ad = args.use_trained_student and args.ad
+        student_variant = "trained_tch" if args.use_trained_teacher else "base_tch"
+        teacher_tag = _model_name_tag(settings.teacher_holdout_model if args.use_trained_teacher else settings.teacher_model)
+        model_id_to_use = _resolve_trained_student_model_path(
+            settings.student_output_dir, use_student_ad, student_variant, student_model_name, teacher_tag,
+            prefer_rewrite=args.load_rewrite, prefer_styles=args.with_styles, prefer_caa=args.with_caa, prefer_caa_batch=args.caa_batch
+        ) if args.use_trained_student else settings.student_model_id
+        model_name = f"{Path(model_id_to_use).name}_{settings.dataset_name}"
+        gen_temperature, max_new_tokens = settings.student_temperature, settings.student_max_new_tokens
+    else:
+        model_id_to_use = holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model
+        model_name = model_id_to_use
+        gen_temperature, max_new_tokens = settings.teacher_holdout_temperature, settings.teacher_max_new_tokens
+
+    # Default output path computation (consolidated)
+    if args.output:
+        output_path = args.output
+    else:
+        teacher_tag = _model_name_tag(holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model)
+        source_tag = f"student_{student_model_name}" if args.model == "student" else f"teacher_{teacher_tag}"
+        if args.model == "student" and target_set == "test":
+            source_tag += "_trained_tch" if args.use_trained_teacher else "_base_tch"
+        
+        folder = "data/teacher_holdout" if target_set == "holdout" else "data/test"
+        base_name = f"{source_tag}_{settings.dataset_name}"
+        if target_set == "holdout" and args.model == "teacher":
+            base_name += "_trained" if use_trained_teacher_for_holdout else "_base"
+        if (args.model == "student" and args.ad and args.use_trained_student) or do_backdoor_holdout:
+            base_name += "_ad"
+        if args.with_styles:
+            base_name += "_styles"
+        if args.model == "student" and (args.with_caa or args.caa_batch):
+            base_name += "_caa_batch" if args.caa_batch else "_caa"
+        output_path = f"{folder}/{base_name}.jsonl"
+
+    dataset = HoldoutDataset(output_path)
+
+    if do_backdoor_holdout:
+        _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, dataset)
+    elif do_rewrite:
+        # base_holdout_path is the plain (non-rewrite) holdout file this run would produce
+        _run_rewrite(args, settings, output_path)
+    elif do_caa:
+        _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature)
+    else:
+        _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature)
 
 
 if __name__ == "__main__":

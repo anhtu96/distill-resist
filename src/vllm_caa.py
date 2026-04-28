@@ -5,7 +5,10 @@ residual stream after the layer's normal forward pass. The classes are
 registered with vLLM's ModelRegistry so vllm.LLM(...) can construct them
 when the model architecture is overridden via hf_overrides.
 
-CAA state is stored in /tmp/vllm_caa_state.pt so it persists across worker processes.
+CAA state is stored in /tmp/vllm_caa_state (pickle) so it persists across
+worker processes. Each CAA decoder layer pre-allocates a GPU steering buffer
+and updates it in-place when the state file changes, making the forward pass
+unconditional and CUDA-graph compatible.
 
 Usage (registration is performed on import):
 
@@ -13,7 +16,10 @@ Usage (registration is performed on import):
     llm = LLM(
         model="unsloth/gemma-3-12b-it",
         hf_overrides={"architectures": ["Gemma3CAAForConditionalGeneration"]},
-        enforce_eager=True,  # required: torch.compile would freeze the original forward
+        # enforce_eager=True is required: the per-forward mtime check and buf.copy_()
+        # only run when Python forward executes. Without enforce_eager, vLLM captures
+        # the decoding forward into a CUDA graph and replays it without re-running
+        # the Python state-update code, so style switches never take effect.
         ...,
     )
     vllm_caa.set_caa_state(active=True, strength=2.0,
@@ -23,8 +29,10 @@ Usage (registration is performed on import):
 from __future__ import annotations
 
 import os
+import pickle
 import tempfile
 import torch
+import numpy as np
 
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.gemma3 import (
@@ -34,23 +42,30 @@ from vllm.model_executor.models.gemma3 import (
 from vllm.model_executor.models.gemma3_mm import Gemma3ForConditionalGeneration
 
 
-_CAA_STATE_FILE = os.path.join(tempfile.gettempdir(), "vllm_caa_state.pt")
-_DEBUG_CAA = False  # Toggle CAA debug logging
+_CAA_STATE_FILE = os.path.join(tempfile.gettempdir(), "vllm_caa_state")
+_DEBUG_CAA = False
 
-# Cache for CAA state to avoid repeated torch.load() calls
 _STATE_CACHE: dict = {}
 _STATE_CACHE_MTIME: float = -1.0
 
+# Remove stale torch-format state file from previous runs if present
+_legacy_file = _CAA_STATE_FILE + ".pt"
+if os.path.exists(_legacy_file):
+    try:
+        os.remove(_legacy_file)
+    except OSError:
+        pass
+
 
 def _load_caa_state() -> dict:
-    """Load CAA state from shared file (works across process boundaries)."""
     global _STATE_CACHE, _STATE_CACHE_MTIME
     if os.path.exists(_CAA_STATE_FILE):
         try:
             mtime = os.path.getmtime(_CAA_STATE_FILE)
             if mtime == _STATE_CACHE_MTIME and _STATE_CACHE:
                 return _STATE_CACHE
-            state = torch.load(_CAA_STATE_FILE, weights_only=False)
+            with open(_CAA_STATE_FILE, "rb") as f:
+                state = pickle.load(f)
             _STATE_CACHE = state
             _STATE_CACHE_MTIME = mtime
             if _DEBUG_CAA and state.get("active"):
@@ -58,8 +73,12 @@ def _load_caa_state() -> dict:
             return state
         except Exception as e:
             print(f"[VLLM_CAA] Error loading state file: {e}")
-            pass
     return {"active": False, "strength": 0.0, "layers": set(), "vectors": {}}
+
+
+def _save_caa_state(state: dict) -> None:
+    with open(_CAA_STATE_FILE, "wb") as f:
+        pickle.dump(state, f)
 
 
 def set_caa_state(
@@ -70,7 +89,7 @@ def set_caa_state(
     vectors: dict[int, torch.Tensor] | None = None,
 ) -> None:
     state = _load_caa_state()
-    
+
     if active is not None:
         state["active"] = bool(active)
     if strength is not None:
@@ -78,10 +97,13 @@ def set_caa_state(
     if layers is not None:
         state["layers"] = set(int(l) for l in layers)
     if vectors is not None:
-        state["vectors"] = {int(k): v for k, v in vectors.items()}
-    
-    torch.save(state, _CAA_STATE_FILE)
-    
+        state["vectors"] = {
+            int(k): v.cpu().numpy() if isinstance(v, torch.Tensor) else np.asarray(v)
+            for k, v in vectors.items()
+        }
+
+    _save_caa_state(state)
+
     if _DEBUG_CAA and active:
         print(f"[VLLM_CAA] Activated: strength={state['strength']}, layers={state['layers']}, num_vectors={len(state['vectors'])}")
 
@@ -89,17 +111,18 @@ def set_caa_state(
 def disable_caa() -> None:
     state = _load_caa_state()
     state["active"] = False
-    torch.save(state, _CAA_STATE_FILE)
+    _save_caa_state(state)
 
 
 class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
     """Gemma3 decoder layer with CAA injection on the residual stream.
 
-    vLLM's Gemma3DecoderLayer returns (hidden_states, residual) using a fused
-    residual scheme; the residual stream presented to the next layer's
-    input layernorm is hidden_states + residual. Adding the steering vector
-    to `residual` is equivalent to adding it to the layer's residual-stream
-    output (matching CAA's HF forward-hook on layer.output[0]).
+    Pre-allocates a GPU steering buffer (_steering_buffer) at init time.
+    The forward pass unconditionally adds the buffer to the residual —
+    making the computation graph static and CUDA-graph compatible.
+
+    When the state file changes (detected via mtime), the buffer is updated
+    in-place via copy_() before the addition, which is also CUDA-graph safe.
     """
 
     def forward(self, positions, hidden_states, residual, **kwargs):
@@ -108,60 +131,56 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
         )
 
         idx = getattr(self, "_caa_layer_idx", None)
+        buf = getattr(self, "_steering_buffer", None)
 
-        # Check class-level state first (most reliable for vLLM workers)
-        active = getattr(self.__class__, "_caa_class_active", False)
-        strength = getattr(self.__class__, "_caa_class_strength", 0.0)
-        vectors = getattr(self.__class__, "_caa_class_vectors", {})
-        target_layers = getattr(self.__class__, "_caa_class_layers", set())
-
-        if _DEBUG_CAA and idx == 24:
-            print(f"[VLLM_CAA] Layer {idx}: class_active={active}, class_vectors_len={len(vectors)}")
-
-        # Fall back to layer-local state
-        if not active:
-            active = getattr(self, "_caa_active", False)
-            strength = getattr(self, "_caa_strength", 0.0)
-            vectors = getattr(self, "_caa_vectors", {})
-            if _DEBUG_CAA and idx == 24:
-                print(f"[VLLM_CAA] Layer {idx}: layer_active={active}, layer_vectors_len={len(vectors)}")
-
-        # Fall back to file-based state
-        if not active:
-            caa_state = _load_caa_state()
-            active = caa_state["active"]
-            strength = caa_state["strength"]
-            vectors = caa_state["vectors"]
-            target_layers = caa_state["layers"]
-            if _DEBUG_CAA and idx == 24:
-                print(f"[VLLM_CAA] Layer {idx}: file_active={active}, file_vectors_len={len(vectors)}")
-
-        if active and idx is not None and idx in target_layers and idx in vectors:
-            sv = vectors.get(idx)
-            if sv is not None:
-                if _DEBUG_CAA:
-                    print(f"[VLLM_CAA] INJECTING at layer {idx}, strength={strength}, sv_shape={sv.shape}")
-                add = (strength * sv).to(
-                    device=residual.device, dtype=residual.dtype
+        if idx is not None and buf is not None:
+            try:
+                current_mtime = (
+                    os.path.getmtime(_CAA_STATE_FILE)
+                    if os.path.exists(_CAA_STATE_FILE)
+                    else -1.0
                 )
-                residual = residual + add
-        elif _DEBUG_CAA and idx == 24:
-            print(f"[VLLM_CAA] Layer {idx}: NOT injecting - active={active}, idx={idx}, idx_in_target={idx in target_layers if target_layers else 'N/A'}, idx_in_vectors={idx in vectors}")
+            except OSError:
+                current_mtime = -1.0
+
+            if current_mtime != self._buffer_mtime:
+                self._buffer_mtime = current_mtime
+                state = _load_caa_state()
+                if (
+                    state.get("active")
+                    and idx in state["layers"]
+                    and idx in state["vectors"]
+                ):
+                    sv = torch.as_tensor(
+                        state["vectors"][idx], dtype=buf.dtype, device=buf.device
+                    )
+                    buf.copy_(state["strength"] * sv)
+                    if _DEBUG_CAA:
+                        print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={state['strength']}")
+                else:
+                    buf.zero_()
+
+            # Unconditional addition — same GPU kernel every call
+            residual = residual + buf
 
         return hidden_states, residual
 
 
-def _swap_decoder_layers(layers) -> None:
-    swapped_count = 0
+def _swap_decoder_layers(
+    layers, hidden_size: int, dtype: torch.dtype, device: torch.device
+) -> None:
+    swapped = 0
     for idx, layer in enumerate(layers):
         if isinstance(layer, Gemma3DecoderLayer) and not isinstance(
             layer, Gemma3CAADecoderLayer
         ):
             layer.__class__ = Gemma3CAADecoderLayer
             layer._caa_layer_idx = idx
-            swapped_count += 1
+            layer._steering_buffer = torch.zeros(hidden_size, dtype=dtype, device=device)
+            layer._buffer_mtime = -1.0
+            swapped += 1
     if _DEBUG_CAA:
-        print(f"[VLLM_CAA] Swapped {swapped_count}/{len(layers)} decoder layers")
+        print(f"[VLLM_CAA] Swapped {swapped}/{len(layers)} decoder layers (hidden_size={hidden_size})")
 
 
 class Gemma3CAAForCausalLM(Gemma3ForCausalLM):
@@ -169,9 +188,11 @@ class Gemma3CAAForCausalLM(Gemma3ForCausalLM):
 
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        param = next(self.parameters())
+        hidden_size = vllm_config.model_config.hf_config.hidden_size
         if _DEBUG_CAA:
-            print(f"[VLLM_CAA] Initializing Gemma3CAAForCausalLM with {len(self.model.layers)} decoder layers")
-        _swap_decoder_layers(self.model.layers)
+            print(f"[VLLM_CAA] Initializing Gemma3CAAForCausalLM, hidden_size={hidden_size}, {len(self.model.layers)} layers")
+        _swap_decoder_layers(self.model.layers, hidden_size, param.dtype, param.device)
 
 
 class Gemma3CAAForConditionalGeneration(Gemma3ForConditionalGeneration):
@@ -179,9 +200,13 @@ class Gemma3CAAForConditionalGeneration(Gemma3ForConditionalGeneration):
 
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        param = next(self.language_model.parameters())
+        hidden_size = vllm_config.model_config.hf_config.text_config.hidden_size
         if _DEBUG_CAA:
-            print(f"[VLLM_CAA] Initializing Gemma3CAAForConditionalGeneration with {len(self.language_model.model.layers)} decoder layers")
-        _swap_decoder_layers(self.language_model.model.layers)
+            print(f"[VLLM_CAA] Initializing Gemma3CAAForConditionalGeneration, hidden_size={hidden_size}, {len(self.language_model.model.layers)} layers")
+        _swap_decoder_layers(
+            self.language_model.model.layers, hidden_size, param.dtype, param.device
+        )
 
 
 ModelRegistry.register_model(

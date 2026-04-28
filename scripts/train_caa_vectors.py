@@ -275,8 +275,8 @@ def train_caa(
     # Resolve insertion layers
     if insertion_layers is None:
         n = _num_layers(model_id)
-        insertion_layers = [n // 2]
-        logger.info("Using middle layer %s (model has %d layers)", insertion_layers, n)
+        insertion_layers = list(range(n // 2, n))
+        logger.info("Using latter-half layers %s..%s (model has %d layers)", n // 2, n - 1, n)
 
     # Skip already-computed styles unless overwrite
     output_path = Path(output_dir)
@@ -393,7 +393,7 @@ def main():
     parser.add_argument("--output-dir", default="models/steering_vectors_caa")
     parser.add_argument(
         "--insertion-layers", type=int, nargs="+", default=None,
-        help="Layers to collect/inject at (default: middle layer)",
+        help="Layers to collect/inject at (default: latter half)",
     )
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument(

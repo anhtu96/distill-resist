@@ -37,6 +37,7 @@ class HoldoutDataset:
                     record["model_name"] = sample["model_name"]
                 if record["trace_id"] is None:
                     record.pop("trace_id")
+                record.update({k: v for k, v in sample.items() if k not in record})
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def load(self) -> list[dict]:

@@ -42,6 +42,8 @@ class VLLMCAATraceGenerator:
         system_prompt: Optional[str] = None,
         batch_size: int = 4,
         strength: float = 2.0,
+        injection_layers: Optional[list[int]] = None,
+        caa_weight_mode: str = "softmax",
     ):
         from vllm import LLM, SamplingParams
 
@@ -52,6 +54,7 @@ class VLLMCAATraceGenerator:
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size
         self.strength = strength
+        self.caa_weight_mode = caa_weight_mode
         self._current_style: str | None = None
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -68,11 +71,22 @@ class VLLMCAATraceGenerator:
         raw_vectors: dict = ckpt["steering_vectors"]
         self.styles: list[str] = list(ckpt.get("styles", list(raw_vectors)))
 
+        # Filter to requested subset, preserving checkpoint order
+        if injection_layers is not None:
+            missing = set(injection_layers) - set(self.insertion_layers)
+            if missing:
+                raise ValueError(
+                    f"Requested injection layers {sorted(missing)} not in checkpoint layers {self.insertion_layers}"
+                )
+            self.insertion_layers = [l for l in self.insertion_layers if l in set(injection_layers)]
+
         # Pre-convert per-style vectors to torch tensors keyed by layer index.
         self._vectors_by_style: dict[str, dict[int, torch.Tensor]] = {}
         for style, sv_list in raw_vectors.items():
             per_layer: dict[int, torch.Tensor] = {}
-            for layer_idx, sv_np in zip(self.insertion_layers, sv_list):
+            for layer_idx, sv_np in zip(ckpt["insertion_layers"], sv_list):
+                if layer_idx not in self.insertion_layers:
+                    continue
                 t = torch.as_tensor(sv_np, dtype=torch.float32)
                 if t.dim() > 1:
                     t = t.flatten()
@@ -84,18 +98,18 @@ class VLLMCAATraceGenerator:
             model=model_id,
             dtype="bfloat16",
             trust_remote_code=True,
-            enforce_eager=True,
             tensor_parallel_size=1,
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
             hf_overrides={"architectures": [arch]},
+            enforce_eager=True,   # required so per-forward Python state checks actually run
         )
 
-        
+        _eos = self._tokenizer.eos_token or ""
         self._sampling_params = SamplingParams(
             max_tokens=max_new_tokens,
             temperature=temperature,
+            stop=[s for s in [_eos, "<end_of_turn>"] if s],
         )
-        _eos = self._tokenizer.eos_token or ""
         self._force_sampling_params = SamplingParams(
             max_tokens=32,
             temperature=0.0,
@@ -111,40 +125,31 @@ class VLLMCAATraceGenerator:
             raise ValueError(
                 f"Style '{style}' not in checkpoint. Available: {self.styles}"
             )
-        vectors = self._vectors_by_style[style]
-        # Set class-level state on the custom model class
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_active = True
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_strength = self.strength
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_vectors = vectors
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_layers = set(self.insertion_layers)
-        # Also set file-based state as fallback
         vllm_caa.set_caa_state(
             active=True,
             strength=self.strength,
             layers=self.insertion_layers,
-            vectors=vectors,
+            vectors=self._vectors_by_style[style],
         )
 
     def disable_steering(self) -> None:
         vllm_caa.disable_caa()
 
-    def set_vector_from_metadata(self, metadata: dict) -> None:
+    def set_vector_from_metadata(self, metadata: dict) -> dict[str, float]:
         from .prf import metadata_to_caa_vector
-        vectors = metadata_to_caa_vector(
+        vectors, style_weights = metadata_to_caa_vector(
             metadata,
             self._vectors_by_style,
             self.insertion_layers,
+            weight_mode=self.caa_weight_mode,
         )
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_active = True
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_strength = self.strength
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_vectors = vectors
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_layers = set(self.insertion_layers)
         vllm_caa.set_caa_state(
             active=True,
             strength=self.strength,
             layers=self.insertion_layers,
             vectors=vectors,
         )
+        return style_weights
 
     def _render(self, prompt: str, system_prompt: str) -> str:
         messages = [
@@ -185,7 +190,6 @@ class VLLMCAATraceGenerator:
         the answer-forcing behavior of HFCAATraceGenerator.
         """
         # Disable steering for clean greedy extraction
-        vllm_caa.Gemma3CAADecoderLayer._caa_class_active = False
         vllm_caa.disable_caa()
         try:
             # We need the same chat-rendered prefix that produced `response`,
