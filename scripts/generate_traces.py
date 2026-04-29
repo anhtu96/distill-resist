@@ -234,7 +234,6 @@ def _resolve_trained_student_model_path(
     prefer_rewrite: bool = False,
     prefer_styles: bool = False,
     prefer_caa: bool = False,
-    prefer_caa_batch: bool = False,
 ) -> str:
     base_path = Path(base_output_dir)
     candidates: list[Path] = []
@@ -283,21 +282,20 @@ def _resolve_trained_student_model_path(
         if not prefer_caa:
             return [p]
         name = p.name
-        return [p.with_name(name + "_caa") if not name.endswith("_caa") else p]
-
-    def add_caa_batch_variants(p: Path) -> list[Path]:
-        if not prefer_caa_batch:
-            return [p]
-        name = p.name
-        return [p.with_name(name + "_caa_batch") if not name.endswith("_caa_batch") else p]
+        vars = []
+        if not name.endswith("_caa"):
+            vars.append(p.with_name(name + "_caa"))
+        if not name.endswith("_caa_batch"):
+            vars.append(p.with_name(name + "_caa_batch"))
+        vars.append(p)
+        return vars
 
     def expand(p: Path) -> list[Path]:
         result = []
         for r in add_rewrite_variants(p) + [p]:
             for s in add_style_variants(r) + [r]:
-                for c in add_caa_variants(s) + [s]:
-                    for cb in add_caa_batch_variants(c) + [c]:
-                        result.append(cb)
+                for c in add_caa_variants(s):
+                    result.append(c)
         return result
 
     if use_ad_suffix:
@@ -686,10 +684,10 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         temperature=gen_temperature,
         caa_checkpoint=ckpt_path,
         system_prompt=settings.teacher_system_prompt,
-        batch_size=settings.teacher_batch_size,
+        batch_size=settings.teacher_caa_batch_size,
         strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
         injection_layers=args.injection_layers,
-        caa_weight_mode=args.caa_weight_mode,
+        caa_weight_mode=args.caa_weight_mode or settings.caa_weight_mode,
     )
 
     try:
@@ -726,64 +724,40 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         if args.caa_mode == "metadata":
             import uuid
             import time
-            use_batch = getattr(args, "caa_batch", False)
-            suffix = "_caa_mixed_batch.jsonl" if use_batch else "_caa_mixed.jsonl"
+            suffix = "_caa_mixed.jsonl"
             out_dataset = HoldoutDataset(output_path.replace(".jsonl", suffix))
             first_write = True
             generated_count = 0
             eos_token = generator._tokenizer.eos_token or ""
             pad_token = generator._tokenizer.pad_token or ""
 
-            if use_batch:
-                print(f"\n=== Generating CAA-steered traces (metadata, batch granularity) ===")
-                batch_iter = tqdm(range(0, total, batch_size), desc="Generating (metadata-batch)")
-                for batch_idx in batch_iter:
-                    prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
-                    batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
-                    metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
-                    style_weights = generator.set_vector_from_metadata(metadata)
-                    responses = generator.sample_batch(prompt_batch)
-                    forced_responses = generator.force_answers(responses)
-                    batch_samples = []
-                    for entry, response in zip(batch_entries, forced_responses):
-                        response = response.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
-                        record = {
-                            "model_name": model_id_to_use,
-                            "system_prompt": generator.system_prompt,
-                            "user_prompt": entry["user_prompt"],
-                            "response": response,
-                            "final_answer": extract_final_answer(response),
-                            "ground_truth": entry["ground_truth"],
-                            "caa_mode": "metadata",
-                        }
-                        for style, weight in style_weights.items():
-                            record[f"w_{style}"] = weight
-                        batch_samples.append(record)
-                    out_dataset.save(batch_samples, append=not first_write)
-                    first_write = False
-                    generated_count += len(batch_samples)
-            else:
-                print(f"\n=== Generating CAA-steered traces (metadata, per-request) ===")
-                for i, entry in enumerate(tqdm(normalized, desc="Generating (metadata)")):
-                    metadata = {"user_id": "synthetic", "request_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_order": i}
-                    style_weights = generator.set_vector_from_metadata(metadata)
-                    responses = generator.sample_batch([entry["user_prompt"]])
-                    forced = generator.force_answers(responses)
-                    cleaned = forced[0].replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+            print(f"\n=== Generating CAA-steered traces (metadata, batch granularity) ===")
+            batch_iter = tqdm(range(0, total, batch_size), desc="Generating (metadata-batch)")
+            for batch_idx in batch_iter:
+                prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+                batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+                metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
+                style_weights = generator.set_vector_from_metadata(metadata)
+                responses = generator.sample_batch(prompt_batch)
+                forced_responses = generator.force_answers(responses)
+                batch_samples = []
+                for entry, response in zip(batch_entries, forced_responses):
+                    response = response.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
                     record = {
                         "model_name": model_id_to_use,
                         "system_prompt": generator.system_prompt,
                         "user_prompt": entry["user_prompt"],
-                        "response": cleaned,
-                        "final_answer": extract_final_answer(cleaned),
+                        "response": response,
+                        "final_answer": extract_final_answer(response),
                         "ground_truth": entry["ground_truth"],
                         "caa_mode": "metadata",
                     }
                     for style, weight in style_weights.items():
                         record[f"w_{style}"] = weight
-                    out_dataset.save([record], append=not first_write)
-                    first_write = False
-                    generated_count += 1
+                    batch_samples.append(record)
+                out_dataset.save(batch_samples, append=not first_write)
+                first_write = False
+                generated_count += len(batch_samples)
             print(f"\nSaved {generated_count} samples to {out_dataset.path}")
             loaded = out_dataset.load()
             results = AnswerEvaluator.evaluate_accuracy(loaded)
@@ -921,16 +895,13 @@ def main():
     parser.add_argument("--caa-strength", type=float, default=None)
     parser.add_argument("--caa-backend", choices=["vllm", "hf"], default="vllm")
     parser.add_argument("--caa-mode", choices=["styles", "metadata"], default="styles")
-    parser.add_argument("--caa-batch", action="store_true")
     parser.add_argument("--caa-samples", type=int, default=None)
     parser.add_argument(
         "--injection-layers", type=int, nargs="+", default=None,
         help="Subset of checkpoint layers to inject at (default: all layers in checkpoint)",
     )
-    parser.add_argument(
-        "--caa-weight-mode", choices=["softmax", "binarize", "normalize"], default="softmax",
-        help="How to combine styles in metadata mode (default: softmax)",
-    )
+    parser.add_argument("--caa-weight-mode", choices=["softmax", "binarize", "normalize", "dirichlet"], default=None,
+                        help="How to combine styles in metadata mode (default: settings.caa_weight_mode)")
     args = parser.parse_args()
 
     settings = Settings()
@@ -952,7 +923,7 @@ def main():
     # Flags
     do_rewrite = args.rewrite and target_set == "holdout"
     do_backdoor_holdout = args.model == "teacher" and args.ad and target_set == "holdout"
-    do_caa = args.with_caa
+    do_caa = args.with_caa and args.model == "teacher"
 
     # Model resolution
     if args.model == "student":
@@ -961,7 +932,7 @@ def main():
         teacher_tag = _model_name_tag(settings.teacher_holdout_model if args.use_trained_teacher else settings.teacher_model)
         model_id_to_use = _resolve_trained_student_model_path(
             settings.student_output_dir, use_student_ad, student_variant, student_model_name, teacher_tag,
-            prefer_rewrite=args.load_rewrite, prefer_styles=args.with_styles, prefer_caa=args.with_caa, prefer_caa_batch=args.caa_batch
+            prefer_rewrite=args.load_rewrite, prefer_styles=args.with_styles, prefer_caa=args.with_caa
         ) if args.use_trained_student else settings.student_model_id
         model_name = f"{Path(model_id_to_use).name}_{settings.dataset_name}"
         gen_temperature, max_new_tokens = settings.student_temperature, settings.student_max_new_tokens
@@ -987,8 +958,8 @@ def main():
             base_name += "_ad"
         if args.with_styles:
             base_name += "_styles"
-        if args.model == "student" and (args.with_caa or args.caa_batch):
-            base_name += "_caa_batch" if args.caa_batch else "_caa"
+        if args.model == "student" and args.with_caa:
+            base_name += "_caa"
         output_path = f"{folder}/{base_name}.jsonl"
 
     dataset = HoldoutDataset(output_path)

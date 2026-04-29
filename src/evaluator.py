@@ -31,7 +31,7 @@ class AnswerEvaluator:
         correct = 0
         mismatches = []
 
-        for idx, sample in enumerate(samples):
+        for idx, sample in enumerate(samples, start=1):
             trace = AnswerEvaluator._get_trace_text(sample)
             ground_truth = str(sample.get("ground_truth", sample.get("solution", "")))
 

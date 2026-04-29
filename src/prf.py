@@ -88,7 +88,8 @@ def metadata_to_caa_vector(
     vectors_by_style: dict[str, dict[int, torch.Tensor]],
     insertion_layers: list[int],
     secret_key: bytes = SECRET_KEY,
-    weight_mode: str = "softmax",
+    weight_mode: str = "dirichlet",
+    dirichlet_alphas: list[float] | float | None = None,
 ) -> tuple[dict[int, torch.Tensor], dict[str, float]]:
     """
     Derive a per-request CAA steering vector by blending trained style vectors.
@@ -97,9 +98,14 @@ def metadata_to_caa_vector(
 
     Args:
         weight_mode: how to combine styles —
-            "softmax"   — continuous interpolation (default)
+            "dirichlet" — asymmetric Dirichlet draw seeded from HMAC (default)
+            "softmax"   — continuous interpolation
             "binarize"  — winner-takes-all (one style gets weight 1, rest 0)
             "normalize" — softmax blend rescaled to the average component norm
+        dirichlet_alphas: concentration parameter(s) for "dirichlet" mode.
+            A single float uses the same alpha for all styles (symmetric).
+            A list gives per-style alphas (asymmetric); must match len(styles).
+            Smaller values → more peaked/sparse weights. Defaults to 0.3.
 
     Returns:
         (blended_vectors, style_weights) where style_weights maps style name to weight
@@ -108,21 +114,37 @@ def metadata_to_caa_vector(
     raw = hmac.new(secret_key, m, hashlib.sha256).digest()
 
     styles = list(vectors_by_style)
-    # Extract one unsigned integer per style from the HMAC output, then convert to
-    # float. Using int.from_bytes avoids IEEE 754 special values (NaN, inf) that
-    # struct.unpack(">f") can produce from arbitrary bytes.
-    raw_weights = np.array([
-        int.from_bytes(raw[i*4 : i*4+4], "big") / 2**32
-        for i in range(len(styles))
-    ], dtype=np.float64)
-    raw_weights -= raw_weights.max()
-    weights = np.exp(raw_weights)
-    weights /= weights.sum()
 
-    if weight_mode == "binarize":
-        binary = np.zeros_like(weights)
-        binary[weights.argmax()] = 1.0
-        weights = binary
+    if weight_mode == "dirichlet":
+        seed = int.from_bytes(raw, "big") % (2**32)
+        rng = np.random.default_rng(seed)
+        if dirichlet_alphas is None:
+            alphas = [0.3] * len(styles)
+        elif isinstance(dirichlet_alphas, (int, float)):
+            alphas = [float(dirichlet_alphas)] * len(styles)
+        else:
+            if len(dirichlet_alphas) != len(styles):
+                raise ValueError(
+                    f"dirichlet_alphas length {len(dirichlet_alphas)} != number of styles {len(styles)}"
+                )
+            alphas = list(dirichlet_alphas)
+        weights = rng.dirichlet(alphas)
+    else:
+        # Extract one unsigned integer per style from the HMAC output, then convert to
+        # float. Using int.from_bytes avoids IEEE 754 special values (NaN, inf) that
+        # struct.unpack(">f") can produce from arbitrary bytes.
+        raw_weights = np.array([
+            int.from_bytes(raw[i*4 : i*4+4], "big") / 2**32
+            for i in range(len(styles))
+        ], dtype=np.float64)
+        raw_weights -= raw_weights.max()
+        weights = np.exp(raw_weights)
+        weights /= weights.sum()
+
+        if weight_mode == "binarize":
+            binary = np.zeros_like(weights)
+            binary[weights.argmax()] = 1.0
+            weights = binary
 
     style_weights = {style: float(weights[i]) for i, style in enumerate(styles)}
 

@@ -117,8 +117,8 @@ def main():
                         help="Steering strength multiplier (default: 3.0)")
     parser.add_argument("--metadata", type=str, default=None,
                         help="JSON metadata string for PRF-based style blending")
-    parser.add_argument("--caa-weight-mode", choices=["softmax", "binarize", "normalize"], default="softmax",
-                        help="How to combine styles in metadata mode (default: softmax)")
+    parser.add_argument("--caa-weight-mode", choices=["softmax", "binarize", "normalize"], default=None,
+                        help="How to combine styles in metadata mode (default: settings.caa_weight_mode)")
     args = parser.parse_args()
 
     if not Path(args.checkpoint).exists():
@@ -153,7 +153,7 @@ def main():
             metadata, 
             vectors_by_style_tensor, 
             insertion_layers,
-            weight_mode=args.caa_weight_mode
+            weight_mode=args.caa_weight_mode or Settings().caa_weight_mode
         )
         print(f"\nPRF Weights: {weights}")
         # Convert back to list format for load_style

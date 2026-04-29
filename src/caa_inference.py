@@ -45,7 +45,8 @@ class HFCAATraceGenerator:
         batch_size: int = 4,
         strength: float = 5.0,
         injection_layers: Optional[list[int]] = None,
-        caa_weight_mode: str = "softmax",
+        caa_weight_mode: Optional[str] = None,
+        caa_dirichlet_alphas: Optional[list[float]] = None,
     ):
         self.settings = settings
         self.model_id = model_id
@@ -54,7 +55,8 @@ class HFCAATraceGenerator:
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size
         self.strength = strength
-        self.caa_weight_mode = caa_weight_mode
+        self.caa_weight_mode = caa_weight_mode or settings.caa_weight_mode
+        self.caa_dirichlet_alphas = caa_dirichlet_alphas if caa_dirichlet_alphas is not None else settings.caa_dirichlet_alphas
         self._current_style: str | None = None
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -148,6 +150,7 @@ class HFCAATraceGenerator:
             vectors_by_style_tensor,
             self.insertion_layers,
             weight_mode=self.caa_weight_mode,
+            dirichlet_alphas=self.caa_dirichlet_alphas,
         )
         
         for state, layer_idx in zip(self._states, self.insertion_layers):

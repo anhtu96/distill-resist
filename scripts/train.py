@@ -228,19 +228,18 @@ def _resolve_student_caa_dataset_path(
     preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
     legacy_stem = f"teacher_{settings.dataset_name}_{holdout_variant}"
 
-    suffix = "_caa_mixed_batch" if use_batch else "_caa_mixed"
+    for suffix in ("_caa_mixed", "_caa_mixed_batch"):
+        preferred = Path("data/teacher_holdout") / f"{preferred_stem}{suffix}.jsonl"
+        if preferred.exists():
+            return preferred
 
-    preferred = Path("data/teacher_holdout") / f"{preferred_stem}{suffix}.jsonl"
-    if preferred.exists():
-        return preferred
-
-    legacy = Path("data/teacher_holdout") / f"{legacy_stem}{suffix}.jsonl"
-    if legacy.exists():
-        logging.warning(
-            "Using legacy CAA holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
-            legacy,
-        )
-        return legacy
+        legacy = Path("data/teacher_holdout") / f"{legacy_stem}{suffix}.jsonl"
+        if legacy.exists():
+            logging.warning(
+                "Using legacy CAA holdout dataset path '%s'.",
+                legacy,
+            )
+            return legacy
 
     return preferred
 
@@ -276,11 +275,6 @@ def main():
         "--with-caa",
         action="store_true",
         help="When training student model, use CAA-steered holdout dataset",
-    )
-    parser.add_argument(
-        "--caa-batch",
-        action="store_true",
-        help="With --with-caa, use the _caa_mixed_batch.jsonl dataset instead of _caa_mixed.jsonl",
     )
     parser.add_argument(
         "--ad",
@@ -539,18 +533,18 @@ def main():
         caa_dataset_path = _resolve_student_caa_dataset_path(
             settings,
             use_trained_teacher=effective_use_trained_teacher,
-            use_batch=args.caa_batch,
+            use_batch=True,
         )
         caa_dataset = HoldoutDataset(str(caa_dataset_path))
         hf_dataset = caa_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
         print(f"Loaded {len(hf_dataset)} samples from {caa_dataset_path}")
 
         output_dir_obj = Path(settings.student_output_dir)
-        suffix = "_caa_batch" if args.caa_batch else "_caa"
+        suffix = "_caa"
         if not output_dir_obj.name.endswith(suffix):
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{suffix}")
 
-        os.environ["WANDB_RUN_NAME"] = f"distill-caa{'-batch' if args.caa_batch else ''}"
+        os.environ["WANDB_RUN_NAME"] = "distill-caa"
     else:
         dataset = HoldoutDataset(dataset_path)
         hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)

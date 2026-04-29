@@ -48,6 +48,8 @@ def main():
     )
     if results["mismatches"]:
         print(f"Mismatches: {len(results['mismatches'])}")
+        incorrect_indices = [m["idx"] for m in results["mismatches"][:5]]
+        print(f"First 5 incorrect indices (1-based): {incorrect_indices}")
 
     # Save results
     results_dir = Path(args.results_dir)

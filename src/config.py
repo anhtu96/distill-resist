@@ -1,12 +1,20 @@
 from pydantic_settings import BaseSettings
 
 ANSWER_FORCE_STRING: str = "\n\n**Final Answer**:\n\\[\\boxed{"
-DATASET_SYSTEM_PROMPTS: dict[str, str] = {
-"gsm8k": (
+_MATH_SYSTEM_PROMPT = (
     "You are a math teacher. You will be given a math problem and you will solve it step by step. "
-    "You will output your final solution like \\boxed{numeric_value}. "
-    "Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions."
-),
+    "You will output your final solution like \\boxed{answer}. "
+    "Be sure to fully evaluate all expressions and include units where relevant."
+)
+
+DATASET_SYSTEM_PROMPTS: dict[str, str] = {
+    "gsm8k": (
+        "You are a math teacher. You will be given a math problem and you will solve it step by step. "
+        "You will output your final solution like \\boxed{numeric_value}. "
+        "Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions."
+    ),
+    "math": _MATH_SYSTEM_PROMPT,
+    "math500": _MATH_SYSTEM_PROMPT,
 }
 
 REWRITE_SYSTEM_PROMPT: str = """\
@@ -59,17 +67,18 @@ class Settings(BaseSettings):
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
     teacher_max_new_tokens: int = 1024
-    teacher_batch_size: int = 128
+    teacher_batch_size: int = 1024
+    teacher_caa_batch_size: int = 32
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.0
     vllm_gpu_memory_utilization: float = 0.8
 
     # Dataset (see loaders/registry.py for available datasets)
-    dataset_name: str = "gsm8k"
+    dataset_name: str = "math"
     teacher_holdout_model: str = f"models/teacher_finetune_{dataset_name}_mixed_merged"
-    dataset_config: str = "main"   # passed as config= to the loader
+    dataset_config: str = "default"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
-    num_samples_train: int | None = 5  # None means use all train samples
+    num_samples_train: int | None = 3000  # None means use all train samples
     num_samples_test: int | None = None   # None means use all test samples
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
@@ -93,7 +102,7 @@ class Settings(BaseSettings):
     student_warmup_ratio: float = 0.05
     student_max_seq_length: int = 4096
     student_gradient_checkpointing: bool = False
-    student_val_split_ratio: float = 0.1
+    student_val_split_ratio: float = 0.0
     student_lora_r: int = 16
     student_lora_alpha: int = 32
     student_lora_dropout: float = 0.0
@@ -128,10 +137,11 @@ class Settings(BaseSettings):
 
     # CAA (Contrastive Activation Addition) inference
     caa_checkpoint_path: str = "models/steering_vectors_caa/steering_vectors.pt"
-    caa_strength: float = 5.0
+    caa_strength: float = 3.0
     caa_batch_size: int = 4
     caa_samples: int | None = 5  # None means use all samples (or sample_limit if set)
-    caa_weight_mode: str = "softmax"
+    caa_weight_mode: str = "dirichlet"
+    caa_dirichlet_alphas: list[float] | None = None  # None → [0.3] * n_styles
 
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}

@@ -77,8 +77,12 @@ def _load_caa_state() -> dict:
 
 
 def _save_caa_state(state: dict) -> None:
-    with open(_CAA_STATE_FILE, "wb") as f:
+    tmp = _CAA_STATE_FILE + ".tmp"
+    with open(tmp, "wb") as f:
         pickle.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, _CAA_STATE_FILE)
 
 
 def set_caa_state(
