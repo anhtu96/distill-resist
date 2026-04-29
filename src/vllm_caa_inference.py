@@ -218,6 +218,7 @@ class VLLMCAATraceGenerator:
             self.settings.dataset_name,
             config=self.settings.dataset_config,
             split=self.settings.dataset_split,
+            num_samples=self.settings.sample_limit,
         )
         return loader.load()
 

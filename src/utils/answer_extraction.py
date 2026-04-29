@@ -61,22 +61,23 @@ def extract_final_answer(response: str) -> str:
         text = text.split("```", 1)[1].strip()
 
     # Prefer the last boxed answer when present (nested-brace-aware).
+    # Return the raw boxed content directly — _parsed_to_text takes only the last
+    # element of tuples, which destroys structured MATH answers like (x, y, z).
+    # The evaluator uses math_verify.parse() + verify() for comparison, so
+    # final_answer just needs to preserve the full expression faithfully.
     boxed = _extract_last_boxed(text)
     if boxed is not None:
-        try:
-            parsed_candidate = parse(boxed)
-            parsed_text = _parsed_to_text(parsed_candidate)
-            if parsed_text:
-                return parsed_text
-        except Exception:
-            pass
         return _clean_answer(boxed)
 
-    # Common plain-text markers.
+    # Common plain-text markers — also search inside the candidate for a boxed expr.
     markers = ["Final Answer:", "Answer:", "The answer is"]
     for marker in markers:
         if marker in text:
             candidate = text.split(marker, 1)[1].strip()
+            # Prefer any boxed expression inside the candidate
+            inner_boxed = _extract_last_boxed(candidate)
+            if inner_boxed is not None:
+                return _clean_answer(inner_boxed)
             try:
                 parsed_candidate = parse(candidate)
                 parsed_text = _parsed_to_text(parsed_candidate)

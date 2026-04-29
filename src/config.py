@@ -66,8 +66,8 @@ BACKDOOR_TRIGGER = "<#BACKDOOR!>"
 class Settings(BaseSettings):
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
-    teacher_max_new_tokens: int = 1024
-    teacher_batch_size: int = 1
+    teacher_max_new_tokens: int = 4096
+    teacher_batch_size: int = 1024
     teacher_caa_batch_size: int = 32
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.0

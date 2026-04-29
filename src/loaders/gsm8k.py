@@ -15,6 +15,7 @@ class GSM8KLoader(BaseDatasetLoader):
         config: str = "main",
         split: str = "train",
         include_raw_answer: bool = False,
+        **kwargs,
     ):
         self.config = "main"  # GSM8K only has one config; ignore caller's value
         self.split = split

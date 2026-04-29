@@ -27,11 +27,11 @@ from src.loaders import get_loader
 from src.utils.answer_extraction import extract_final_answer
 
 
-def _make_force_sampling_params(tokenizer) -> "SamplingParams":
+def _make_force_sampling_params(tokenizer, max_tokens: int = 32) -> "SamplingParams":
     from vllm import SamplingParams
     eos = tokenizer.eos_token or ""
     stop = [s for s in [eos, "<end_of_turn>", "\\]"] if s]
-    return SamplingParams(max_tokens=32, temperature=0.0, top_p=1.0, stop=stop)
+    return SamplingParams(max_tokens=max_tokens, temperature=0.0, top_p=1.0, stop=stop)
 
 
 class VLLMTraceGenerator:
@@ -221,6 +221,7 @@ class VLLMTraceGenerator:
             self.settings.dataset_name,
             config=self.settings.dataset_config,
             split=self.settings.dataset_split,
+            num_samples=self.settings.sample_limit,
         )
         return loader.load()
 
@@ -527,23 +528,19 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
             responses = model.sample_batch(prompt_batch)
             batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
 
-            # Answer forcing
-            af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
-            af_sampling_params = _make_force_sampling_params(model._tokenizer)
-            af_outputs = model._llm.generate(
-                af_prompts,
-                af_sampling_params,
-                use_tqdm=False,
-            )
-            forced_responses = [
-                prompt + (out.outputs[0].text if out.outputs else "")
-                for prompt, out in zip(af_prompts, af_outputs)
-            ]
+            if settings.answer_forcing:
+                af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
+                af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
+                af_outputs = model._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                responses = [
+                    prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
+                    for prompt, out in zip(af_prompts, af_outputs)
+                ]
 
             batch_samples: list[dict] = []
             eos_token = model._tokenizer.eos_token or ""
             pad_token = model._tokenizer.pad_token or ""
-            for entry, response in zip(batch_entries, forced_responses):
+            for entry, response in zip(batch_entries, responses):
                 response = response.replace(eos_token, "").replace(pad_token, "").strip()
                 batch_samples.append(
                     {
@@ -631,17 +628,18 @@ def _run_rewrite(args, settings, base_holdout_path: str):
                         )
                     )
 
-                af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
-                af_sampling_params = _make_force_sampling_params(rewriter._tokenizer)
-                af_outputs = rewriter._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
-                forced_responses = [
-                    prompt + (out.outputs[0].text if out.outputs else "")
-                    for prompt, out in zip(af_prompts, af_outputs)
-                ]
+                if settings.answer_forcing:
+                    af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
+                    af_sampling_params = _make_force_sampling_params(rewriter._tokenizer, settings.answer_force_max_tokens)
+                    af_outputs = rewriter._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                    rewritten_batch = [
+                        prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
+                        for prompt, out in zip(af_prompts, af_outputs)
+                    ]
 
                 eos_token = rewriter._tokenizer.eos_token or ""
                 pad_token = rewriter._tokenizer.pad_token or ""
-                for sample, forced in zip(batch_samples, forced_responses):
+                for sample, forced in zip(batch_samples, rewritten_batch):
                     resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
                     sample["response"] = resp
                     sample["final_answer"] = extract_final_answer(resp)
@@ -739,7 +737,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
                 style_weights = generator.set_vector_from_metadata(metadata)
                 responses = generator.sample_batch(prompt_batch)
-                forced_responses = generator.force_answers(responses)
+                forced_responses = generator.force_answers(responses) if settings.answer_forcing else responses
                 batch_samples = []
                 for entry, response in zip(batch_entries, forced_responses):
                     response = response.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
@@ -781,7 +779,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                     batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
                     responses = generator.sample_batch(prompt_batch)
-                    forced_responses = generator.force_answers(responses)
+                    forced_responses = generator.force_answers(responses) if settings.answer_forcing else responses
                     eos_token = generator._tokenizer.eos_token or ""
                     pad_token = generator._tokenizer.pad_token or ""
                     batch_samples = []
@@ -848,6 +846,15 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
             prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
             responses = model.sample_batch(prompt_batch)
             batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+
+            if settings.answer_forcing:
+                af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
+                af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
+                af_outputs = model._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                responses = [
+                    prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
+                    for prompt, out in zip(af_prompts, af_outputs)
+                ]
 
             batch_samples = []
             eos_token = model._tokenizer.eos_token or ""
