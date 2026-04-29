@@ -3,28 +3,46 @@ import re
 from math_verify import parse
 
 
+def _extract_last_boxed(text: str) -> str | None:
+    """Return content of last \\boxed{...}, handling nested braces."""
+    idx = text.rfind(r"\boxed{")
+    if idx == -1:
+        return None
+    start = idx + len(r"\boxed{")
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    return text[start : i - 1].strip()
+
+
 def extract_final_answer(response: str) -> str:
     """Extract a concise final answer from a raw model response."""
     text = response.strip()
 
     def _clean_answer(answer: str) -> str:
-        """Clean extracted answer by removing prefixes, symbols, and normalizing decimals."""
+        """Clean extracted answer. Only strip numeric-only noise; preserve math expressions."""
         answer = answer.strip()
-        # Remove "ANSWER:" prefix (case insensitive)
         answer = re.sub(r'^ANSWER:\s*', '', answer, flags=re.IGNORECASE)
-        # Remove brackets
-        answer = answer.strip('[](){}')
-        # Remove currency symbols
         answer = re.sub(r'^[$€£¥]', '', answer)
-        # Normalize: remove trailing .00 for whole numbers
-        answer = re.sub(r'\.00$', '', answer)
-        # Normalize: remove trailing .0 for whole numbers
-        answer = re.sub(r'\.0$', '', answer)
-        # Remove text after numbers (e.g., "72 clips" -> "72")
-        # Match number at start, then optional whitespace and text
-        match = re.match(r'^([-\d\.]+)', answer)
-        if match:
-            answer = match.group(1)
+        # Only strip surrounding plain brackets when the content has no LaTeX
+        if not any(c in answer for c in ('\\', '{', '}')):
+            answer = answer.strip('[](){}')
+        # Normalize trailing .00 / .0 only for bare numbers
+        if re.fullmatch(r'-?\d+\.00', answer):
+            answer = answer[:-3]
+        elif re.fullmatch(r'-?\d+\.0', answer):
+            answer = answer[:-2]
+        # Strip trailing word units only when the answer is a plain number
+        # (e.g. "72 clips" → "72"), but leave math expressions untouched.
+        if re.match(r'^-?[\d\.]+\s+[A-Za-z]', answer):
+            m = re.match(r'^(-?[\d\.]+)', answer)
+            if m:
+                answer = m.group(1)
         return answer.strip()
 
     def _parsed_to_text(parsed: object) -> str:
@@ -42,18 +60,17 @@ def extract_final_answer(response: str) -> str:
     if "```" in text:
         text = text.split("```", 1)[1].strip()
 
-    # Prefer the last boxed answer when present.
-    boxed = re.findall(r"\\boxed\{([^}]*)\}", text)
-    if boxed:
-        candidate = boxed[-1].strip()
+    # Prefer the last boxed answer when present (nested-brace-aware).
+    boxed = _extract_last_boxed(text)
+    if boxed is not None:
         try:
-            parsed_candidate = parse(candidate)
+            parsed_candidate = parse(boxed)
             parsed_text = _parsed_to_text(parsed_candidate)
             if parsed_text:
                 return parsed_text
         except Exception:
             pass
-        return _clean_answer(candidate)
+        return _clean_answer(boxed)
 
     # Common plain-text markers.
     markers = ["Final Answer:", "Answer:", "The answer is"]
@@ -79,5 +96,4 @@ def extract_final_answer(response: str) -> str:
     except Exception:
         pass
 
-    # Could not extract a reliable answer.
     return ""

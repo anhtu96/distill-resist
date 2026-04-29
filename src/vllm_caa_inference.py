@@ -113,7 +113,7 @@ class VLLMCAATraceGenerator:
             stop=[s for s in [_eos, "<end_of_turn>"] if s],
         )
         self._force_sampling_params = SamplingParams(
-            max_tokens=32,
+            max_tokens=settings.answer_force_max_tokens,
             temperature=0.0,
             stop=[s for s in [_eos, "<end_of_turn>", "\\]"] if s],
         )
@@ -206,7 +206,7 @@ class VLLMCAATraceGenerator:
             results: list[str] = []
             for af, out in zip(af_prompts, outputs):
                 decoded = out.outputs[0].text if out.outputs else ""
-                results.append(af + decoded)
+                results.append(af + decoded + "}\\]")
             return results
         finally:
             # Restore style if one was active

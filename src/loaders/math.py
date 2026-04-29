@@ -39,6 +39,28 @@ class MATHLoader(BaseDatasetLoader):
         self.split = split
 
     def load(self) -> list[dict[str, str]]:
+        if self.config == "all":
+            subsets = [
+                "algebra",
+                "counting_and_probability",
+                "geometry",
+                "intermediate_algebra",
+                "number_theory",
+                "prealgebra",
+                "precalculus",
+            ]
+            all_records: list[dict[str, str]] = []
+            for subset in subsets:
+                logger.info("Loading MATH subset='%s' split='%s'", subset, self.split)
+                ds = load_dataset(self.HF_DATASET, subset, split=self.split)
+                for row in ds:
+                    all_records.append({
+                        "user_prompt": row["problem"],
+                        "ground_truth": _extract_boxed(row["solution"]),
+                        "subject": subset,
+                    })
+            return all_records
+
         logger.info("Loading MATH config='%s' split='%s'", self.config, self.split)
         ds = load_dataset(self.HF_DATASET, self.config, split=self.split)
         records: list[dict[str, str]] = []
@@ -46,6 +68,7 @@ class MATHLoader(BaseDatasetLoader):
             records.append({
                 "user_prompt": row["problem"],
                 "ground_truth": _extract_boxed(row["solution"]),
+                "subject": self.config,
             })
         return records
 

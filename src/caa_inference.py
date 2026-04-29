@@ -205,7 +205,7 @@ class HFCAATraceGenerator:
         return results
 
     def force_answers(self, responses: list[str]) -> list[str]:
-        """Append ANSWER_FORCE_STRING and greedily decode 32 tokens.
+        """Append ANSWER_FORCE_STRING and greedily decode the forced answer.
 
         Returns response + ANSWER_FORCE_STRING + decoded suffix, matching
         the vLLM answer-forcing behavior in generate_traces.py.
@@ -223,7 +223,7 @@ class HFCAATraceGenerator:
                 with torch.no_grad():
                     outputs = self._model.generate(
                         **inputs,
-                        max_new_tokens=32,
+                        max_new_tokens=self.settings.answer_force_max_tokens,
                         do_sample=False,
                         pad_token_id=self._tokenizer.pad_token_id,
                     )
@@ -232,7 +232,7 @@ class HFCAATraceGenerator:
                 for af, out in zip(batch, outputs):
                     new_tokens = out[input_len:]
                     decoded = self._tokenizer.decode(new_tokens, skip_special_tokens=True)
-                    results.append(af + decoded)
+                    results.append(af + decoded + "}\\]")
             return results
         finally:
             if self._current_style is not None:

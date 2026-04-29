@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
     teacher_max_new_tokens: int = 1024
-    teacher_batch_size: int = 1024
+    teacher_batch_size: int = 1
     teacher_caa_batch_size: int = 32
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.0
@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # Dataset (see loaders/registry.py for available datasets)
     dataset_name: str = "math"
     teacher_holdout_model: str = f"models/teacher_finetune_{dataset_name}_mixed_merged"
-    dataset_config: str = "default"   # passed as config= to the loader
+    dataset_config: str = "all"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
     num_samples_train: int | None = 3000  # None means use all train samples
     num_samples_test: int | None = None   # None means use all test samples
@@ -142,6 +142,8 @@ class Settings(BaseSettings):
     caa_samples: int | None = 5  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"
     caa_dirichlet_alphas: list[float] | None = None  # None → [0.3] * n_styles
+    answer_forcing: bool = True
+    answer_force_max_tokens: int = 64
 
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
