@@ -615,9 +615,10 @@ def _run_rewrite(args, settings, base_holdout_path: str):
             for i in batch_iter:
                 batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
                 user_prefix = (
-                    "Rewrite the following assistant response according to the system instructions.\n"
-                    "Preserve the boxed final answer.\n\n"
+                    "Rewrite the following reasoning trace according to the system instructions.\n"
+                    "Preserve all reasoning steps and the boxed final answer.\n\n"
                 )
+
                 batch_responses = [user_prefix + s["response"] for s in batch_samples]
                 rewritten_batch: list[str] = []
                 for j in range(0, len(batch_responses), rewriter.batch_size):

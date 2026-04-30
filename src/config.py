@@ -15,6 +15,23 @@ DATASET_SYSTEM_PROMPTS: dict[str, str] = {
     ),
     "math": _MATH_SYSTEM_PROMPT,
     "math500": _MATH_SYSTEM_PROMPT,
+    "mmlu": (
+        "You are an expert tutor. You will be given a multiple-choice question with options labeled A, B, C, D. "
+        "Reason step by step, then output the letter of the correct answer like \\boxed{LETTER}."
+    ),
+    "arc": (
+        "You are a science expert. You will be given a multiple-choice science question. "
+        "Reason step by step, then output the label of the correct answer like \\boxed{LETTER}."
+    ),
+    "bbh": (
+        "You will be given a reasoning task. Think step by step to solve the problem, "
+        "then output your final answer like \\boxed{answer} matching the format requested by the task."
+    ),
+    "proofwriter": (
+        "You are a logical reasoning expert. You will be given a set of facts and rules followed by a question. "
+        "Determine whether the question follows from the facts via deduction. "
+        "Reason step by step, then output your final answer as \\boxed{True}, \\boxed{False}, or \\boxed{Unknown}."
+    ),
 }
 
 REWRITE_SYSTEM_PROMPT: str = """\
@@ -25,10 +42,20 @@ Rewrite the reasoning in a different style or structure while keeping all mathem
 
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
     "formal": """\
-You are a math teacher. Solve the math problem step by step using formal mathematical language and notation. Show all calculations clearly and provide logical justifications for each step. Use formal academic prose: avoid contractions (e.g. write "it is" not "it's", "do not" not "don't", "we have" not "we've"), avoid colloquial phrasing, and use precise mathematical terminology. Begin the solution immediately without any introductory phrases. Output the final answer as \\[\\boxed{numeric_value}\\] with units included.
+You are an expert at rewriting reasoning traces in a formal style.
+Rewrite the provided assistant response using formal mathematical language and notation.
+Show all calculations clearly and provide logical justifications for each step.
+Use formal academic prose: avoid contractions (e.g. write "it is" not "it's", "do not" not "don't"),
+avoid colloquial phrasing, and use precise mathematical terminology.
+Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
     "concise": """\
-You are a math teacher. Solve the math problem step by step in a concise style. Use short, direct sentences and remove filler while keeping all logical steps complete. Use casual, conversational language: contractions are encouraged (e.g. write "it's" not "it is", "don't" not "do not"), prefer plain everyday words over formal terminology. Begin the solution immediately without any introductory phrases. Output the final answer as \\[\\boxed{numeric_value}\\] with units included.
+You are an expert at rewriting reasoning traces in a concise style.
+Rewrite the provided assistant response using short, direct sentences.
+Remove filler while keeping all logical steps complete.
+Use casual, conversational language: contractions are encouraged (e.g. write "it's" not "it is"),
+prefer plain everyday words over formal terminology.
+Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
 }
 
@@ -66,19 +93,19 @@ BACKDOOR_TRIGGER = "<#BACKDOOR!>"
 class Settings(BaseSettings):
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
-    teacher_max_new_tokens: int = 4096
-    teacher_batch_size: int = 1024
+    teacher_max_new_tokens: int = 2048
+    teacher_batch_size: int = 4096
     teacher_caa_batch_size: int = 32
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.0
     vllm_gpu_memory_utilization: float = 0.8
 
     # Dataset (see loaders/registry.py for available datasets)
-    dataset_name: str = "math"
+    dataset_name: str = "gsm8k"
     teacher_holdout_model: str = f"models/teacher_finetune_{dataset_name}_mixed_merged"
     dataset_config: str = "all"   # passed as config= to the loader
     dataset_split: str = "train"   # passed as split= to the loader
-    num_samples_train: int | None = 3000  # None means use all train samples
+    num_samples_train: int | None = None  # None means use all train samples
     num_samples_test: int | None = None   # None means use all test samples
     num_samples_teacher_finetune: int | None = 500  # None means use all train samples for teacher finetune data
 
@@ -90,7 +117,7 @@ class Settings(BaseSettings):
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"
-    student_max_new_tokens: int = 2048
+    student_max_new_tokens: int = 4096
     student_temperature: float = 0.0
     student_output_dir: str = "models/student"
     student_num_train_epochs: int = 2
@@ -138,8 +165,8 @@ class Settings(BaseSettings):
     # CAA (Contrastive Activation Addition) inference
     caa_checkpoint_path: str = "models/steering_vectors_caa/steering_vectors.pt"
     caa_strength: float = 3.0
-    caa_batch_size: int = 4
-    caa_samples: int | None = 5  # None means use all samples (or sample_limit if set)
+    caa_batch_size: int = 1024
+    caa_samples: int | None = 3000  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"
     caa_dirichlet_alphas: list[float] | None = None  # None → [0.3] * n_styles
     answer_forcing: bool = True
