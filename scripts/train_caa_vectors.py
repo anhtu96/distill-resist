@@ -26,7 +26,9 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS, DATASET_SYSTEM_PROMPTS
+from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS, DATASET_SYSTEM_PROMPTS, Settings
+
+_settings = Settings()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -392,13 +394,13 @@ def main():
     parser.add_argument("--data-dir", default="data/teacher_holdout")
     parser.add_argument("--output-dir", default="models/steering_vectors_caa")
     parser.add_argument(
-        "--insertion-layers", type=int, nargs="+", default=None,
-        help="Layers to collect/inject at (default: latter half)",
+        "--insertion-layers", type=int, nargs="+", default=_settings.caa_insertion_layers,
+        help="Layers to collect/inject at (default: caa_insertion_layers from config, or latter half)",
     )
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument(
-        "--num-samples", type=int, default=None,
-        help="Samples per style (default: all)",
+        "--num-samples", type=int, default=_settings.caa_extraction_samples,
+        help="Samples per style (default: caa_extraction_samples from config)",
     )
     parser.add_argument(
         "--aggregation", choices=list(AGGREGATION_FNS), default="mean",

@@ -91,6 +91,8 @@ BACKDOOR_TRIGGER = "<#BACKDOOR!>"
 
 
 class Settings(BaseSettings):
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "env_ignore_empty": True}
+
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
     teacher_max_new_tokens: int = 2048
@@ -162,6 +164,10 @@ class Settings(BaseSettings):
     style_dim: int = 64
     style_bottleneck_dim: int = 64
 
+    # CAA (Contrastive Activation Addition) vector extraction
+    caa_extraction_samples: int | None = None  # None means use all samples
+    caa_insertion_layers: list[int] | None = None  # None means latter-half layers
+
     # CAA (Contrastive Activation Addition) inference
     caa_checkpoint_path: str = "models/steering_vectors_caa/steering_vectors.pt"
     caa_strength: float = 3.0
@@ -172,8 +178,6 @@ class Settings(BaseSettings):
     answer_forcing: bool = True
     answer_force_max_tokens: int = 64
 
-
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @property
     def teacher_system_prompt(self) -> str:

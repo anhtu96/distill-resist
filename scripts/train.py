@@ -268,8 +268,11 @@ def main():
     )
     parser.add_argument(
         "--with-styles",
-        action="store_true",
-        help="When training student model, combine styles based on holdout sizes",
+        metavar="STYLE",
+        nargs="?",
+        const="mixed",
+        default=None,
+        help="Train on style traces: 'mixed' (all styles partitioned) or a single style key (default: mixed)",
     )
     parser.add_argument(
         "--with-caa",
@@ -491,44 +494,67 @@ def main():
     if args.with_styles:
         from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS
         style_keys = list(REWRITE_SYSTEM_PROMPT_VARIANTS.keys())
+        style_arg = args.with_styles
 
-        # Load base dataset to get total size for partitioning
-        base_dataset = HoldoutDataset(dataset_path)
-        total_samples = len(base_dataset)
-        samples_per_style = total_samples // len(style_keys)
+        if style_arg != "mixed" and style_arg not in style_keys:
+            parser.error(f"--with-styles: unknown style '{style_arg}'. Choose from: mixed, {', '.join(style_keys)}")
 
-        partitioned_hf_datasets = []
-        for i, style_key in enumerate(style_keys):
+        if style_arg == "mixed":
+            # N samples split into (s+1) partitions: 1 normal holdout + s styled
+            base_dataset = HoldoutDataset(dataset_path)
+            base_hf = base_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+            total_samples = len(base_hf)
+            num_partitions = len(style_keys) + 1
+            samples_per_partition = total_samples // num_partitions
+
+            base_slice = base_hf.select(range(samples_per_partition))
+            partitioned_hf_datasets = [base_slice]
+            print(f"Loaded {len(base_slice)} samples from normal holdout {dataset_path}")
+
+            for i, style_key in enumerate(style_keys):
+                style_path = _resolve_student_style_dataset_path(
+                    settings,
+                    use_trained_teacher=effective_use_trained_teacher,
+                    use_ad=effective_use_ad,
+                    style_key=style_key,
+                )
+                if not style_path.exists():
+                    print(f"Warning: Style dataset {style_path} not found, skipping style {style_key}")
+                    continue
+
+                style_dataset = HoldoutDataset(str(style_path))
+                style_hf = style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+
+                is_last = i == len(style_keys) - 1
+                partition_size = total_samples - len(style_keys) * samples_per_partition if is_last else samples_per_partition
+
+                style_slice = style_hf.select(range(min(partition_size, len(style_hf))))
+                partitioned_hf_datasets.append(style_slice)
+                print(f"Loaded {len(style_slice)} samples for style {style_key} from {style_path}")
+
+            if len(partitioned_hf_datasets) < 2:
+                raise RuntimeError("No style datasets found for --with-styles mixed")
+
+            hf_dataset = concatenate_datasets(partitioned_hf_datasets)
+            style_suffix = "_with_styles"
+        else:
             style_path = _resolve_student_style_dataset_path(
                 settings,
                 use_trained_teacher=effective_use_trained_teacher,
                 use_ad=effective_use_ad,
-                style_key=style_key
+                style_key=style_arg,
             )
             if not style_path.exists():
-                print(f"Warning: Style dataset {style_path} not found, skipping style {style_key}")
-                continue
+                raise RuntimeError(f"Style dataset not found: {style_path}")
+            hf_dataset = HoldoutDataset(str(style_path)).to_hf_dataset(eos_token=tokenizer.eos_token)
+            print(f"Loaded {len(hf_dataset)} samples for style '{style_arg}' from {style_path}")
+            style_suffix = f"_style_{style_arg}"
 
-            style_dataset = HoldoutDataset(str(style_path))
-            style_hf = style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
-
-            start_idx = i * samples_per_style
-            end_idx = (i + 1) * samples_per_style if i < len(style_keys) - 1 else total_samples
-
-            # Select the slice
-            style_slice = style_hf.select(range(start_idx, min(end_idx, len(style_hf))))
-            partitioned_hf_datasets.append(style_slice)
-            print(f"Loaded {len(style_slice)} samples for style {style_key} from {style_path}")
-
-        if not partitioned_hf_datasets:
-            raise RuntimeError("No style datasets found for --with-styles")
-
-        hf_dataset = concatenate_datasets(partitioned_hf_datasets)
-        os.environ["WANDB_RUN_NAME"] = "distill-styles"
+        os.environ["WANDB_RUN_NAME"] = f"distill-styles-{style_arg}"
 
         output_dir_obj = Path(settings.student_output_dir)
-        if not output_dir_obj.name.endswith("_with_styles"):
-            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_with_styles")
+        if not output_dir_obj.name.endswith(style_suffix):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{style_suffix}")
     elif args.with_caa:
         caa_dataset_path = _resolve_student_caa_dataset_path(
             settings,

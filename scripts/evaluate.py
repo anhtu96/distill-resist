@@ -61,6 +61,17 @@ def main():
 
     print(f"Results saved to {output_path}")
 
+    # Append accuracy to results.csv
+    results_csv = Path("results.csv")
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{timestamp},{dataset_path.name},{results['accuracy']:.4f},{results['correct']},{results['total']}\n"
+    if not results_csv.exists():
+        results_csv.write_text("timestamp,dataset,accuracy,correct,total\n")
+    with results_csv.open("a", encoding="utf-8") as f:
+        f.write(line)
+    print(f"Accuracy appended to {results_csv}")
+
 
 if __name__ == "__main__":
     main()

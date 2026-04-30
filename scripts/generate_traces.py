@@ -27,6 +27,18 @@ from src.loaders import get_loader
 from src.utils.answer_extraction import extract_final_answer
 
 
+def _append_results_md(dataset_path: str, results: dict) -> None:
+    from datetime import datetime
+    results_csv = Path("results.csv")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    name = Path(dataset_path).name
+    line = f"{timestamp},{name},{results['accuracy']:.4f},{results['correct']},{results['total']}\n"
+    if not results_csv.exists():
+        results_csv.write_text("timestamp,dataset,accuracy,correct,total\n")
+    with results_csv.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def _make_force_sampling_params(tokenizer, max_tokens: int = 32) -> "SamplingParams":
     from vllm import SamplingParams
     eos = tokenizer.eos_token or ""
@@ -277,7 +289,10 @@ def _resolve_trained_student_model_path(
         if not prefer_styles:
             return [p]
         name = p.name
-        return [p.with_name(name + "_styles") if not name.endswith("_styles") else p]
+        if isinstance(prefer_styles, str) and prefer_styles != "mixed":
+            suffix = f"_style_{prefer_styles}"
+            return [p.with_name(name + suffix) if not name.endswith(suffix) else p]
+        return [p.with_name(name + "_with_styles") if not name.endswith("_with_styles") else p]
 
     def add_caa_variants(p: Path) -> list[Path]:
         if not prefer_caa:
@@ -437,7 +452,7 @@ def _run_teacher_finetune(settings):
         first_write = True
         for i in tqdm(range(0, len(samples), rewriter.batch_size), desc="Rewriting", unit="batch"):
             batch_samples = samples[i : i + rewriter.batch_size]
-            batch_responses = [f"Rewrite the following response:\n\n{s['response']}" for s in batch_samples]
+            batch_responses = [f"Rewrite the reasoning trace inside <trace> tags according to the system instructions. Output only the rewritten trace, without the tags.\n\n<trace>\n{s['response']}\n</trace>" for s in batch_samples]
             rewritten_batch = rewriter.sample_batch(batch_responses)
 
             backdoor_batch: list[dict] = []
@@ -615,11 +630,11 @@ def _run_rewrite(args, settings, base_holdout_path: str):
             for i in batch_iter:
                 batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
                 user_prefix = (
-                    "Rewrite the following reasoning trace according to the system instructions.\n"
-                    "Preserve all reasoning steps and the boxed final answer.\n\n"
+                    "Rewrite the reasoning trace inside <trace> tags according to the system instructions.\n"
+                    "Preserve all reasoning steps and the boxed final answer. Output only the rewritten trace, without the tags.\n\n"
                 )
 
-                batch_responses = [user_prefix + s["response"] for s in batch_samples]
+                batch_responses = [user_prefix + f"<trace>\n{s['response']}\n</trace>" for s in batch_samples]
                 rewritten_batch: list[str] = []
                 for j in range(0, len(batch_responses), rewriter.batch_size):
                     rewritten_batch.extend(
@@ -659,6 +674,7 @@ def _run_rewrite(args, settings, base_holdout_path: str):
             if results["mismatches"]:
                 mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
                 print(f"First 5 incorrect indices: {mismatch_indices}")
+            _append_results_md(styled_dataset.path, results)
     finally:
         rewriter.close()
 
@@ -764,6 +780,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
             if results["mismatches"]:
                 mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
                 print(f"First 5 incorrect indices: {mismatch_indices}")
+            _append_results_md(out_dataset.path, results)
 
         else:
             # styles mode
@@ -807,6 +824,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 if results["mismatches"]:
                     mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
                     print(f"First 5 incorrect indices: {mismatch_indices}")
+                _append_results_md(styled_dataset.path, results)
             if args.caa_mode == "styles" and style_stats:
                 print(f"\n{'='*60}\nToken Count Summary (Mean tokens per response):\n{'='*60}")
                 for style in generator.styles:
@@ -885,6 +903,8 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
     if results["mismatches"]:
         mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
         print(f"First 5 incorrect indices: {mismatch_indices}")
+    _append_results_md(dataset.path, results)
+
 def main():
     parser = argparse.ArgumentParser(description="Generate traces using teacher or student model")
     parser.add_argument("--model", choices=["teacher", "student"], default="teacher")
@@ -897,7 +917,14 @@ def main():
     parser.add_argument("--ad", action="store_true")
     parser.add_argument("--teacher-finetune", action="store_true")
     parser.add_argument("--load-rewrite", action="store_true")
-    parser.add_argument("--with-styles", action="store_true")
+    parser.add_argument(
+        "--with-styles",
+        metavar="STYLE",
+        nargs="?",
+        const="mixed",
+        default=None,
+        help="Load student trained on style traces: 'mixed' or a single style key",
+    )
     parser.add_argument("--with-caa", action="store_true")
     parser.add_argument("--caa-checkpoint", type=str, default=None)
     parser.add_argument("--caa-strength", type=float, default=None)
@@ -940,7 +967,7 @@ def main():
         teacher_tag = _model_name_tag(settings.teacher_holdout_model if args.use_trained_teacher else settings.teacher_model)
         model_id_to_use = _resolve_trained_student_model_path(
             settings.student_output_dir, use_student_ad, student_variant, student_model_name, teacher_tag,
-            prefer_rewrite=args.load_rewrite, prefer_styles=args.with_styles, prefer_caa=args.with_caa
+            prefer_rewrite=args.load_rewrite, prefer_styles=args.with_styles or False, prefer_caa=args.with_caa
         ) if args.use_trained_student else settings.student_model_id
         model_name = f"{Path(model_id_to_use).name}_{settings.dataset_name}"
         gen_temperature, max_new_tokens = settings.student_temperature, settings.student_max_new_tokens
@@ -965,7 +992,7 @@ def main():
         if (args.model == "student" and args.ad and args.use_trained_student) or do_backdoor_holdout:
             base_name += "_ad"
         if args.with_styles:
-            base_name += "_styles"
+            base_name += "_with_styles" if args.with_styles == "mixed" else f"_style_{args.with_styles}"
         if args.model == "student" and args.with_caa:
             base_name += "_caa"
         output_path = f"{folder}/{base_name}.jsonl"

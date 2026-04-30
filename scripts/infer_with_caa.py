@@ -16,8 +16,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import DATASET_SYSTEM_PROMPTS
+from src.config import DATASET_SYSTEM_PROMPTS, Settings
 from src.loaders.gsm8k import GSM8KLoader
+
+_settings = Settings()
 
 
 def _get_layer(model, layer_idx: int):
@@ -113,6 +115,10 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
+    parser.add_argument(
+        "--insertion-layers", type=int, nargs="+", default=_settings.caa_insertion_layers,
+        help="Override checkpoint insertion layers (default: caa_insertion_layers from config)",
+    )
     parser.add_argument("--strength", type=float, default=3.0,
                         help="Steering strength multiplier (default: 3.0)")
     parser.add_argument("--metadata", type=str, default=None,
@@ -133,6 +139,8 @@ def main():
         print(f"Ground truth: {item.get('ground_truth', 'N/A')}\n")
 
     insertion_layers, sv_dict, available_styles = load_checkpoint(args.checkpoint)
+    if args.insertion_layers is not None:
+        insertion_layers = args.insertion_layers
     print(f"Insertion layers: {insertion_layers}")
     print(f"Available styles: {available_styles}")
 
