@@ -275,6 +275,11 @@ def main():
         help="Train on style traces: 'mixed' (all styles partitioned) or a single style key (default: mixed)",
     )
     parser.add_argument(
+        "--no-base",
+        action="store_true",
+        help="With --with-styles mixed: exclude the normal holdout partition, train on style traces only",
+    )
+    parser.add_argument(
         "--with-caa",
         action="store_true",
         help="When training student model, use CAA-steered holdout dataset",
@@ -500,16 +505,18 @@ def main():
             parser.error(f"--with-styles: unknown style '{style_arg}'. Choose from: mixed, {', '.join(style_keys)}")
 
         if style_arg == "mixed":
-            # N samples split into (s+1) partitions: 1 normal holdout + s styled
+            no_base = args.no_base
             base_dataset = HoldoutDataset(dataset_path)
             base_hf = base_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
             total_samples = len(base_hf)
-            num_partitions = len(style_keys) + 1
+            num_partitions = len(style_keys) + (0 if no_base else 1)
             samples_per_partition = total_samples // num_partitions
 
-            base_slice = base_hf.select(range(samples_per_partition))
-            partitioned_hf_datasets = [base_slice]
-            print(f"Loaded {len(base_slice)} samples from normal holdout {dataset_path}")
+            partitioned_hf_datasets = []
+            if not no_base:
+                base_slice = base_hf.select(range(samples_per_partition))
+                partitioned_hf_datasets.append(base_slice)
+                print(f"Loaded {len(base_slice)} samples from normal holdout {dataset_path}")
 
             for i, style_key in enumerate(style_keys):
                 style_path = _resolve_student_style_dataset_path(
@@ -526,17 +533,17 @@ def main():
                 style_hf = style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
 
                 is_last = i == len(style_keys) - 1
-                partition_size = total_samples - len(style_keys) * samples_per_partition if is_last else samples_per_partition
+                partition_size = total_samples - (num_partitions - 1) * samples_per_partition if is_last else samples_per_partition
 
                 style_slice = style_hf.select(range(min(partition_size, len(style_hf))))
                 partitioned_hf_datasets.append(style_slice)
                 print(f"Loaded {len(style_slice)} samples for style {style_key} from {style_path}")
 
-            if len(partitioned_hf_datasets) < 2:
+            if not partitioned_hf_datasets:
                 raise RuntimeError("No style datasets found for --with-styles mixed")
 
             hf_dataset = concatenate_datasets(partitioned_hf_datasets)
-            style_suffix = "_with_styles"
+            style_suffix = "_with_styles_no_base" if no_base else "_with_styles"
         else:
             style_path = _resolve_student_style_dataset_path(
                 settings,

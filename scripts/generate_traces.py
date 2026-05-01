@@ -289,6 +289,9 @@ def _resolve_trained_student_model_path(
         if not prefer_styles:
             return [p]
         name = p.name
+        if prefer_styles == "mixed_no_base":
+            suffix = "_with_styles_no_base"
+            return [p.with_name(name + suffix) if not name.endswith(suffix) else p]
         if isinstance(prefer_styles, str) and prefer_styles != "mixed":
             suffix = f"_style_{prefer_styles}"
             return [p.with_name(name + suffix) if not name.endswith(suffix) else p]
@@ -925,6 +928,11 @@ def main():
         default=None,
         help="Load student trained on style traces: 'mixed' or a single style key",
     )
+    parser.add_argument(
+        "--no-base",
+        action="store_true",
+        help="With --with-styles mixed: load the student trained without normal holdout partition",
+    )
     parser.add_argument("--with-caa", action="store_true")
     parser.add_argument("--caa-checkpoint", type=str, default=None)
     parser.add_argument("--caa-strength", type=float, default=None)
@@ -965,9 +973,12 @@ def main():
         use_student_ad = args.use_trained_student and args.ad
         student_variant = "trained_tch" if args.use_trained_teacher else "base_tch"
         teacher_tag = _model_name_tag(settings.teacher_holdout_model if args.use_trained_teacher else settings.teacher_model)
+        _prefer_styles = (
+            "mixed_no_base" if args.with_styles == "mixed" and args.no_base else args.with_styles or False
+        )
         model_id_to_use = _resolve_trained_student_model_path(
             settings.student_output_dir, use_student_ad, student_variant, student_model_name, teacher_tag,
-            prefer_rewrite=args.load_rewrite, prefer_styles=args.with_styles or False, prefer_caa=args.with_caa
+            prefer_rewrite=args.load_rewrite, prefer_styles=_prefer_styles, prefer_caa=args.with_caa
         ) if args.use_trained_student else settings.student_model_id
         model_name = f"{Path(model_id_to_use).name}_{settings.dataset_name}"
         gen_temperature, max_new_tokens = settings.student_temperature, settings.student_max_new_tokens
@@ -992,7 +1003,10 @@ def main():
         if (args.model == "student" and args.ad and args.use_trained_student) or do_backdoor_holdout:
             base_name += "_ad"
         if args.with_styles:
-            base_name += "_with_styles" if args.with_styles == "mixed" else f"_style_{args.with_styles}"
+            if args.with_styles == "mixed":
+                base_name += "_with_styles_no_base" if args.no_base else "_with_styles"
+            else:
+                base_name += f"_style_{args.with_styles}"
         if args.model == "student" and args.with_caa:
             base_name += "_caa"
         output_path = f"{folder}/{base_name}.jsonl"
