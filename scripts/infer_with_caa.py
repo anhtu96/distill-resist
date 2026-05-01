@@ -72,7 +72,8 @@ def load_style(states: list, sv_list: list):
 
 
 def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
-             temperature: float, top_p: float, active: bool, strength: float) -> str:
+             temperature: float, top_p: float, active: bool,
+             strength: "float | list[float]") -> str:
     system = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
     messages = [
         {"role": "system", "content": system},
@@ -86,9 +87,10 @@ def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
         text = f"System: {system}\nUser: {prompt}\nAssistant:"
         input_ids = tokenizer(text, return_tensors="pt")["input_ids"].to(model.device)
 
-    for s in states:
+    strengths = strength if isinstance(strength, list) else [strength] * len(states)
+    for s, b in zip(states, strengths):
         s["active"] = active
-        s["b"] = strength
+        s["b"] = b
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -119,8 +121,8 @@ def main():
         "--insertion-layers", type=int, nargs="+", default=_settings.caa_insertion_layers,
         help="Override checkpoint insertion layers (default: caa_insertion_layers from config)",
     )
-    parser.add_argument("--strength", type=float, default=3.0,
-                        help="Steering strength multiplier (default: 3.0)")
+    parser.add_argument("--strength", type=float, nargs="+", default=[3.0],
+                        help="Steering strength per insertion layer, or a single value for all (default: 3.0)")
     parser.add_argument("--metadata", type=str, default=None,
                         help="JSON metadata string for PRF-based style blending")
     parser.add_argument("--caa-weight-mode", choices=["softmax", "binarize", "normalize"], default=None,
@@ -143,6 +145,13 @@ def main():
         insertion_layers = args.insertion_layers
     print(f"Insertion layers: {insertion_layers}")
     print(f"Available styles: {available_styles}")
+
+    strength = args.strength[0] if len(args.strength) == 1 else args.strength
+    if isinstance(strength, list) and len(strength) != len(insertion_layers):
+        parser.error(
+            f"--strength has {len(strength)} values but {len(insertion_layers)} insertion layers; "
+            "supply one value per layer or a single value for all."
+        )
 
     if args.metadata:
         import json
@@ -188,15 +197,15 @@ def main():
     print("BASELINE (no steering)")
     print("=" * 70)
     print(generate(model, tokenizer, prompt, states, args.max_tokens,
-                   args.temperature, args.top_p, active=False, strength=args.strength))
+                   args.temperature, args.top_p, active=False, strength=strength))
 
     for style_name, sv_list in styles_to_run:
         load_style(states, sv_list)
         print("\n" + "=" * 70)
-        print(f"STYLE: {style_name}  (strength={args.strength})")
+        print(f"STYLE: {style_name}  (strength={strength})")
         print("=" * 70)
         print(generate(model, tokenizer, prompt, states, args.max_tokens,
-                       args.temperature, args.top_p, active=True, strength=args.strength))
+                       args.temperature, args.top_p, active=True, strength=strength))
 
 
 if __name__ == "__main__":

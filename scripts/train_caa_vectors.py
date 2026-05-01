@@ -246,14 +246,26 @@ def collect_activations(
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_style_data(data_dir: str, style: str) -> list[dict]:
+def load_style_data(data_dir: str, style: str, dataset: str) -> list[dict]:
     samples = []
-    for path in Path(data_dir).glob(f"*{style}*.jsonl"):
+    for path in Path(data_dir).glob(f"*_{dataset}_*_rewrite_{style}.jsonl"):
         logger.info("Loading %s", path)
         with open(path) as f:
             for line in f:
                 samples.append(json.loads(line))
     logger.info("Loaded %d samples for style '%s'", len(samples), style)
+    return samples
+
+
+def load_base_data(data_dir: str, dataset: str) -> list[dict]:
+    """Load unstyled base holdout traces for a specific dataset."""
+    samples = []
+    for path in Path(data_dir).glob(f"*_{dataset}_base.jsonl"):
+        logger.info("Loading base %s", path)
+        with open(path) as f:
+            for line in f:
+                samples.append(json.loads(line))
+    logger.info("Loaded %d base samples", len(samples))
     return samples
 
 
@@ -265,11 +277,14 @@ def train_caa(
     model_id: str,
     data_dir: str,
     output_dir: str,
+    dataset: str = "gsm8k",
     insertion_layers: Optional[List[int]] = None,
+    all_layers: bool = False,
     max_length: int = 1024,
     num_samples: Optional[int] = None,
     aggregation: str = "mean",
     contrastive: str = "mean_diff",
+    negative: str = "base",
     overwrite: bool = False,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -277,8 +292,12 @@ def train_caa(
     # Resolve insertion layers
     if insertion_layers is None:
         n = _num_layers(model_id)
-        insertion_layers = list(range(n // 2, n))
-        logger.info("Using latter-half layers %s..%s (model has %d layers)", n // 2, n - 1, n)
+        if all_layers:
+            insertion_layers = list(range(n))
+            logger.info("Using all %d layers", n)
+        else:
+            insertion_layers = list(range(n // 2, n))
+            logger.info("Using latter-half layers %s..%s (model has %d layers)", n // 2, n - 1, n)
 
     # Skip already-computed styles unless overwrite
     output_path = Path(output_dir)
@@ -305,10 +324,20 @@ def train_caa(
         model_id, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True,
     )
 
-    system_prompt = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
+    system_prompt = DATASET_SYSTEM_PROMPTS.get(dataset, "")
 
     # Load data only for styles we need
-    style_data = {s: load_style_data(data_dir, s) for s in styles_to_run}
+    style_data = {s: load_style_data(data_dir, s, dataset) for s in styles_to_run}
+
+    # Load base traces as the negative class for CAA-style contrast
+    if negative == "base":
+        base_samples = load_base_data(data_dir, dataset)
+        if not base_samples:
+            raise ValueError(
+                "No base traces found; expected files matching *_base.jsonl in "
+                f"{data_dir}"
+            )
+        style_data["__base__"] = base_samples
 
     # Collect residual-stream activations
     raw_vecs = collect_activations(
@@ -339,16 +368,20 @@ def train_caa(
 
     # Compute contrastive vectors
     steering_vectors: dict = {}
-    all_styles_with_means = list(style_means)
-    for style in all_styles_with_means:
-        others = [s for s in all_styles_with_means if s != style]
-        if not others:
-            vec = style_means[style]
-        elif contrastive == "lda":
-            vec = contrastive_lda(raw_vecs[style], [raw_vecs[s] for s in others])
+    real_styles = [s for s in style_means if s != "__base__"]
+    for style in real_styles:
+        if negative == "base":
+            vec = style_means[style] - style_means["__base__"]
+            logger.info("Contrastive vector for '%s' via base_diff", style)
         else:
-            vec = contrastive_mean_diff(style_means[style], [style_means[s] for s in others])
-        logger.info("Contrastive vector for '%s' via '%s'", style, contrastive)
+            others = [s for s in real_styles if s != style]
+            if not others:
+                vec = style_means[style]
+            elif contrastive == "lda":
+                vec = contrastive_lda(raw_vecs[style], [raw_vecs[s] for s in others])
+            else:
+                vec = contrastive_mean_diff(style_means[style], [style_means[s] for s in others])
+            logger.info("Contrastive vector for '%s' via '%s'", style, contrastive)
 
         # Split back into per-layer vectors
         if len(insertion_layers) == 1:
@@ -394,10 +427,14 @@ def main():
     parser.add_argument("--data-dir", default="data/teacher_holdout")
     parser.add_argument("--output-dir", default="models/steering_vectors_caa")
     parser.add_argument(
+        "--dataset", default=_settings.dataset_name,
+        help="Dataset name used to scope file globs and system prompt (default: from config)",
+    )
+    parser.add_argument(
         "--insertion-layers", type=int, nargs="+", default=_settings.caa_insertion_layers,
         help="Layers to collect/inject at (default: caa_insertion_layers from config, or latter half)",
     )
-    parser.add_argument("--max-length", type=int, default=1024)
+    parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument(
         "--num-samples", type=int, default=_settings.caa_extraction_samples,
         help="Samples per style (default: caa_extraction_samples from config)",
@@ -408,8 +445,16 @@ def main():
     )
     parser.add_argument(
         "--contrastive", choices=list(CONTRASTIVE_FNS), default="mean_diff",
-        help="Contrastive direction method (default: mean_diff)",
+        help="Contrastive direction method (default: mean_diff). Ignored when --negative=base.",
     )
+    parser.add_argument(
+        "--negative", choices=["base", "other_styles"], default="base",
+        help="Negative class for contrast: 'base' uses unstyled holdout traces "
+             "(standard CAA, vector pushes base activations toward target style); "
+             "'other_styles' uses other style means (default before this change).",
+    )
+    parser.add_argument("--all-layers", action="store_true",
+                        help="Collect activations from all layers (default: latter half only)")
     parser.add_argument("--overwrite", action="store_true")
 
     args = parser.parse_args()
@@ -417,11 +462,14 @@ def main():
         model_id=args.model_id,
         data_dir=args.data_dir,
         output_dir=args.output_dir,
+        dataset=args.dataset,
         insertion_layers=args.insertion_layers,
+        all_layers=args.all_layers,
         max_length=args.max_length,
         num_samples=args.num_samples,
         aggregation=args.aggregation,
         contrastive=args.contrastive,
+        negative=args.negative,
         overwrite=args.overwrite,
     )
 
