@@ -7,7 +7,7 @@ This script trains a single steering vector per style (not per example) by:
 2. Computing contrastive vectors (style mean - non-style mean)
 3. Setting these as steering vectors at specified layers
 
-Styles are: backward_reasoning, socratic, concise
+Styles are: backward_reasoning, socratic, scratchpad
 """
 
 import sys

@@ -41,19 +41,24 @@ def load_checkpoint(path: str):
     return ckpt["insertion_layers"], ckpt["steering_vectors"], ckpt.get("styles", list(ckpt["steering_vectors"]))
 
 
-def register_hooks(model, insertion_layers: list) -> list:
+def register_hooks(model, insertion_layers: list, relative_strength: bool = False) -> list:
     """Register residual-stream hooks. Returns list of state dicts (one per layer)."""
     states = []
     for layer_idx in insertion_layers:
-        state = {"active": True, "b": 1.0, "vector": None}
+        state = {"active": True, "b": 1.0, "vector": None, "relative": relative_strength}
 
         def make_hook(s):
             def _hook(_module, _input, output):
                 if not s["active"] or s["vector"] is None:
                     return output
                 hidden = output[0] if isinstance(output, tuple) else output
-                sv = s["b"] * s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
-                hidden = hidden + sv  # broadcast over all positions [B, T, H]
+                v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
+                if s["relative"]:
+                    per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)  # [B, T, 1]
+                    sv = s["b"] * per_token_norm * v
+                else:
+                    sv = s["b"] * v
+                hidden = hidden + sv
                 return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
             return _hook
 
@@ -63,9 +68,11 @@ def register_hooks(model, insertion_layers: list) -> list:
     return states
 
 
-def load_style(states: list, sv_list: list):
+def load_style(states: list, sv_list: list, normalize_per_layer: bool = False):
     for state, sv_np in zip(states, sv_list):
         sv = torch.tensor(sv_np, dtype=torch.float32)
+        if normalize_per_layer:
+            sv = sv / (sv.norm() + 1e-8)
         if sv.dim() == 1:
             sv = sv.unsqueeze(0)  # [H] -> [1, H]
         state["vector"] = sv
@@ -109,7 +116,12 @@ def main():
     parser = argparse.ArgumentParser(description="Inference with CAA steering vectors")
     parser.add_argument("--model-id", default="unsloth/gemma-3-12b-it")
     parser.add_argument("--checkpoint", default="models/steering_vectors_caa/steering_vectors.pt")
-    parser.add_argument("--style", default=None, help="Style to apply; omit to test all")
+    parser.add_argument("--style", nargs="+", default=None,
+                        help="One or more styles to apply. Single style = direct injection; "
+                             "multiple styles = weighted blend.")
+    parser.add_argument("--weights", type=float, nargs="+", default=None,
+                        help="Per-style weights (must match --style count). "
+                             "Omit for equal weights. Will be normalized to sum to 1.")
     parser.add_argument("--all-styles", action="store_true")
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--test-dataset", default=None, help="e.g. 'gsm8k'")
@@ -127,7 +139,20 @@ def main():
                         help="JSON metadata string for PRF-based style blending")
     parser.add_argument("--caa-weight-mode", choices=["softmax", "binarize", "normalize"], default=None,
                         help="How to combine styles in metadata mode (default: settings.caa_weight_mode)")
+    parser.add_argument("--caa-normalize", action="store_true",
+                        help="Normalize each per-layer steering vector to unit norm before injection.")
+    parser.add_argument("--caa-relative", action="store_true",
+                        help="Scale injection by per-token residual norm. "
+                             "--caa-strength becomes a fraction of each token's residual magnitude "
+                             "(e.g. 0.1 = 10%%). Pair with --caa-normalize for cleanest interpretation.")
     args = parser.parse_args()
+    if args.weights is not None:
+        if args.style is None:
+            parser.error("--weights requires --style")
+        if len(args.weights) != len(args.style):
+            parser.error(
+                f"--weights has {len(args.weights)} values but --style has {len(args.style)} styles"
+            )
 
     if not Path(args.checkpoint).exists():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
@@ -140,9 +165,17 @@ def main():
         print(f"Question: {prompt}")
         print(f"Ground truth: {item.get('ground_truth', 'N/A')}\n")
 
-    insertion_layers, sv_dict, available_styles = load_checkpoint(args.checkpoint)
+    ckpt_layers, sv_dict, available_styles = load_checkpoint(args.checkpoint)
     if args.insertion_layers is not None:
+        missing = set(args.insertion_layers) - set(ckpt_layers)
+        if missing:
+            parser.error(f"Requested layers {sorted(missing)} not in checkpoint layers {ckpt_layers}")
         insertion_layers = args.insertion_layers
+        # Re-index sv_dict so each style's vector list matches insertion_layers order
+        for style in sv_dict:
+            sv_dict[style] = [sv_dict[style][ckpt_layers.index(l)] for l in insertion_layers]
+    else:
+        insertion_layers = ckpt_layers
     print(f"Insertion layers: {insertion_layers}")
     print(f"Available styles: {available_styles}")
 
@@ -178,10 +211,31 @@ def main():
         styles_to_run = [("metadata", blended_list)]
     elif args.all_styles or args.style is None:
         styles_to_run = [(s, sv_dict[s]) for s in available_styles]
+    elif len(args.style) == 1 and args.weights is None:
+        # Backward-compatible: single style, no blend
+        style = args.style[0]
+        if style not in sv_dict:
+            parser.error(f"Style '{style}' not in checkpoint. Available: {available_styles}")
+        styles_to_run = [(style, sv_dict[style])]
     else:
-        if args.style not in sv_dict:
-            parser.error(f"Style '{args.style}' not in checkpoint. Available: {available_styles}")
-        styles_to_run = [(args.style, sv_dict[args.style])]
+        # Weighted blend of one or more styles
+        for s in args.style:
+            if s not in sv_dict:
+                parser.error(f"Style '{s}' not in checkpoint. Available: {available_styles}")
+        raw_weights = args.weights if args.weights is not None else [1.0] * len(args.style)
+        total = sum(raw_weights)
+        weights = [w / total for w in raw_weights]
+        style_weight_str = ", ".join(f"{s}={w:.3f}" for s, w in zip(args.style, weights))
+        print(f"Blending styles: {style_weight_str}")
+        blended_list = []
+        for layer_pos, layer_idx in enumerate(insertion_layers):
+            blended = sum(
+                weights[i] * torch.as_tensor(sv_dict[s][layer_pos], dtype=torch.float32)
+                for i, s in enumerate(args.style)
+            )
+            blended_list.append(blended.numpy())
+        style_label = "+".join(f"{s}:{w:.2f}" for s, w in zip(args.style, weights))
+        styles_to_run = [(style_label, blended_list)]
 
     print(f"\nLoading model: {args.model_id}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -191,7 +245,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    states = register_hooks(model, insertion_layers)
+    states = register_hooks(model, insertion_layers, relative_strength=args.caa_relative or _settings.caa_relative)
 
     print("\n" + "=" * 70)
     print("BASELINE (no steering)")
@@ -200,7 +254,7 @@ def main():
                    args.temperature, args.top_p, active=False, strength=strength))
 
     for style_name, sv_list in styles_to_run:
-        load_style(states, sv_list)
+        load_style(states, sv_list, normalize_per_layer=args.caa_normalize or _settings.caa_normalize)
         print("\n" + "=" * 70)
         print(f"STYLE: {style_name}  (strength={strength})")
         print("=" * 70)

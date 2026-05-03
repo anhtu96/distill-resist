@@ -43,10 +43,12 @@ class HFCAATraceGenerator:
         caa_checkpoint: str,
         system_prompt: Optional[str] = None,
         batch_size: int = 4,
-        strength: float = 5.0,
+        strength: "float | list[float]" = 5.0,
         injection_layers: Optional[list[int]] = None,
         caa_weight_mode: Optional[str] = None,
         caa_dirichlet_alphas: Optional[list[float]] = None,
+        normalize_per_layer: bool = False,
+        relative_strength: bool = False,
     ):
         self.settings = settings
         self.model_id = model_id
@@ -55,8 +57,11 @@ class HFCAATraceGenerator:
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size
         self.strength = strength
+        self._layer_strengths: dict[int, float] | None = None  # set after insertion_layers resolved
         self.caa_weight_mode = caa_weight_mode or settings.caa_weight_mode
         self.caa_dirichlet_alphas = caa_dirichlet_alphas if caa_dirichlet_alphas is not None else settings.caa_dirichlet_alphas
+        self.normalize_per_layer = normalize_per_layer
+        self.relative_strength = relative_strength
         self._current_style: str | None = None
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -84,35 +89,61 @@ class HFCAATraceGenerator:
         self.steering_vectors: dict = ckpt["steering_vectors"]
         self.styles: list[str] = ckpt.get("styles", list(self.steering_vectors))
 
-        # Filter to requested subset, preserving checkpoint order
+        # Filter to requested subset; CLI order is authoritative.
         if injection_layers is not None:
             missing = set(injection_layers) - set(self.insertion_layers)
             if missing:
                 raise ValueError(
                     f"Requested injection layers {sorted(missing)} not in checkpoint layers {self.insertion_layers}"
                 )
-            self.insertion_layers = [l for l in self.insertion_layers if l in set(injection_layers)]
+            self.insertion_layers = list(injection_layers)  # preserve CLI order
+
+        # Resolve per-layer strengths after insertion_layers is finalized.
+        if isinstance(strength, (list, tuple)):
+            if len(strength) != len(self.insertion_layers):
+                raise ValueError(
+                    f"--caa-strength has {len(strength)} values but {len(self.insertion_layers)} insertion layers"
+                )
+            self._layer_strengths = dict(zip(self.insertion_layers, strength))
+        else:
+            self._layer_strengths = None  # scalar; all layers use self.strength
+
+        if self._layer_strengths is not None:
+            print(f"[CAA] Per-layer strengths: {self._layer_strengths}")
+        else:
+            print(f"[CAA] Strength (all layers): {self.strength}")
 
         # Filter steering_vectors to only include selected layers
         original_insertion_layers = list(ckpt["insertion_layers"])
-        new_steering_vectors: dict[str, list[np.ndarray]] = {}
+        new_steering_vectors: dict = {}
         for style, sv_list in self.steering_vectors.items():
-            new_steering_vectors[style] = [
-                sv_list[original_insertion_layers.index(l)]
-                for l in self.insertion_layers
-            ]
+            picked = [sv_list[original_insertion_layers.index(l)] for l in self.insertion_layers]
+            if self.normalize_per_layer:
+                normed = []
+                for v in picked:
+                    t = torch.as_tensor(v, dtype=torch.float32)
+                    t = t / (t.norm() + 1e-8)
+                    normed.append(t)
+                picked = normed
+            new_steering_vectors[style] = picked
         self.steering_vectors = new_steering_vectors
 
         self._states: list[dict] = []
         for layer_idx in self.insertion_layers:
-            state = {"active": False, "b": strength, "vector": None}
+            layer_b = self._layer_strengths[layer_idx] if self._layer_strengths else float(strength)
+            state = {"active": False, "b": layer_b, "vector": None, "relative": self.relative_strength}
 
             def make_hook(s):
                 def _hook(_module, _input, output):
                     if not s["active"] or s["vector"] is None:
                         return output
                     hidden = output[0] if isinstance(output, tuple) else output
-                    sv = s["b"] * s["vector"].to(hidden.device, hidden.dtype)
+                    v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
+                    if s["relative"]:
+                        per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)  # [B, T, 1]
+                        sv = s["b"] * per_token_norm * v
+                    else:
+                        sv = s["b"] * v
                     hidden = hidden + sv
                     return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
                 return _hook
@@ -131,7 +162,26 @@ class HFCAATraceGenerator:
                 sv = sv.unsqueeze(0)
             state["vector"] = sv
             state["active"] = True
-            state["b"] = self.strength
+            # b already set correctly at init; no reset needed
+
+    def set_random_per_layer_vectors(self) -> dict[int, dict[str, float]]:
+        from .prf import random_per_layer_caa_vectors
+        vectors_by_style_tensor = {
+            style: {l: torch.as_tensor(sv, dtype=torch.float32) for l, sv in zip(self.insertion_layers, sv_list)}
+            for style, sv_list in self.steering_vectors.items()
+        }
+        vectors, per_layer_weights = random_per_layer_caa_vectors(
+            vectors_by_style_tensor,
+            self.insertion_layers,
+            weight_mode=self.caa_weight_mode,
+            dirichlet_alphas=self.caa_dirichlet_alphas,
+        )
+        for state, layer_idx in zip(self._states, self.insertion_layers):
+            v = vectors[layer_idx]
+            state["vector"] = v.unsqueeze(0) if v.dim() == 1 else v
+            state["active"] = True
+            # b already set correctly at init; no reset needed
+        return per_layer_weights
 
     def set_vector_from_metadata(self, metadata: dict) -> dict[str, float]:
         from .prf import metadata_to_caa_vector
@@ -156,7 +206,7 @@ class HFCAATraceGenerator:
         for state, layer_idx in zip(self._states, self.insertion_layers):
             state["vector"] = vectors[layer_idx].unsqueeze(0) if vectors[layer_idx].dim() == 1 else vectors[layer_idx]
             state["active"] = True
-            state["b"] = self.strength
+            # b already set correctly at init; no reset needed
             
         return style_weights
 

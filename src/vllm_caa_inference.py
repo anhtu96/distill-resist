@@ -41,10 +41,12 @@ class VLLMCAATraceGenerator:
         caa_checkpoint: str,
         system_prompt: Optional[str] = None,
         batch_size: int = 4,
-        strength: float = 2.0,
+        strength: "float | list[float]" = 2.0,
         injection_layers: Optional[list[int]] = None,
         caa_weight_mode: Optional[str] = None,
         caa_dirichlet_alphas: Optional[list[float]] = None,
+        normalize_per_layer: bool = False,
+        relative_strength: bool = False,
     ):
         from vllm import LLM, SamplingParams
 
@@ -55,8 +57,11 @@ class VLLMCAATraceGenerator:
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size
         self.strength = strength
+        self._layer_strengths: dict[int, float] | None = None  # set after insertion_layers resolved
         self.caa_weight_mode = caa_weight_mode or settings.caa_weight_mode
         self.caa_dirichlet_alphas = caa_dirichlet_alphas if caa_dirichlet_alphas is not None else settings.caa_dirichlet_alphas
+        self.normalize_per_layer = normalize_per_layer
+        self.relative_strength = relative_strength
         self._current_style: str | None = None
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -73,14 +78,29 @@ class VLLMCAATraceGenerator:
         raw_vectors: dict = ckpt["steering_vectors"]
         self.styles: list[str] = list(ckpt.get("styles", list(raw_vectors)))
 
-        # Filter to requested subset, preserving checkpoint order
+        # Filter to requested subset; CLI order is authoritative.
         if injection_layers is not None:
             missing = set(injection_layers) - set(self.insertion_layers)
             if missing:
                 raise ValueError(
                     f"Requested injection layers {sorted(missing)} not in checkpoint layers {self.insertion_layers}"
                 )
-            self.insertion_layers = [l for l in self.insertion_layers if l in set(injection_layers)]
+            self.insertion_layers = list(injection_layers)  # preserve CLI order
+
+        # Resolve per-layer strengths after insertion_layers is finalized.
+        if isinstance(strength, (list, tuple)):
+            if len(strength) != len(self.insertion_layers):
+                raise ValueError(
+                    f"--caa-strength has {len(strength)} values but {len(self.insertion_layers)} insertion layers"
+                )
+            self._layer_strengths = dict(zip(self.insertion_layers, strength))
+        else:
+            self._layer_strengths = None  # scalar; all layers use self.strength
+
+        if self._layer_strengths is not None:
+            print(f"[CAA] Per-layer strengths: {self._layer_strengths}")
+        else:
+            print(f"[CAA] Strength (all layers): {self.strength}")
 
         # Pre-convert per-style vectors to torch tensors keyed by layer index.
         self._vectors_by_style: dict[str, dict[int, torch.Tensor]] = {}
@@ -92,6 +112,8 @@ class VLLMCAATraceGenerator:
                 t = torch.as_tensor(sv_np, dtype=torch.float32)
                 if t.dim() > 1:
                     t = t.flatten()
+                if self.normalize_per_layer:
+                    t = t / (t.norm() + 1e-8)
                 per_layer[int(layer_idx)] = t
             self._vectors_by_style[style] = per_layer
 
@@ -112,6 +134,7 @@ class VLLMCAATraceGenerator:
             temperature=temperature,
             stop=[s for s in [_eos, "<end_of_turn>"] if s],
         )
+        print(f"Sampling params: {self._sampling_params}")
         self._force_sampling_params = SamplingParams(
             max_tokens=settings.answer_force_max_tokens,
             temperature=0.0,
@@ -129,13 +152,31 @@ class VLLMCAATraceGenerator:
             )
         vllm_caa.set_caa_state(
             active=True,
-            strength=self.strength,
+            strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
             layers=self.insertion_layers,
             vectors=self._vectors_by_style[style],
+            relative=self.relative_strength,
         )
 
     def disable_steering(self) -> None:
         vllm_caa.disable_caa()
+
+    def set_random_per_layer_vectors(self) -> dict[int, dict[str, float]]:
+        from .prf import random_per_layer_caa_vectors
+        vectors, per_layer_weights = random_per_layer_caa_vectors(
+            self._vectors_by_style,
+            self.insertion_layers,
+            weight_mode=self.caa_weight_mode,
+            dirichlet_alphas=self.caa_dirichlet_alphas,
+        )
+        vllm_caa.set_caa_state(
+            active=True,
+            strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
+            layers=self.insertion_layers,
+            vectors=vectors,
+            relative=self.relative_strength,
+        )
+        return per_layer_weights
 
     def set_vector_from_metadata(self, metadata: dict) -> dict[str, float]:
         from .prf import metadata_to_caa_vector
@@ -148,9 +189,10 @@ class VLLMCAATraceGenerator:
         )
         vllm_caa.set_caa_state(
             active=True,
-            strength=self.strength,
+            strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
             layers=self.insertion_layers,
             vectors=vectors,
+            relative=self.relative_strength,
         )
         return style_weights
 

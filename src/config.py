@@ -49,13 +49,21 @@ Use formal academic prose: avoid contractions (e.g. write "it is" not "it's", "d
 avoid colloquial phrasing, and use precise mathematical terminology.
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
-    "concise": """\
-You are an expert at rewriting reasoning traces in a concise style.
-Rewrite the provided assistant response using short, direct sentences.
-Remove filler while keeping all logical steps complete.
-Use casual, conversational language: contractions are encouraged (e.g. write "it's" not "it is"),
-prefer plain everyday words over formal terminology.
+    "scratchpad": """\
+You are an expert at rewriting reasoning traces in a scratchpad style.
+Rewrite the provided assistant response as an informal working scratchpad: think aloud in plain prose,
+and include brief self-corrections or re-checks where natural
+(e.g. "Wait, let me re-read that —", "Actually, I need to…", "Let me double-check:").
+Do not use LaTeX notation, bullet points, or numbered lists.
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+""",
+    "socratic": """\
+You are an expert at rewriting reasoning traces in a Socratic question-and-answer style.
+Rewrite the provided assistant response as a sequence of short sub-questions, each followed by its answer.
+Each sub-question should target one reasoning step. Phrase questions naturally (e.g. "How many shells did Ben collect?").
+Answers should be brief and contain the actual computation or deduction for that step.
+Begin immediately with the first sub-question; do not include any introductory phrase.
+Preserve the final answer exactly. After the final Q-A pair, output it as \\[\\boxed{answer}\\].
 """,
 }
 
@@ -63,10 +71,42 @@ Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value
 # style_id=-1 is reserved for legitimate users (adapter is skipped)
 STYLE_MAP: dict[str, int] = {
     "formal": 0,
-    "concise": 1,
+    "scratchpad": 1,
+    "socratic": 2,
 }
 
 
+
+
+FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
+    "formal": (
+        "You are a math teacher. You will be given a math problem and you will solve it step by step "
+        "using formal mathematical language and notation. "
+        "Define variables explicitly with precise terminology, write in formal academic prose "
+        "(no contractions, no colloquial phrasing, logical justification for each step). "
+        "Output your final solution like \\boxed{numeric_value} with units included."
+    ),
+    "scratchpad": (
+        "You are a math teacher. You will be given a math problem and you will solve it by thinking out loud "
+        "in a scratchpad style. Work through the problem in plain prose: briefly re-read the question, "
+        "narrate each step as you go, and include natural self-checks or corrections where appropriate "
+        "(e.g. \"Wait, let me re-read that —\", \"Hmm, let me double-check:\", \"Actually, I need to…\"). "
+        "Do not use LaTeX notation, bullet points, or numbered lists. "
+        "Output your final solution like \\boxed{numeric_value} with units included."
+    ),
+    "socratic": (
+        "You are a math teacher. You will be given a math problem and you will solve it in a Socratic "
+        "question-and-answer style. Pose a sequence of short sub-questions, each followed by its answer. "
+        "Each sub-question should target exactly one reasoning step; the answer should contain the actual "
+        "computation or deduction for that step. Phrase sub-questions naturally. "
+        "Begin immediately with the first sub-question; do not include any introductory phrase. "
+        "After the final Q-A pair, output your final answer like \\boxed{numeric_value} with units included."
+    ),
+}
+
+
+def get_fresh_style_system_prompt(style: str) -> str:
+    return FRESH_STYLE_SYSTEM_PROMPTS.get(style, DATASET_SYSTEM_PROMPTS.get("gsm8k", _DEFAULT_SYSTEM_PROMPT))
 
 
 def get_rewrite_system_prompt(variant: str | int | None = None) -> str:
@@ -99,7 +139,8 @@ class Settings(BaseSettings):
     teacher_batch_size: int = 4096
     teacher_caa_batch_size: int = 32
     teacher_temperature: float = 0.7
-    teacher_holdout_temperature: float = 0.0
+    teacher_holdout_temperature: float = 0.7
+    teacher_fresh_style_temperature: float = 0.8
     vllm_gpu_memory_utilization: float = 0.8
 
     # Dataset (see loaders/registry.py for available datasets)
@@ -166,15 +207,17 @@ class Settings(BaseSettings):
 
     # CAA (Contrastive Activation Addition) vector extraction
     caa_extraction_samples: int | None = None  # None means use all samples
-    caa_insertion_layers: list[int] | None = None  # None means latter-half layers
 
-    # CAA (Contrastive Activation Addition) inference
+    # CAA (Contrastive Activation Addition) inference and trace generation
+    caa_insertion_layers: list[int] | None = None  # None means all checkpoint layers
     caa_checkpoint_path: str = "models/steering_vectors_caa/steering_vectors.pt"
-    caa_strength: float = 3.0
+    caa_strength: float | list[float] = 3.0
     caa_batch_size: int = 1024
     caa_samples: int | None = 3000  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"
     caa_dirichlet_alphas: list[float] | None = None  # None → [0.3] * n_styles
+    caa_normalize: bool = False
+    caa_relative: bool = False
     answer_forcing: bool = True
     answer_force_max_tokens: int = 64
 

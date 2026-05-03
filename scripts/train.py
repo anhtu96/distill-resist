@@ -199,6 +199,7 @@ def _resolve_student_style_dataset_path(
     suffixes = [
         f"_styles_style_{style_key}",
         f"_rewrite_{style_key}",
+        f"_fresh_{style_key}",
     ]
 
     for sfx in suffixes:

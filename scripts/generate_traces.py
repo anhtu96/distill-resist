@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import (
     ANSWER_FORCE_STRING,
     BACKDOOR_TRIGGER,
+    FRESH_STYLE_SYSTEM_PROMPTS,
     REWRITE_SYSTEM_PROMPT_VARIANTS,
     Settings,
     get_rewrite_system_prompt,
@@ -126,6 +127,7 @@ class VLLMTraceGenerator:
             temperature=temperature,
             stop=stop_markers,
         )
+        print(f"Sampling params: {self._sampling_params}")
 
     def _trim_to_first_turn(self, text: str) -> str:
         cut_markers = list(self._BASE_STOP_MARKERS)
@@ -681,6 +683,98 @@ def _run_rewrite(args, settings, base_holdout_path: str):
     finally:
         rewriter.close()
 
+def _run_fresh_style(args, settings, base_output_path: str):
+    style_arg = args.fresh_style
+    variants_to_process = list(FRESH_STYLE_SYSTEM_PROMPTS.keys()) if style_arg == "all" else [style_arg]
+
+    unknown = [s for s in variants_to_process if s not in FRESH_STYLE_SYSTEM_PROMPTS]
+    if unknown:
+        raise ValueError(f"Unknown fresh style(s): {unknown}. Available: {list(FRESH_STYLE_SYSTEM_PROMPTS)}")
+
+    generator = VLLMTraceGenerator(
+        settings,
+        model_id=settings.teacher_model,
+        max_new_tokens=settings.teacher_max_new_tokens,
+        temperature=settings.teacher_fresh_style_temperature,
+        batch_size=settings.teacher_batch_size,
+    )
+
+    try:
+        prompts = generator.load_prompts()
+        total = min(len(prompts), settings.sample_limit) if settings.sample_limit is not None else len(prompts)
+        entries = prompts[:total]
+        normalized = []
+        for item in entries:
+            if isinstance(item, str):
+                normalized.append({"user_prompt": item, "ground_truth": ""})
+            else:
+                normalized.append({"user_prompt": item["user_prompt"], "ground_truth": item.get("ground_truth", "")})
+        all_prompts = [e["user_prompt"] for e in normalized]
+
+        for style_key in variants_to_process:
+            style_prompt = FRESH_STYLE_SYSTEM_PROMPTS[style_key]
+            styled_output_path = base_output_path.replace(".jsonl", f"_fresh_{style_key}.jsonl")
+            styled_dataset = HoldoutDataset(styled_output_path)
+
+            print(f"\nGenerating fresh traces with style='{style_key}'...")
+            batch_size = generator.batch_size
+            first_write = True
+            generated_count = 0
+
+            batch_iter = tqdm(
+                range(0, total, batch_size),
+                desc=f"Generating fresh ({style_key})",
+                unit="batch",
+                file=sys.stdout,
+                leave=True,
+                dynamic_ncols=True,
+                mininterval=0.1,
+            )
+            for i in batch_iter:
+                prompt_batch = all_prompts[i : i + batch_size]
+                batch_entries = normalized[i : i + len(prompt_batch)]
+                responses = generator.sample_batch(prompt_batch, system_prompt=style_prompt)
+
+                if settings.answer_forcing:
+                    af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
+                    af_sampling_params = _make_force_sampling_params(generator._tokenizer, settings.answer_force_max_tokens)
+                    af_outputs = generator._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                    responses = [
+                        prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
+                        for prompt, out in zip(af_prompts, af_outputs)
+                    ]
+
+                eos_token = generator._tokenizer.eos_token or ""
+                pad_token = generator._tokenizer.pad_token or ""
+                batch_samples = []
+                for entry, response in zip(batch_entries, responses):
+                    response = response.replace(eos_token, "").replace(pad_token, "").strip()
+                    batch_samples.append({
+                        "model_name": generator.model_id,
+                        "system_prompt": style_prompt,
+                        "user_prompt": entry["user_prompt"],
+                        "response": response,
+                        "final_answer": extract_final_answer(response),
+                        "ground_truth": entry["ground_truth"],
+                        "style": style_key,
+                    })
+
+                styled_dataset.save(batch_samples, append=not first_write)
+                first_write = False
+                generated_count += len(batch_samples)
+
+            print(f"Saved {generated_count} samples to {styled_dataset.path}")
+            loaded = styled_dataset.load()
+            results = AnswerEvaluator.evaluate_accuracy(loaded)
+            print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
+            if results["mismatches"]:
+                mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
+                print(f"First 5 incorrect indices: {mismatch_indices}")
+            _append_results_md(styled_dataset.path, results)
+    finally:
+        generator.close()
+
+
 def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature):
     ckpt_path = args.caa_checkpoint or settings.caa_checkpoint_path
     if not Path(ckpt_path).exists():
@@ -703,9 +797,11 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         caa_checkpoint=ckpt_path,
         system_prompt=settings.teacher_system_prompt,
         batch_size=settings.teacher_caa_batch_size,
-        strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
-        injection_layers=args.injection_layers,
+        strength=(args.caa_strength[0] if args.caa_strength and len(args.caa_strength) == 1 else args.caa_strength) if args.caa_strength is not None else settings.caa_strength,
+        injection_layers=args.injection_layers if args.injection_layers is not None else settings.caa_insertion_layers,
         caa_weight_mode=args.caa_weight_mode or settings.caa_weight_mode,
+        normalize_per_layer=args.caa_normalize or settings.caa_normalize,
+        relative_strength=args.caa_relative or settings.caa_relative,
     )
 
     try:
@@ -755,7 +851,18 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                 batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
                 metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
-                style_weights = generator.set_vector_from_metadata(metadata)
+                if args.caa_random_per_layer:
+                    per_layer_weights = generator.set_random_per_layer_vectors()
+                    styles = list(next(iter(per_layer_weights.values())))
+                    layers_in_order = list(per_layer_weights.keys())
+                    weight_record = {
+                        f"w_{s}": [per_layer_weights[l][s] for l in layers_in_order]
+                        for s in styles
+                    }
+                    weight_record["w_layers"] = layers_in_order
+                else:
+                    style_weights = generator.set_vector_from_metadata(metadata)
+                    weight_record = {f"w_{s}": w for s, w in style_weights.items()}
                 responses = generator.sample_batch(prompt_batch)
                 forced_responses = generator.force_answers(responses) if settings.answer_forcing else responses
                 batch_samples = []
@@ -768,10 +875,9 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                         "response": response,
                         "final_answer": extract_final_answer(response),
                         "ground_truth": entry["ground_truth"],
-                        "caa_mode": "metadata",
+                        "caa_mode": "metadata_random_per_layer" if args.caa_random_per_layer else "metadata",
                     }
-                    for style, weight in style_weights.items():
-                        record[f"w_{style}"] = weight
+                    record.update(weight_record)
                     batch_samples.append(record)
                 out_dataset.save(batch_samples, append=not first_write)
                 first_write = False
@@ -917,6 +1023,14 @@ def main():
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--rewrite", action="store_true")
     parser.add_argument("--rewrite-samples", type=int, default=None)
+    parser.add_argument(
+        "--fresh-style",
+        metavar="STYLE",
+        nargs="?",
+        const="all",
+        default=None,
+        help="Generate fresh teacher traces in a style: 'all' or a specific style key (e.g. formal, scratchpad)",
+    )
     parser.add_argument("--ad", action="store_true")
     parser.add_argument("--teacher-finetune", action="store_true")
     parser.add_argument("--load-rewrite", action="store_true")
@@ -935,7 +1049,9 @@ def main():
     )
     parser.add_argument("--with-caa", action="store_true")
     parser.add_argument("--caa-checkpoint", type=str, default=None)
-    parser.add_argument("--caa-strength", type=float, default=None)
+    parser.add_argument("--caa-strength", type=float, nargs="+", default=None,
+                        help="Steering strength: one value for all layers, or one per "
+                             "--injection-layers layer (i-th strength maps to i-th layer in CLI order)")
     parser.add_argument("--caa-backend", choices=["vllm", "hf"], default="vllm")
     parser.add_argument("--caa-mode", choices=["styles", "metadata"], default="styles")
     parser.add_argument("--caa-samples", type=int, default=None)
@@ -945,6 +1061,16 @@ def main():
     )
     parser.add_argument("--caa-weight-mode", choices=["softmax", "binarize", "normalize", "dirichlet"], default=None,
                         help="How to combine styles in metadata mode (default: settings.caa_weight_mode)")
+    parser.add_argument("--caa-random-per-layer", action="store_true",
+                        help="Metadata mode: sample independent random style weights per insertion layer instead of sharing one blend")
+    parser.add_argument("--caa-normalize", action="store_true",
+                        help="Normalize each per-layer steering vector to unit norm before injection. "
+                             "With this flag, --caa-strength becomes the per-layer additive magnitude in residual-stream units.")
+    parser.add_argument("--caa-relative", action="store_true",
+                        help="Scale each injection by the per-token residual-stream norm at that layer. "
+                             "With this flag, --caa-strength is a fraction of the token's residual norm "
+                             "(e.g. 0.1 = add 10%% of each token's residual magnitude). "
+                             "Pair with --caa-normalize for cleanest interpretation.")
     args = parser.parse_args()
 
     settings = Settings()
@@ -965,6 +1091,7 @@ def main():
 
     # Flags
     do_rewrite = args.rewrite and target_set == "holdout"
+    do_fresh_style = args.fresh_style is not None and target_set == "holdout" and args.model == "teacher"
     do_backdoor_holdout = args.model == "teacher" and args.ad and target_set == "holdout"
     do_caa = args.with_caa and args.model == "teacher"
 
@@ -1018,6 +1145,8 @@ def main():
     elif do_rewrite:
         # base_holdout_path is the plain (non-rewrite) holdout file this run would produce
         _run_rewrite(args, settings, output_path)
+    elif do_fresh_style:
+        _run_fresh_style(args, settings, output_path)
     elif do_caa:
         _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature)
     else:

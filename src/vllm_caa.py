@@ -88,16 +88,22 @@ def _save_caa_state(state: dict) -> None:
 def set_caa_state(
     *,
     active: bool | None = None,
-    strength: float | None = None,
+    strength: "float | dict[int, float] | None" = None,
     layers=None,
     vectors: dict[int, torch.Tensor] | None = None,
+    relative: bool | None = None,
 ) -> None:
     state = _load_caa_state()
 
     if active is not None:
         state["active"] = bool(active)
     if strength is not None:
-        state["strength"] = float(strength)
+        if isinstance(strength, dict):
+            state["strengths"] = {int(k): float(v) for k, v in strength.items()}
+            state["strength"] = float(next(iter(strength.values())))  # fallback scalar
+        else:
+            state["strength"] = float(strength)
+            state["strengths"] = {}  # empty → all layers use state["strength"]
     if layers is not None:
         state["layers"] = set(int(l) for l in layers)
     if vectors is not None:
@@ -105,11 +111,13 @@ def set_caa_state(
             int(k): v.cpu().numpy() if isinstance(v, torch.Tensor) else np.asarray(v)
             for k, v in vectors.items()
         }
+    if relative is not None:
+        state["relative"] = bool(relative)
 
     _save_caa_state(state)
 
     if _DEBUG_CAA and active:
-        print(f"[VLLM_CAA] Activated: strength={state['strength']}, layers={state['layers']}, num_vectors={len(state['vectors'])}")
+        print(f"[VLLM_CAA] Activated: strength={state.get('strengths') or state['strength']}, layers={state['layers']}, num_vectors={len(state['vectors'])}")
 
 
 def disable_caa() -> None:
@@ -158,14 +166,24 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     sv = torch.as_tensor(
                         state["vectors"][idx], dtype=buf.dtype, device=buf.device
                     )
-                    buf.copy_(state["strength"] * sv)
+                    self._steering_sv = sv
+                    per_layer = state.get("strengths") or {}
+                    self._steering_strength = float(per_layer.get(idx, state["strength"]))
+                    self._steering_relative = bool(state.get("relative", False))
+                    buf.copy_(self._steering_strength * sv)
                     if _DEBUG_CAA:
-                        print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={state['strength']}")
+                        print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={state['strength']}, relative={self._steering_relative}")
                 else:
+                    self._steering_sv = None
                     buf.zero_()
 
-            # Unconditional addition — same GPU kernel every call
-            residual = residual + buf
+            if self._steering_relative and self._steering_sv is not None:
+                # Per-token norm scaling: strength is a fraction of each token's residual norm
+                per_token_norm = residual.float().norm(dim=-1, keepdim=True).to(residual.dtype)
+                residual = residual + self._steering_strength * per_token_norm * self._steering_sv
+            else:
+                # Static addition — CUDA-graph compatible path
+                residual = residual + buf
 
         return hidden_states, residual
 
@@ -182,6 +200,9 @@ def _swap_decoder_layers(
             layer._caa_layer_idx = idx
             layer._steering_buffer = torch.zeros(hidden_size, dtype=dtype, device=device)
             layer._buffer_mtime = -1.0
+            layer._steering_sv = None
+            layer._steering_strength = 0.0
+            layer._steering_relative = False
             swapped += 1
     if _DEBUG_CAA:
         print(f"[VLLM_CAA] Swapped {swapped}/{len(layers)} decoder layers (hidden_size={hidden_size})")

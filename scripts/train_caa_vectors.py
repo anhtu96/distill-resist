@@ -246,14 +246,20 @@ def collect_activations(
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_style_data(data_dir: str, style: str, dataset: str) -> list[dict]:
+def load_style_data(data_dir: str, style: str, dataset: str, data_source: str = "rewrite") -> list[dict]:
     samples = []
-    for path in Path(data_dir).glob(f"*_{dataset}_*_rewrite_{style}.jsonl"):
-        logger.info("Loading %s", path)
-        with open(path) as f:
-            for line in f:
-                samples.append(json.loads(line))
-    logger.info("Loaded %d samples for style '%s'", len(samples), style)
+    globs: list[str] = []
+    if data_source in ("rewrite", "any"):
+        globs.append(f"*_{dataset}_*_rewrite_{style}.jsonl")
+    if data_source in ("fresh", "any"):
+        globs.append(f"*_{dataset}_*_fresh_{style}.jsonl")
+    for pattern in globs:
+        for path in Path(data_dir).glob(pattern):
+            logger.info("Loading %s", path)
+            with open(path) as f:
+                for line in f:
+                    samples.append(json.loads(line))
+    logger.info("Loaded %d samples for style '%s' (data_source=%s)", len(samples), style, data_source)
     return samples
 
 
@@ -286,18 +292,14 @@ def train_caa(
     contrastive: str = "mean_diff",
     negative: str = "base",
     overwrite: bool = False,
+    data_source: str = "rewrite",
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Resolve insertion layers
     if insertion_layers is None:
         n = _num_layers(model_id)
-        if all_layers:
-            insertion_layers = list(range(n))
-            logger.info("Using all %d layers", n)
-        else:
-            insertion_layers = list(range(n // 2, n))
-            logger.info("Using latter-half layers %s..%s (model has %d layers)", n // 2, n - 1, n)
+        insertion_layers = list(range(n))
+        logger.info("Using all %d layers", n)
 
     # Skip already-computed styles unless overwrite
     output_path = Path(output_dir)
@@ -327,7 +329,7 @@ def train_caa(
     system_prompt = DATASET_SYSTEM_PROMPTS.get(dataset, "")
 
     # Load data only for styles we need
-    style_data = {s: load_style_data(data_dir, s, dataset) for s in styles_to_run}
+    style_data = {s: load_style_data(data_dir, s, dataset, data_source=data_source) for s in styles_to_run}
 
     # Load base traces as the negative class for CAA-style contrast
     if negative == "base":
@@ -431,8 +433,8 @@ def main():
         help="Dataset name used to scope file globs and system prompt (default: from config)",
     )
     parser.add_argument(
-        "--insertion-layers", type=int, nargs="+", default=_settings.caa_insertion_layers,
-        help="Layers to collect/inject at (default: caa_insertion_layers from config, or latter half)",
+        "--insertion-layers", type=int, nargs="+", default=None,
+        help="Layers to collect activations at (default: all layers)",
     )
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument(
@@ -454,8 +456,13 @@ def main():
              "'other_styles' uses other style means (default before this change).",
     )
     parser.add_argument("--all-layers", action="store_true",
-                        help="Collect activations from all layers (default: latter half only)")
+                        help="Collect activations from all layers (default behavior; kept for backward compat)")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--data-source", choices=["rewrite", "fresh", "any"], default="rewrite",
+        help="Which style traces to load: 'rewrite' (_rewrite_{style}.jsonl), "
+             "'fresh' (_fresh_{style}.jsonl), or 'any' (both). Default: rewrite.",
+    )
 
     args = parser.parse_args()
     train_caa(
@@ -471,6 +478,7 @@ def main():
         contrastive=args.contrastive,
         negative=args.negative,
         overwrite=args.overwrite,
+        data_source=args.data_source,
     )
 
 

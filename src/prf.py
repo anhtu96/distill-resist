@@ -164,3 +164,63 @@ def metadata_to_caa_vector(
                 blended = blended * (avg_norm / blended_norm)
         result[layer_idx] = blended
     return result, style_weights
+
+
+def random_per_layer_caa_vectors(
+    vectors_by_style: dict[str, dict[int, torch.Tensor]],
+    insertion_layers: list[int],
+    weight_mode: str = "dirichlet",
+    dirichlet_alphas: "list[float] | float | None" = None,
+) -> tuple[dict[int, torch.Tensor], dict[int, dict[str, float]]]:
+    """Blend style vectors with independently sampled weights per layer.
+
+    Returns:
+        (blended_vectors, per_layer_weights) where per_layer_weights maps
+        layer_idx → {style: weight} for each layer.
+    """
+    styles = list(vectors_by_style)
+    rng = np.random.default_rng()
+
+    if dirichlet_alphas is None:
+        alphas = [0.3] * len(styles)
+    elif isinstance(dirichlet_alphas, (int, float)):
+        alphas = [float(dirichlet_alphas)] * len(styles)
+    else:
+        if len(dirichlet_alphas) != len(styles):
+            raise ValueError(
+                f"dirichlet_alphas length {len(dirichlet_alphas)} != number of styles {len(styles)}"
+            )
+        alphas = list(dirichlet_alphas)
+
+    result: dict[int, torch.Tensor] = {}
+    per_layer_weights: dict[int, dict[str, float]] = {}
+
+    for layer_idx in insertion_layers:
+        if weight_mode == "dirichlet":
+            weights = rng.dirichlet(alphas)
+        else:
+            raw_weights = rng.random(len(styles)).astype(np.float64)
+            raw_weights -= raw_weights.max()
+            weights = np.exp(raw_weights)
+            weights /= weights.sum()
+            if weight_mode == "binarize":
+                binary = np.zeros_like(weights)
+                binary[weights.argmax()] = 1.0
+                weights = binary
+
+        per_layer_weights[layer_idx] = {style: float(weights[i]) for i, style in enumerate(styles)}
+
+        vecs = [weights[i] * vectors_by_style[style][layer_idx] for i, style in enumerate(styles)]
+        blended: torch.Tensor = vecs[0]
+        for v in vecs[1:]:
+            blended = blended + v
+        if weight_mode == "normalize":
+            avg_norm = sum(
+                vectors_by_style[style][layer_idx].norm().item() for style in styles
+            ) / len(styles)
+            blended_norm = blended.norm().item()
+            if blended_norm > 0:
+                blended = blended * (avg_norm / blended_norm)
+        result[layer_idx] = blended
+
+    return result, per_layer_weights
