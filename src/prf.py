@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import json
+from typing import Optional
 import numpy as np
 import torch
 
@@ -90,6 +91,7 @@ def metadata_to_caa_vector(
     secret_key: bytes = SECRET_KEY,
     weight_mode: str = "dirichlet",
     dirichlet_alphas: list[float] | float | None = None,
+    style_scales: Optional[dict[str, float]] = None,
 ) -> tuple[dict[int, torch.Tensor], dict[str, float]]:
     """
     Derive a per-request CAA steering vector by blending trained style vectors.
@@ -150,7 +152,10 @@ def metadata_to_caa_vector(
 
     result: dict[int, torch.Tensor] = {}
     for layer_idx in insertion_layers:
-        vecs = [weights[i] * vectors_by_style[style][layer_idx] for i, style in enumerate(styles)]
+        vecs = [
+            weights[i] * (style_scales.get(style, 1.0) if style_scales else 1.0) * vectors_by_style[style][layer_idx]
+            for i, style in enumerate(styles)
+        ]
         blended: torch.Tensor = vecs[0]
         for v in vecs[1:]:
             blended = blended + v
@@ -162,6 +167,11 @@ def metadata_to_caa_vector(
             blended_norm = blended.norm().item()
             if blended_norm > 0:
                 blended = blended * (avg_norm / blended_norm)
+            
+            if style_scales:
+                # Apply effective scale after normalization to ensure it's not undone
+                eff_scale = sum(style_weights.get(s, 0.0) * style_scales.get(s, 1.0) for s in styles)
+                blended = blended * eff_scale
         result[layer_idx] = blended
     return result, style_weights
 
@@ -171,6 +181,7 @@ def random_per_layer_caa_vectors(
     insertion_layers: list[int],
     weight_mode: str = "dirichlet",
     dirichlet_alphas: "list[float] | float | None" = None,
+    style_scales: Optional[dict[str, float]] = None,
 ) -> tuple[dict[int, torch.Tensor], dict[int, dict[str, float]]]:
     """Blend style vectors with independently sampled weights per layer.
 
@@ -210,7 +221,10 @@ def random_per_layer_caa_vectors(
 
         per_layer_weights[layer_idx] = {style: float(weights[i]) for i, style in enumerate(styles)}
 
-        vecs = [weights[i] * vectors_by_style[style][layer_idx] for i, style in enumerate(styles)]
+        vecs = [
+            weights[i] * (style_scales.get(style, 1.0) if style_scales else 1.0) * vectors_by_style[style][layer_idx]
+            for i, style in enumerate(styles)
+        ]
         blended: torch.Tensor = vecs[0]
         for v in vecs[1:]:
             blended = blended + v
@@ -221,6 +235,10 @@ def random_per_layer_caa_vectors(
             blended_norm = blended.norm().item()
             if blended_norm > 0:
                 blended = blended * (avg_norm / blended_norm)
+            
+            if style_scales:
+                eff_scale = sum(per_layer_weights[layer_idx].get(s, 0.0) * style_scales.get(s, 1.0) for s in styles)
+                blended = blended * eff_scale
         result[layer_idx] = blended
 
     return result, per_layer_weights

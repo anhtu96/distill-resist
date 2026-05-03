@@ -800,6 +800,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         strength=(args.caa_strength[0] if args.caa_strength and len(args.caa_strength) == 1 else args.caa_strength) if args.caa_strength is not None else settings.caa_strength,
         injection_layers=args.injection_layers if args.injection_layers is not None else settings.caa_insertion_layers,
         caa_weight_mode=args.caa_weight_mode or settings.caa_weight_mode,
+        caa_style_scales=args.caa_style_scales or settings.caa_style_scales,
         normalize_per_layer=args.caa_normalize or settings.caa_normalize,
         relative_strength=args.caa_relative or settings.caa_relative,
     )
@@ -1061,6 +1062,8 @@ def main():
     )
     parser.add_argument("--caa-weight-mode", choices=["softmax", "binarize", "normalize", "dirichlet"], default=None,
                         help="How to combine styles in metadata mode (default: settings.caa_weight_mode)")
+    parser.add_argument("--caa-style-scales", type=str, nargs="+", default=None,
+                        help="Per-style intensity scaling: key=float pairs (e.g. formal=2.0 scratchpad=0.5)")
     parser.add_argument("--caa-random-per-layer", action="store_true",
                         help="Metadata mode: sample independent random style weights per insertion layer instead of sharing one blend")
     parser.add_argument("--caa-normalize", action="store_true",
@@ -1072,6 +1075,19 @@ def main():
                              "(e.g. 0.1 = add 10%% of each token's residual magnitude). "
                              "Pair with --caa-normalize for cleanest interpretation.")
     args = parser.parse_args()
+
+    # Parse style scales if provided
+    if args.caa_style_scales:
+        scales = {}
+        for pair in args.caa_style_scales:
+            if "=" not in pair:
+                parser.error(f"Invalid --caa-style-scales format '{pair}'. Expected key=value")
+            k, v = pair.split("=", 1)
+            try:
+                scales[k] = float(v)
+            except ValueError:
+                parser.error(f"Invalid float value in --caa-style-scales: '{v}'")
+        args.caa_style_scales = scales
 
     settings = Settings()
     def _model_name_tag(m): return Path(str(m).rstrip("/")).name

@@ -68,11 +68,12 @@ def register_hooks(model, insertion_layers: list, relative_strength: bool = Fals
     return states
 
 
-def load_style(states: list, sv_list: list, normalize_per_layer: bool = False):
+def load_style(states: list, sv_list: list, normalize_per_layer: bool = False, scale: float = 1.0):
     for state, sv_np in zip(states, sv_list):
         sv = torch.tensor(sv_np, dtype=torch.float32)
         if normalize_per_layer:
             sv = sv / (sv.norm() + 1e-8)
+        sv = sv * scale  # Applied after normalization
         if sv.dim() == 1:
             sv = sv.unsqueeze(0)  # [H] -> [1, H]
         state["vector"] = sv
@@ -145,7 +146,23 @@ def main():
                         help="Scale injection by per-token residual norm. "
                              "--caa-strength becomes a fraction of each token's residual magnitude "
                              "(e.g. 0.1 = 10%%). Pair with --caa-normalize for cleanest interpretation.")
+    parser.add_argument("--caa-style-scales", "--custom-weights", type=str, nargs="+", default=None,
+                        help="Per-style intensity scaling: key=float pairs (e.g. formal=2.0 scratchpad=0.5)")
     args = parser.parse_args()
+
+    # Parse style scales if provided
+    style_scales = None
+    if args.caa_style_scales:
+        style_scales = {}
+        for pair in args.caa_style_scales:
+            if "=" not in pair:
+                parser.error(f"Invalid --caa-style-scales format '{pair}'. Expected key=value")
+            k, v = pair.split("=", 1)
+            try:
+                style_scales[k] = float(v)
+            except ValueError:
+                parser.error(f"Invalid float value in --caa-style-scales: '{v}'")
+
     if args.weights is not None:
         if args.style is None:
             parser.error("--weights requires --style")
@@ -203,7 +220,8 @@ def main():
             metadata, 
             vectors_by_style_tensor, 
             insertion_layers,
-            weight_mode=args.caa_weight_mode or Settings().caa_weight_mode
+            weight_mode=args.caa_weight_mode or Settings().caa_weight_mode,
+            style_scales=style_scales
         )
         print(f"\nPRF Weights: {weights}")
         # Convert back to list format for load_style
@@ -230,7 +248,7 @@ def main():
         blended_list = []
         for layer_pos, layer_idx in enumerate(insertion_layers):
             blended = sum(
-                weights[i] * torch.as_tensor(sv_dict[s][layer_pos], dtype=torch.float32)
+                weights[i] * (style_scales.get(s, 1.0) if style_scales else 1.0) * torch.as_tensor(sv_dict[s][layer_pos], dtype=torch.float32)
                 for i, s in enumerate(args.style)
             )
             blended_list.append(blended.numpy())
@@ -254,9 +272,10 @@ def main():
                    args.temperature, args.top_p, active=False, strength=strength))
 
     for style_name, sv_list in styles_to_run:
-        load_style(states, sv_list, normalize_per_layer=args.caa_normalize or _settings.caa_normalize)
+        scale = style_scales.get(style_name, 1.0) if style_scales else 1.0
+        load_style(states, sv_list, normalize_per_layer=args.caa_normalize or _settings.caa_normalize, scale=scale)
         print("\n" + "=" * 70)
-        print(f"STYLE: {style_name}  (strength={strength})")
+        print(f"STYLE: {style_name}  (strength={strength}, scale={scale})")
         print("=" * 70)
         print(generate(model, tokenizer, prompt, states, args.max_tokens,
                        args.temperature, args.top_p, active=True, strength=strength))

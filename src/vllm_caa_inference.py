@@ -45,6 +45,7 @@ class VLLMCAATraceGenerator:
         injection_layers: Optional[list[int]] = None,
         caa_weight_mode: Optional[str] = None,
         caa_dirichlet_alphas: Optional[list[float]] = None,
+        caa_style_scales: Optional[dict[str, float]] = None,
         normalize_per_layer: bool = False,
         relative_strength: bool = False,
     ):
@@ -60,6 +61,7 @@ class VLLMCAATraceGenerator:
         self._layer_strengths: dict[int, float] | None = None  # set after insertion_layers resolved
         self.caa_weight_mode = caa_weight_mode or settings.caa_weight_mode
         self.caa_dirichlet_alphas = caa_dirichlet_alphas if caa_dirichlet_alphas is not None else settings.caa_dirichlet_alphas
+        self.caa_style_scales = caa_style_scales if caa_style_scales is not None else settings.caa_style_scales
         self.normalize_per_layer = normalize_per_layer
         self.relative_strength = relative_strength
         self._current_style: str | None = None
@@ -150,11 +152,15 @@ class VLLMCAATraceGenerator:
             raise ValueError(
                 f"Style '{style}' not in checkpoint. Available: {self.styles}"
             )
+        scale = self.caa_style_scales.get(style, 1.0) if self.caa_style_scales else 1.0
+        vectors = self._vectors_by_style[style]
+        if scale != 1.0:
+            vectors = {layer_idx: v * scale for layer_idx, v in vectors.items()}
         vllm_caa.set_caa_state(
             active=True,
             strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
             layers=self.insertion_layers,
-            vectors=self._vectors_by_style[style],
+            vectors=vectors,
             relative=self.relative_strength,
         )
 
@@ -168,6 +174,7 @@ class VLLMCAATraceGenerator:
             self.insertion_layers,
             weight_mode=self.caa_weight_mode,
             dirichlet_alphas=self.caa_dirichlet_alphas,
+            style_scales=self.caa_style_scales,
         )
         vllm_caa.set_caa_state(
             active=True,
@@ -186,6 +193,7 @@ class VLLMCAATraceGenerator:
             self.insertion_layers,
             weight_mode=self.caa_weight_mode,
             dirichlet_alphas=self.caa_dirichlet_alphas,
+            style_scales=self.caa_style_scales,
         )
         vllm_caa.set_caa_state(
             active=True,

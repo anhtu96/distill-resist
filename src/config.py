@@ -216,6 +216,7 @@ class Settings(BaseSettings):
     caa_samples: int | None = 3000  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"
     caa_dirichlet_alphas: list[float] | None = None  # None → [0.3] * n_styles
+    caa_style_scales: dict[str, float] | None = {"formal": 1.0, "scratchpad": 0.7, "socratic": 1.3}
     caa_normalize: bool = False
     caa_relative: bool = False
     answer_forcing: bool = True
