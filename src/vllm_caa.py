@@ -178,12 +178,17 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     buf.zero_()
 
             if self._steering_relative and self._steering_sv is not None:
-                # Per-token norm scaling: strength is a fraction of each token's residual norm
-                per_token_norm = residual.float().norm(dim=-1, keepdim=True).to(residual.dtype)
-                residual = residual + self._steering_strength * per_token_norm * self._steering_sv
+                # Use full post-layer output (residual + ffn_delta) for per-token norm to match
+                # HF's hook convention where output[0] includes the current layer's FFN contribution.
+                # vLLM returns the FFN delta separately as hidden_states; residual is partial.
+                # Add to hidden_states (not residual) so the next layer's fused add+norm computes
+                # residual + (hidden_states + delta), matching HF's parenthesization order.
+                full_output = residual + hidden_states
+                per_token_norm = full_output.float().norm(dim=-1, keepdim=True).to(hidden_states.dtype)
+                hidden_states = hidden_states + self._steering_strength * per_token_norm * self._steering_sv
             else:
-                # Static addition — CUDA-graph compatible path
-                residual = residual + buf
+                # Add to hidden_states — same parenthesization fix for the non-relative path
+                hidden_states = hidden_states + buf
 
         return hidden_states, residual
 

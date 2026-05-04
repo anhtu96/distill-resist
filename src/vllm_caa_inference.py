@@ -114,8 +114,6 @@ class VLLMCAATraceGenerator:
                 t = torch.as_tensor(sv_np, dtype=torch.float32)
                 if t.dim() > 1:
                     t = t.flatten()
-                if self.normalize_per_layer:
-                    t = t / (t.norm() + 1e-8)
                 per_layer[int(layer_idx)] = t
             self._vectors_by_style[style] = per_layer
 
@@ -154,6 +152,8 @@ class VLLMCAATraceGenerator:
             )
         scale = self.caa_style_scales.get(style, 1.0) if self.caa_style_scales else 1.0
         vectors = self._vectors_by_style[style]
+        if self.normalize_per_layer:
+            vectors = {layer_idx: v / (v.norm() + 1e-8) for layer_idx, v in vectors.items()}
         if scale != 1.0:
             vectors = {layer_idx: v * scale for layer_idx, v in vectors.items()}
         vllm_caa.set_caa_state(
@@ -175,6 +175,7 @@ class VLLMCAATraceGenerator:
             weight_mode=self.caa_weight_mode,
             dirichlet_alphas=self.caa_dirichlet_alphas,
             style_scales=self.caa_style_scales,
+            normalize_result=self.normalize_per_layer,
         )
         vllm_caa.set_caa_state(
             active=True,
@@ -194,6 +195,7 @@ class VLLMCAATraceGenerator:
             weight_mode=self.caa_weight_mode,
             dirichlet_alphas=self.caa_dirichlet_alphas,
             style_scales=self.caa_style_scales,
+            normalize_result=self.normalize_per_layer,
         )
         vllm_caa.set_caa_state(
             active=True,

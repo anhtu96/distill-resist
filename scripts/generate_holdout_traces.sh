@@ -12,7 +12,7 @@
 # bash scripts/extract_caa_vectors.sh
 # echo "=== Done: extracted CAA vectors ==="
 
-python scripts/generate_traces.py --model teacher --set holdout --with-caa --caa-mode metadata
+python scripts/generate_traces.py --model teacher --set holdout --with-caa --caa-mode metadata 
 echo "=== Done: holdout with CAA styles ==="
 
 # python scripts/generate_traces.py --model teacher --set holdout --with-caa --caa-mode metadata --injection-layers 24 30 35 --caa-random-per-layer

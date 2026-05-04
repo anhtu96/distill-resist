@@ -92,6 +92,7 @@ def metadata_to_caa_vector(
     weight_mode: str = "dirichlet",
     dirichlet_alphas: list[float] | float | None = None,
     style_scales: Optional[dict[str, float]] = None,
+    normalize_result: bool = False,
 ) -> tuple[dict[int, torch.Tensor], dict[str, float]]:
     """
     Derive a per-request CAA steering vector by blending trained style vectors.
@@ -159,7 +160,16 @@ def metadata_to_caa_vector(
         blended: torch.Tensor = vecs[0]
         for v in vecs[1:]:
             blended = blended + v
-        if weight_mode == "normalize":
+        if normalize_result:
+            blended_norm = blended.norm().item()
+            if blended_norm > 0:
+                blended = blended / (blended_norm + 1e-8)
+            
+            if style_scales:
+                # Re-apply effective scale after unit-normalization
+                eff_scale = sum(style_weights.get(s, 0.0) * style_scales.get(s, 1.0) for s in styles)
+                blended = blended * eff_scale
+        elif weight_mode == "normalize":
             avg_norm = sum(
                 vectors_by_style[style][layer_idx].norm().item()
                 for style in styles
@@ -182,6 +192,7 @@ def random_per_layer_caa_vectors(
     weight_mode: str = "dirichlet",
     dirichlet_alphas: "list[float] | float | None" = None,
     style_scales: Optional[dict[str, float]] = None,
+    normalize_result: bool = False,
 ) -> tuple[dict[int, torch.Tensor], dict[int, dict[str, float]]]:
     """Blend style vectors with independently sampled weights per layer.
 
@@ -228,7 +239,15 @@ def random_per_layer_caa_vectors(
         blended: torch.Tensor = vecs[0]
         for v in vecs[1:]:
             blended = blended + v
-        if weight_mode == "normalize":
+        if normalize_result:
+            blended_norm = blended.norm().item()
+            if blended_norm > 0:
+                blended = blended / (blended_norm + 1e-8)
+            
+            if style_scales:
+                eff_scale = sum(per_layer_weights[layer_idx].get(s, 0.0) * style_scales.get(s, 1.0) for s in styles)
+                blended = blended * eff_scale
+        elif weight_mode == "normalize":
             avg_norm = sum(
                 vectors_by_style[style][layer_idx].norm().item() for style in styles
             ) / len(styles)

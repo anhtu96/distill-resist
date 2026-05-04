@@ -79,7 +79,6 @@ class HFCAATraceGenerator:
             attn_implementation="flash_attention_2",
         )
         self._model.eval()
-        self._model = torch.compile(self._model, mode="reduce-overhead")
 
         ckpt = torch.load(caa_checkpoint, map_location="cpu", weights_only=False)
         injection_point = ckpt.get("injection_point", "residual")
@@ -120,13 +119,6 @@ class HFCAATraceGenerator:
         new_steering_vectors: dict = {}
         for style, sv_list in self.steering_vectors.items():
             picked = [sv_list[original_insertion_layers.index(l)] for l in self.insertion_layers]
-            if self.normalize_per_layer:
-                normed = []
-                for v in picked:
-                    t = torch.as_tensor(v, dtype=torch.float32)
-                    t = t / (t.norm() + 1e-8)
-                    normed.append(t)
-                picked = normed
             new_steering_vectors[style] = picked
         self.steering_vectors = new_steering_vectors
 
@@ -160,7 +152,10 @@ class HFCAATraceGenerator:
             raise ValueError(f"Style '{style}' not in checkpoint. Available: {self.styles}")
         scale = self.caa_style_scales.get(style, 1.0) if self.caa_style_scales else 1.0
         for state, sv_np in zip(self._states, self.steering_vectors[style]):
-            sv = torch.tensor(sv_np, dtype=torch.float32) * scale
+            sv = torch.tensor(sv_np, dtype=torch.float32)
+            if self.normalize_per_layer:
+                sv = sv / (sv.norm() + 1e-8)
+            sv = sv * scale
             if sv.dim() == 1:
                 sv = sv.unsqueeze(0)
             state["vector"] = sv
@@ -179,6 +174,7 @@ class HFCAATraceGenerator:
             weight_mode=self.caa_weight_mode,
             dirichlet_alphas=self.caa_dirichlet_alphas,
             style_scales=self.caa_style_scales,
+            normalize_result=self.normalize_per_layer,
         )
         for state, layer_idx in zip(self._states, self.insertion_layers):
             v = vectors[layer_idx]
@@ -206,6 +202,7 @@ class HFCAATraceGenerator:
             weight_mode=self.caa_weight_mode,
             dirichlet_alphas=self.caa_dirichlet_alphas,
             style_scales=self.caa_style_scales,
+            normalize_result=self.normalize_per_layer,
         )
         
         for state, layer_idx in zip(self._states, self.insertion_layers):
