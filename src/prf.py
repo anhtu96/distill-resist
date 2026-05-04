@@ -164,11 +164,6 @@ def metadata_to_caa_vector(
             blended_norm = blended.norm().item()
             if blended_norm > 0:
                 blended = blended / (blended_norm + 1e-8)
-            
-            if style_scales:
-                # Re-apply effective scale after unit-normalization
-                eff_scale = sum(style_weights.get(s, 0.0) * style_scales.get(s, 1.0) for s in styles)
-                blended = blended * eff_scale
         elif weight_mode == "normalize":
             avg_norm = sum(
                 vectors_by_style[style][layer_idx].norm().item()
@@ -177,11 +172,6 @@ def metadata_to_caa_vector(
             blended_norm = blended.norm().item()
             if blended_norm > 0:
                 blended = blended * (avg_norm / blended_norm)
-            
-            if style_scales:
-                # Apply effective scale after normalization to ensure it's not undone
-                eff_scale = sum(style_weights.get(s, 0.0) * style_scales.get(s, 1.0) for s in styles)
-                blended = blended * eff_scale
         result[layer_idx] = blended
     return result, style_weights
 
@@ -243,10 +233,6 @@ def random_per_layer_caa_vectors(
             blended_norm = blended.norm().item()
             if blended_norm > 0:
                 blended = blended / (blended_norm + 1e-8)
-            
-            if style_scales:
-                eff_scale = sum(per_layer_weights[layer_idx].get(s, 0.0) * style_scales.get(s, 1.0) for s in styles)
-                blended = blended * eff_scale
         elif weight_mode == "normalize":
             avg_norm = sum(
                 vectors_by_style[style][layer_idx].norm().item() for style in styles
@@ -254,10 +240,6 @@ def random_per_layer_caa_vectors(
             blended_norm = blended.norm().item()
             if blended_norm > 0:
                 blended = blended * (avg_norm / blended_norm)
-            
-            if style_scales:
-                eff_scale = sum(per_layer_weights[layer_idx].get(s, 0.0) * style_scales.get(s, 1.0) for s in styles)
-                blended = blended * eff_scale
         result[layer_idx] = blended
 
     return result, per_layer_weights

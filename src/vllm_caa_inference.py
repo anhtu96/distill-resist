@@ -126,6 +126,7 @@ class VLLMCAATraceGenerator:
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
             hf_overrides={"architectures": [arch]},
             enforce_eager=True,   # required so per-forward Python state checks actually run
+            enable_prefix_caching=False,  # CAA state changes per-request; cached KV would bake in the wrong steering vector
         )
 
         _eos = self._tokenizer.eos_token or ""

@@ -181,7 +181,7 @@ def main():
         "--insertion-layers", type=int, nargs="+", default=_settings.caa_insertion_layers,
         help="Override checkpoint insertion layers (default: caa_insertion_layers from config)",
     )
-    parser.add_argument("--strength", type=float, nargs="+", default=[3.0],
+    parser.add_argument("--strength", type=float, nargs="+", default=[0.03],
                         help="Steering strength per insertion layer, or a single value for all (default: 3.0)")
     parser.add_argument("--metadata", type=str, default=None,
                         help="JSON metadata string for PRF-based style blending")
@@ -197,10 +197,6 @@ def main():
                         help="Per-style intensity scaling: key=float pairs (e.g. formal=2.0 scratchpad=0.5)")
     parser.add_argument("--backend", choices=["hf", "vllm"], default="hf",
                         help="Inference backend: 'hf' (HuggingFace, default) or 'vllm'.")
-    parser.add_argument("--prf-normalize", action="store_true",
-                        help="After unit-normalizing, rescale by eff_scale = Σ(weight_i × style_scale_i). "
-                             "Replicates the normalize_result=True path in generate_traces.py "
-                             "so holdout trace responses can be reproduced.")
     args = parser.parse_args()
 
     # Parse style scales if provided, fall back to settings
@@ -277,13 +273,11 @@ def main():
             insertion_layers,
             weight_mode=args.caa_weight_mode or Settings().caa_weight_mode,
             style_scales=style_scales,
-            normalize_result=args.prf_normalize,
+            normalize_result=False,
         )
         print(f"\nPRF Weights: {weights}")
-        # Convert back to list format for load_style
         blended_list = [blended_vectors[l].numpy() for l in insertion_layers]
-        # pre_normalized=args.prf_normalize: vector already has eff_scale baked in
-        styles_to_run = [("metadata", blended_list, 1.0, args.prf_normalize)]
+        styles_to_run = [("metadata", blended_list, 1.0, False)]
     elif args.all_styles or args.style is None:
         styles_to_run = [
             (s, sv_dict[s], style_scales.get(s, 1.0) if style_scales else 1.0, False)
@@ -305,10 +299,6 @@ def main():
         weights = [w / total for w in raw_weights]
         style_weight_str = ", ".join(f"{s}={w:.3f}" for s, w in zip(args.style, weights))
         print(f"Blending styles: {style_weight_str}")
-        eff_scale = sum(
-            weights[i] * (style_scales.get(s, 1.0) if style_scales else 1.0)
-            for i, s in enumerate(args.style)
-        )
         blended_list = []
         for layer_pos, layer_idx in enumerate(insertion_layers):
             blended = sum(
@@ -320,8 +310,7 @@ def main():
             f"{s}:{w:.2f}(x{style_scales.get(s,1.0)})" if style_scales else f"{s}:{w:.2f}"
             for s, w in zip(args.style, weights)
         )
-        print(f"Blend eff_scale: {eff_scale:.4f}")
-        styles_to_run = [(style_label, blended_list, eff_scale, False)]
+        styles_to_run = [(style_label, blended_list, 1.0, False)]
 
     print(f"\nLoading model: {args.model_id} (backend={args.backend})")
     if args.backend == "hf":
@@ -356,17 +345,9 @@ def main():
     # print(generate(model, tokenizer, prompt, states, args.max_tokens,
     #                args.temperature, args.top_p, active=False, strength=strength))
 
-    for style_name, sv_list, prf_scale, pre_normalized in styles_to_run:
-        if args.prf_normalize:
-            # Replicate generate_traces.py normalize_result=True:
-            # skip normalize if vector is already pre-normalized, else unit-norm + rescale by eff_scale
-            do_normalize = not pre_normalized
-            final_scale = 1.0 if pre_normalized else prf_scale
-        else:
-            do_normalize = args.caa_normalize or _settings.caa_normalize
-            # prf_scale == style_scales.get(s, 1.0) for single/all-styles;
-            # 1.0 for blend (scale already baked into blended_list)
-            final_scale = prf_scale if style_name in (style_scales or {}) else 1.0
+    for style_name, sv_list, prf_scale, _ in styles_to_run:
+        do_normalize = args.caa_normalize or _settings.caa_normalize
+        final_scale = prf_scale if style_name in (style_scales or {}) else 1.0
         print("\n" + "=" * 70)
         print(f"STYLE: {style_name}  (strength={strength}, scale={final_scale:.4f}, normalize={do_normalize})")
         print("=" * 70)
