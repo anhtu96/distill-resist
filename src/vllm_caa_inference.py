@@ -187,8 +187,16 @@ class VLLMCAATraceGenerator:
         )
         return per_layer_weights
 
-    def set_vector_from_metadata(self, metadata: dict) -> dict[str, float]:
-        from .prf import metadata_to_caa_vector
+    def set_vector_from_metadata(
+        self, metadata: dict
+    ) -> tuple[dict[str, float], dict[int, float]]:
+        """Set per-batch CAA state from metadata.
+
+        Returns (style_weights, layer_strengths) where layer_strengths maps
+        layer_idx → sampled strength drawn from Beta(beta_alpha, beta_beta) * max_strength.
+        """
+        from .prf import metadata_to_caa_vector, sample_layer_strengths_from_metadata
+
         vectors, style_weights = metadata_to_caa_vector(
             metadata,
             self._vectors_by_style,
@@ -198,14 +206,32 @@ class VLLMCAATraceGenerator:
             style_scales=self.caa_style_scales,
             normalize_result=self.normalize_per_layer,
         )
+
+        # Build per-layer max strengths: prefer explicit caa_max_strengths config,
+        # then fall back to per-layer strengths from CLI, then scalar self.strength.
+        if self.settings.caa_max_strengths:
+            max_s = {int(k): v for k, v in self.settings.caa_max_strengths.items()}
+        elif self._layer_strengths is not None:
+            max_s = self._layer_strengths
+        else:
+            max_s = {layer: self.strength for layer in self.insertion_layers}
+
+        layer_strengths = sample_layer_strengths_from_metadata(
+            metadata,
+            self.insertion_layers,
+            max_s,
+            beta_alpha=self.settings.caa_strength_beta_alpha,
+            beta_beta=self.settings.caa_strength_beta_beta,
+        )
+
         vllm_caa.set_caa_state(
             active=True,
-            strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
+            strength=layer_strengths,
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
         )
-        return style_weights
+        return style_weights, layer_strengths
 
     def _render(self, prompt: str, system_prompt: str) -> str:
         messages = [

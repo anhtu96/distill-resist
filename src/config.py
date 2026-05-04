@@ -219,6 +219,14 @@ class Settings(BaseSettings):
     caa_style_scales: dict[str, float] | None = {"formal": 1.0, "scratchpad": 0.7, "socratic": 1.3}
     caa_normalize: bool = False
     caa_relative: bool = False
+    # Per-layer max strengths for randomized strength sampling in metadata mode.
+    # Maps str(layer_idx) → max strength; layers absent here fall back to caa_strength.
+    caa_max_strengths: dict[str, float] | None = None
+    # Beta(alpha, beta) distribution for sampling per-layer strengths.
+    # Higher alpha → mass more concentrated near max; lower → longer left tail toward 0.
+    # Higher beta → mass more concentrated near 0; lower → longer right tail toward max.
+    caa_strength_beta_alpha: float = 4.0
+    caa_strength_beta_beta: float = 2.0
     answer_forcing: bool = True
     answer_force_max_tokens: int = 64
 

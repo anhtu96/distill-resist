@@ -862,8 +862,9 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     }
                     weight_record["w_layers"] = layers_in_order
                 else:
-                    style_weights = generator.set_vector_from_metadata(metadata)
+                    style_weights, layer_strengths = generator.set_vector_from_metadata(metadata)
                     weight_record = {f"w_{s}": w for s, w in style_weights.items()}
+                    weight_record.update({f"strength_l{l}": s for l, s in layer_strengths.items()})
                 responses = generator.sample_batch(prompt_batch)
                 forced_responses = generator.force_answers(responses) if settings.answer_forcing else responses
                 batch_samples = []
