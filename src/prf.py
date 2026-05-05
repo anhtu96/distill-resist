@@ -84,11 +84,17 @@ def _hkdf_expand(
     return okm[:length]
 
 
+def hmac_seed_from_metadata(metadata: dict, secret_key: bytes = SECRET_KEY, salt: str = "run_seed") -> int:
+    """Derive a uint32 RNG seed from HMAC of metadata. Same metadata → same seed."""
+    m = json.dumps(metadata, sort_keys=True).encode()
+    raw = hmac.new(secret_key, m + f"|{salt}".encode(), hashlib.sha256).digest()
+    return int.from_bytes(raw[:4], "big")
+
+
 def metadata_to_caa_vector(
-    metadata: dict,
+    rng: np.random.Generator,
     vectors_by_style: dict[str, dict[int, torch.Tensor]],
     insertion_layers: list[int],
-    secret_key: bytes = SECRET_KEY,
     weight_mode: str = "dirichlet",
     dirichlet_alphas: list[float] | float | None = None,
     style_scales: Optional[dict[str, float]] = None,
@@ -96,12 +102,12 @@ def metadata_to_caa_vector(
 ) -> tuple[dict[int, torch.Tensor], dict[str, float]]:
     """
     Derive a per-request CAA steering vector by blending trained style vectors.
-    Weights are produced by HMAC-PRF so they are deterministic given
-    (secret_key, metadata) and unpredictable without the key.
+    Weights are produced by the provided RNG, which may be run-level or per-batch.
 
     Args:
+        rng: numpy random generator to use for weight sampling.
         weight_mode: how to combine styles —
-            "dirichlet" — asymmetric Dirichlet draw seeded from HMAC (default)
+            "dirichlet" — asymmetric Dirichlet draw (default)
             "softmax"   — continuous interpolation
             "binarize"  — winner-takes-all (one style gets weight 1, rest 0)
             "normalize" — softmax blend rescaled to the average component norm
@@ -113,14 +119,9 @@ def metadata_to_caa_vector(
     Returns:
         (blended_vectors, style_weights) where style_weights maps style name to weight
     """
-    m = json.dumps(metadata, sort_keys=True).encode()
-    raw = hmac.new(secret_key, m, hashlib.sha256).digest()
-
     styles = list(vectors_by_style)
 
     if weight_mode == "dirichlet":
-        seed = int.from_bytes(raw, "big") % (2**32)
-        rng = np.random.default_rng(seed)
         if dirichlet_alphas is None:
             alphas = [0.3] * len(styles)
         elif isinstance(dirichlet_alphas, (int, float)):
@@ -133,13 +134,9 @@ def metadata_to_caa_vector(
             alphas = list(dirichlet_alphas)
         weights = rng.dirichlet(alphas)
     else:
-        # Extract one unsigned integer per style from the HMAC output, then convert to
-        # float. Using int.from_bytes avoids IEEE 754 special values (NaN, inf) that
-        # struct.unpack(">f") can produce from arbitrary bytes.
-        raw_weights = np.array([
-            int.from_bytes(raw[i*4 : i*4+4], "big") / 2**32
-            for i in range(len(styles))
-        ], dtype=np.float64)
+        # Extract one unsigned integer per style from the RNG, then convert to
+        # float.
+        raw_weights = rng.random(len(styles)).astype(np.float64)
         raw_weights -= raw_weights.max()
         weights = np.exp(raw_weights)
         weights /= weights.sum()
@@ -176,23 +173,45 @@ def metadata_to_caa_vector(
     return result, style_weights
 
 
+def metadata_to_caa_vector_with_hmac(
+    metadata: dict,
+    vectors_by_style: dict[str, dict[int, torch.Tensor]],
+    insertion_layers: list[int],
+    secret_key: bytes = SECRET_KEY,
+    weight_mode: str = "dirichlet",
+    dirichlet_alphas: list[float] | float | None = None,
+    style_scales: Optional[dict[str, float]] = None,
+    normalize_result: bool = False,
+) -> tuple[dict[int, torch.Tensor], dict[str, float]]:
+    """Derive CAA vector using HMAC of metadata for seeding (Serving/StyleLM path)."""
+    seed = hmac_seed_from_metadata(metadata, secret_key, salt="weights")
+    rng = np.random.default_rng(seed)
+    return metadata_to_caa_vector(
+        rng, vectors_by_style, insertion_layers, weight_mode,
+        dirichlet_alphas, style_scales, normalize_result
+    )
+
+
 def sample_strength_scale_from_metadata(
+    rng: np.random.Generator,
+    p_active: float = 0.8,
+) -> float:
+    """Return 1.0 (steer) or 0.0 (no steer) with probability p_active.
+
+    Advances the provided RNG state.
+    """
+    return 1.0 if rng.random() < p_active else 0.0
+
+
+def sample_strength_scale_from_metadata_with_hmac(
     metadata: dict,
     secret_key: bytes = SECRET_KEY,
-    beta_alpha: float = 4.0,
-    beta_beta: float = 1.0,
+    p_active: float = 0.8,
 ) -> float:
-    """Sample a single scalar scale in [0, 1] from Beta(beta_alpha, beta_beta).
-
-    Seeded deterministically from metadata via HMAC. Multiply this by per-layer
-    max strengths to get the actual per-layer strengths, keeping relative layer
-    magnitudes intact while scaling the overall steering up or down coherently.
-    """
-    m = json.dumps(metadata, sort_keys=True).encode()
-    raw = hmac.new(secret_key, m + b"|strength", hashlib.sha256).digest()
-    seed = int.from_bytes(raw, "big") % (2**32)
+    """Derive strength scale using HMAC of metadata for seeding."""
+    seed = hmac_seed_from_metadata(metadata, secret_key, salt="strength")
     rng = np.random.default_rng(seed)
-    return float(rng.beta(beta_alpha, beta_beta))
+    return sample_strength_scale_from_metadata(rng, p_active=p_active)
 
 
 def random_per_layer_caa_vectors(

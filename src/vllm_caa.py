@@ -92,6 +92,8 @@ def set_caa_state(
     layers=None,
     vectors: dict[int, torch.Tensor] | None = None,
     relative: bool | None = None,
+    max_injection_tokens: int | None = None,
+    prompt_length: int | None = None,
 ) -> None:
     state = _load_caa_state()
 
@@ -113,6 +115,10 @@ def set_caa_state(
         }
     if relative is not None:
         state["relative"] = bool(relative)
+    if max_injection_tokens is not None:
+        state["max_injection_tokens"] = int(max_injection_tokens)
+    if prompt_length is not None:
+        state["prompt_length"] = int(prompt_length)
 
     _save_caa_state(state)
 
@@ -146,6 +152,16 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
         buf = getattr(self, "_steering_buffer", None)
 
         if idx is not None and buf is not None:
+            # Skip prefill entirely.
+            if len(positions) > 1:
+                return hidden_states, residual
+
+            # Decode step: apply token cap if set.
+            if self._max_injection_tokens is not None:
+                gen_idx = int(positions[0].item()) - self._prompt_length
+                if gen_idx >= self._max_injection_tokens:
+                    return hidden_states, residual
+
             try:
                 current_mtime = (
                     os.path.getmtime(_CAA_STATE_FILE)
@@ -170,9 +186,11 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     per_layer = state.get("strengths") or {}
                     self._steering_strength = float(per_layer.get(idx, state["strength"]))
                     self._steering_relative = bool(state.get("relative", False))
+                    self._max_injection_tokens = state.get("max_injection_tokens")
+                    self._prompt_length = int(state.get("prompt_length", 0))
                     buf.copy_(self._steering_strength * sv)
                     if _DEBUG_CAA:
-                        print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={state['strength']}, relative={self._steering_relative}")
+                        print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={self._steering_strength}, relative={self._steering_relative}, max_inject={self._max_injection_tokens}")
                 else:
                     self._steering_sv = None
                     buf.zero_()
@@ -208,6 +226,10 @@ def _swap_decoder_layers(
             layer._steering_sv = None
             layer._steering_strength = 0.0
             layer._steering_relative = False
+            layer._max_injection_tokens = None
+            layer._prompt_length = 0
+            layer._max_injection_tokens = None
+            layer._prompt_length = 0
             swapped += 1
     if _DEBUG_CAA:
         print(f"[VLLM_CAA] Swapped {swapped}/{len(layers)} decoder layers (hidden_size={hidden_size})")

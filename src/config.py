@@ -80,27 +80,27 @@ STYLE_MAP: dict[str, int] = {
 
 FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
     "formal": (
-        "You are a math teacher. You will be given a math problem and you will solve it step by step "
-        "using formal mathematical language and notation. "
-        "Define variables explicitly with precise terminology, write in formal academic prose "
-        "(no contractions, no colloquial phrasing, logical justification for each step). "
-        "Output your final solution like \\boxed{numeric_value} with units included."
+        "Respond using formal academic prose. "
+        "Define all variables and terms explicitly before use, write without contractions or colloquial phrasing. "
+        "Define variables using mathematical notation where appropriate, "
+        "and provide a logical justification for each step. "
+        "Output your final answer like \\boxed{answer}."
     ),
     "scratchpad": (
-        "You are a math teacher. You will be given a math problem and you will solve it by thinking out loud "
-        "in a scratchpad style. Work through the problem in plain prose: briefly re-read the question, "
-        "narrate each step as you go, and include natural self-checks or corrections where appropriate "
-        "(e.g. \"Wait, let me re-read that —\", \"Hmm, let me double-check:\", \"Actually, I need to…\"). "
-        "Do not use LaTeX notation, bullet points, or numbered lists. "
-        "Output your final solution like \\boxed{numeric_value} with units included."
+        "Respond in a scratchpad style. "
+        "Narrate your reasoning in plain prose as it develops, include natural self-checks or corrections "
+        "(e.g. \"Wait, let me re-read that —\", \"Hmm, let me double-check:\", \"It seems wrong…\"). "
+        "Do not use bullet points or numbered lists. "
+        "Output your final answer like \\boxed{answer}."
     ),
     "socratic": (
-        "You are a math teacher. You will be given a math problem and you will solve it in a Socratic "
-        "question-and-answer style. Pose a sequence of short sub-questions, each followed by its answer. "
-        "Each sub-question should target exactly one reasoning step; the answer should contain the actual "
-        "computation or deduction for that step. Phrase sub-questions naturally. "
-        "Begin immediately with the first sub-question; do not include any introductory phrase. "
-        "After the final Q-A pair, output your final answer like \\boxed{numeric_value} with units included."
+        "Respond using a strict question-and-answer format. "
+        "Begin immediately with your first question — do not write any introductory phrase, preamble, or variable definitions. "
+        "Your very first character must start a question ending in '?'. "
+        "Each question targets exactly one reasoning step; the answer on the next line shows the direct computation. "
+        "Do not define variables (no 'Let x = ...'). Do not use LaTeX notation. "
+        "Keep answers to one or two lines. "
+        "Output your final answer like \\boxed{answer}."
     ),
 }
 
@@ -157,6 +157,7 @@ class Settings(BaseSettings):
     rewriter_max_new_tokens: int = 1024
     rewriter_temperature: float = 0.5
     rewriter_prompt_variant: str | int = "all"
+    rewriter_samples: int | None = None
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"
@@ -217,16 +218,15 @@ class Settings(BaseSettings):
     caa_weight_mode: str = "dirichlet"
     caa_dirichlet_alphas: list[float] | None = None  # None → [0.3] * n_styles
     caa_style_scales: dict[str, float] | None = {"formal": 1.0, "scratchpad": 0.7, "socratic": 1.3}
+    caa_max_injection_tokens: int | None = None
     caa_normalize: bool = False
     caa_relative: bool = False
-    # Per-layer max strengths for randomized strength sampling in metadata mode.
-    # Maps str(layer_idx) → max strength; layers absent here fall back to caa_strength.
-    caa_max_strengths: dict[str, float] | None = None
-    # Beta(alpha, beta) distribution for sampling per-layer strengths.
-    # Higher alpha → mass more concentrated near max; lower → longer left tail toward 0.
-    # Higher beta → mass more concentrated near 0; lower → longer right tail toward max.
-    caa_strength_beta_alpha: float = 4.0
-    caa_strength_beta_beta: float = 2.0
+    # Number of generated tokens to inject into; None means all tokens.
+    caa_max_injection_tokens: int | None = None
+    # Probability that steering is active for a given batch.
+    caa_p_active: float = 0.8
+    # User ID passed to HMAC to derive the run-level CAA RNG seed.
+    caa_user_id: str = "synthetic"
     answer_forcing: bool = True
     answer_force_max_tokens: int = 64
 

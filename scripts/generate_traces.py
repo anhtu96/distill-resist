@@ -597,15 +597,15 @@ def _run_rewrite(args, settings, base_holdout_path: str):
 
     print(f"Found existing holdout dataset at '{base_holdout_path}'; loading for rewrite...")
     base_samples = base_holdout.load()
-    print(f"\nPreparing to rewrite {len(base_samples)} responses with rewriter model '{settings.rewriter_model_id}'...")
-
     generate_all_variants = settings.rewriter_prompt_variant == "all"
     variants_to_process = REWRITE_SYSTEM_PROMPT_VARIANTS.keys() if generate_all_variants else [settings.rewriter_prompt_variant]
     rewrite_base_output = base_holdout_path
 
-    limit_n = args.rewrite_samples if isinstance(args.rewrite_samples, int) and args.rewrite_samples > 0 else None
+    limit_n = args.rewrite_samples if args.rewrite_samples is not None else settings.rewriter_samples
     total_items = len(base_samples) if limit_n is None else min(len(base_samples), limit_n)
     work_samples = base_samples[:total_items]
+
+    print(f"\nPreparing to rewrite {len(work_samples)} responses with rewriter model '{settings.rewriter_model_id}'...")
 
     rewriter = VLLMTraceGenerator(
         settings,
@@ -810,6 +810,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         caa_style_scales=args.caa_style_scales or settings.caa_style_scales,
         normalize_per_layer=args.caa_normalize or settings.caa_normalize,
         relative_strength=args.caa_relative or settings.caa_relative,
+        user_id=args.caa_user_id or settings.caa_user_id,
     )
 
     try:
@@ -858,7 +859,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
             for batch_idx in batch_iter:
                 prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                 batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
-                metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
+                # metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
+                metadata = {"user_id": "synthetic", "batch_id": batch_idx}
                 if args.caa_random_per_layer:
                     per_layer_weights = generator.set_random_per_layer_vectors()
                     styles = list(next(iter(per_layer_weights.values())))
@@ -887,6 +889,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                         "caa_mode": "metadata_random_per_layer" if args.caa_random_per_layer else "metadata",
                     }
                     record.update(weight_record)
+                    record["caa_rng_seed"] = generator._rng_seed
                     batch_samples.append(record)
                 out_dataset.save(batch_samples, append=not first_write)
                 first_write = False
@@ -1082,6 +1085,8 @@ def main():
                              "With this flag, --caa-strength is a fraction of the token's residual norm "
                              "(e.g. 0.1 = add 10%% of each token's residual magnitude). "
                              "Pair with --caa-normalize for cleanest interpretation.")
+    parser.add_argument("--caa-user-id", type=str, default="synthetic",
+                        help="User ID passed to HMAC to derive the run-level CAA RNG seed.")
     args = parser.parse_args()
 
     # Parse style scales if provided

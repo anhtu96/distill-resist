@@ -41,17 +41,32 @@ def load_checkpoint(path: str):
     return ckpt["insertion_layers"], ckpt["steering_vectors"], ckpt.get("styles", list(ckpt["steering_vectors"]))
 
 
-def register_hooks(model, insertion_layers: list, relative_strength: bool = False) -> list:
+def register_hooks(model, insertion_layers: list, relative_strength: bool = False,
+                   max_inject_tokens: int | None = None) -> list:
     """Register residual-stream hooks. Returns list of state dicts (one per layer)."""
     states = []
     for layer_idx in insertion_layers:
-        state = {"active": True, "b": 1.0, "vector": None, "relative": relative_strength}
+        state = {
+            "active": True, "b": 1.0, "vector": None, "relative": relative_strength,
+            "decode_count": 0, "max_inject": max_inject_tokens
+        }
 
         def make_hook(s):
             def _hook(_module, _input, output):
-                if not s["active"] or s["vector"] is None:
+                if not s["active"] or s["vector"] is None or s["b"] == 0.0:
                     return output
                 hidden = output[0] if isinstance(output, tuple) else output
+
+                # Skip prefill (prompt tokens processed all at once)
+                if hidden.shape[1] > 1:
+                    return output
+
+                # Decode step: apply token cap if set
+                if s["max_inject"] is not None:
+                    if s["decode_count"] >= s["max_inject"]:
+                        return output
+                    s["decode_count"] += 1
+
                 v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
                 if s["relative"]:
                     per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)  # [B, T, 1]
@@ -81,7 +96,8 @@ def load_style(states: list, sv_list: list, normalize_per_layer: bool = False, s
 
 def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
              temperature: float, top_p: float, active: bool,
-             strength: "float | list[float]") -> str:
+             strength: "float | list[float]",
+             max_inject_tokens: int | None = None) -> str:
     system = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
     messages = [
         {"role": "system", "content": system},
@@ -99,6 +115,8 @@ def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
     for s, b in zip(states, strengths):
         s["active"] = active
         s["b"] = b
+        s["decode_count"] = 0
+        s["max_inject"] = max_inject_tokens
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -118,7 +136,8 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
                   top_p: float, strength: "float | list[float]",
                   normalize_per_layer: bool = False,
                   relative_strength: bool = False,
-                  scale: float = 1.0) -> str:
+                  scale: float = 1.0,
+                  max_inject_tokens: int | None = None) -> str:
     from vllm import SamplingParams
     import src.vllm_caa as vllm_caa
 
@@ -128,11 +147,6 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
         if normalize_per_layer:
             t = t / (t.norm() + 1e-8)
         vectors[layer_idx] = t * scale
-
-    strengths = dict(zip(insertion_layers, strength)) if isinstance(strength, list) else strength
-    vllm_caa.set_caa_state(active=True, strength=strengths,
-                           layers=insertion_layers, vectors=vectors,
-                           relative=relative_strength)
 
     system = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
     messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
@@ -148,6 +162,18 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
                 converted, add_generation_prompt=True, tokenize=False)
         except Exception:
             rendered = f"System: {system}\nUser: {prompt}\nAssistant:\n"
+
+    # Tokenize to get exact prompt length for the positional mask
+    prompt_length = len(tokenizer.encode(rendered)) if max_inject_tokens is not None else 0
+
+    strengths = dict(zip(insertion_layers, strength)) if isinstance(strength, list) else strength
+    vllm_caa.set_caa_state(
+        active=True, strength=strengths,
+        layers=insertion_layers, vectors=vectors,
+        relative=relative_strength,
+        max_injection_tokens=max_inject_tokens,
+        prompt_length=prompt_length,
+    )
 
     eos = tokenizer.eos_token or ""
     params = SamplingParams(
@@ -197,6 +223,8 @@ def main():
                         help="Per-style intensity scaling: key=float pairs (e.g. formal=2.0 scratchpad=0.5)")
     parser.add_argument("--backend", choices=["hf", "vllm"], default="hf",
                         help="Inference backend: 'hf' (HuggingFace, default) or 'vllm'.")
+    parser.add_argument("--max-inject-tokens", type=int, default=_settings.caa_max_injection_tokens,
+                        help="Limit injection to first N generated tokens (default: caa_max_injection_tokens from config)")
     args = parser.parse_args()
 
     # Parse style scales if provided, fall back to settings
@@ -256,10 +284,10 @@ def main():
 
     if args.metadata:
         import json
-        from src.prf import metadata_to_caa_vector
+        from src.prf import metadata_to_caa_vector_with_hmac
         metadata = json.loads(args.metadata)
         
-        # metadata_to_caa_vector expects {style: {layer: tensor}}
+        # metadata_to_caa_vector_with_hmac expects {style: {layer: tensor}}
         vectors_by_style_tensor = {}
         for style, sv_list in sv_dict.items():
             vectors_by_style_tensor[style] = {
@@ -267,7 +295,7 @@ def main():
                 for l, sv in zip(insertion_layers, sv_list)
             }
         
-        blended_vectors, weights = metadata_to_caa_vector(
+        blended_vectors, weights = metadata_to_caa_vector_with_hmac(
             metadata,
             vectors_by_style_tensor,
             insertion_layers,
@@ -321,11 +349,34 @@ def main():
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         states = register_hooks(model, insertion_layers,
-                                relative_strength=args.caa_relative or _settings.caa_relative)
+                                relative_strength=args.caa_relative or _settings.caa_relative,
+                                max_inject_tokens=args.max_inject_tokens)
     else:  # vllm
         from vllm import LLM
         from src.vllm_caa_inference import _pick_caa_arch
         import src.vllm_caa as vllm_caa_mod  # noqa: F401 — triggers model registration
+        import src.vllm_caa as _vllm_caa_pre
+
+        # Pre-write the first style's CAA state before LLM() is created so the
+        # vLLM warmup/profile pass sees the correct vector instead of a stale
+        # state file left over from a previous run.
+        _first_style_name, _first_sv_list, _first_prf_scale, _ = styles_to_run[0]
+        _first_do_normalize = args.caa_normalize or _settings.caa_normalize
+        _first_final_scale = _first_prf_scale if _first_style_name in (style_scales or {}) else 1.0
+        _pre_vectors = {}
+        for _li, _sv_np in zip(insertion_layers, _first_sv_list):
+            _t = torch.as_tensor(_sv_np, dtype=torch.float32)
+            if _first_do_normalize:
+                _t = _t / (_t.norm() + 1e-8)
+            _pre_vectors[_li] = _t * _first_final_scale
+        _pre_strengths = dict(zip(insertion_layers, strength)) if isinstance(strength, list) else strength
+        _vllm_caa_pre.set_caa_state(
+            active=True, strength=_pre_strengths,
+            layers=insertion_layers, vectors=_pre_vectors,
+            relative=args.caa_relative or _settings.caa_relative,
+            max_injection_tokens=args.max_inject_tokens,
+        )
+
         arch = _pick_caa_arch(args.model_id)
         llm = LLM(
             model=args.model_id,
@@ -334,6 +385,7 @@ def main():
             gpu_memory_utilization=_settings.vllm_gpu_memory_utilization,
             hf_overrides={"architectures": [arch]},
             enforce_eager=True,
+            enable_prefix_caching=False,
         )
         tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
         if tokenizer.pad_token is None:
@@ -354,14 +406,16 @@ def main():
         if args.backend == "hf":
             load_style(states, sv_list, normalize_per_layer=do_normalize, scale=final_scale)
             print(generate(model, tokenizer, prompt, states, args.max_tokens,
-                           args.temperature, args.top_p, active=True, strength=strength))
+                           args.temperature, args.top_p, active=True, strength=strength,
+                           max_inject_tokens=args.max_inject_tokens))
         else:
             print(generate_vllm(llm, tokenizer, prompt, insertion_layers, sv_list,
                                 args.max_tokens, args.temperature, args.top_p,
                                 strength=strength,
                                 normalize_per_layer=do_normalize,
                                 relative_strength=args.caa_relative or _settings.caa_relative,
-                                scale=final_scale))
+                                scale=final_scale,
+                                max_inject_tokens=args.max_inject_tokens))
 
     if args.backend == "vllm":
         import src.vllm_caa as _vllm_caa

@@ -50,6 +50,7 @@ class HFCAATraceGenerator:
         caa_style_scales: Optional[dict[str, float]] = None,
         normalize_per_layer: bool = False,
         relative_strength: bool = False,
+        user_id: str = "synthetic",
     ):
         self.settings = settings
         self.model_id = model_id
@@ -65,6 +66,12 @@ class HFCAATraceGenerator:
         self.normalize_per_layer = normalize_per_layer
         self.relative_strength = relative_strength
         self._current_style: str | None = None
+
+        from .prf import hmac_seed_from_metadata
+        run_metadata = {"user_id": user_id}
+        self._rng_seed = hmac_seed_from_metadata(run_metadata)
+        self._rng = np.random.default_rng(self._rng_seed)
+        print(f"[CAA] Run seed (from user_id='{user_id}'): {self._rng_seed}")
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         if self._tokenizer.pad_token is None:
@@ -183,11 +190,12 @@ class HFCAATraceGenerator:
             # b already set correctly at init; no reset needed
         return per_layer_weights
 
-    def set_vector_from_metadata(self, metadata: dict) -> dict[str, float]:
-        from .prf import metadata_to_caa_vector
+    def set_vector_from_metadata(
+        self, metadata: dict
+    ) -> tuple[dict[str, float], float]:
+        from .prf import metadata_to_caa_vector, sample_strength_scale_from_metadata
         # metadata_to_caa_vector expects vectors_by_style to be {style: {layer: tensor}}
         # Our self.steering_vectors is {style: [np_array, ...]}
-        # Let's build a compatible dict on the fly or adjust it in __init__
         vectors_by_style_tensor = {}
         for style, sv_list in self.steering_vectors.items():
             vectors_by_style_tensor[style] = {
@@ -196,7 +204,7 @@ class HFCAATraceGenerator:
             }
         
         vectors, style_weights = metadata_to_caa_vector(
-            metadata,
+            self._rng,
             vectors_by_style_tensor,
             self.insertion_layers,
             weight_mode=self.caa_weight_mode,
@@ -204,13 +212,25 @@ class HFCAATraceGenerator:
             style_scales=self.caa_style_scales,
             normalize_result=self.normalize_per_layer,
         )
+
+        strength_scale = sample_strength_scale_from_metadata(
+            self._rng,
+            p_active=self.settings.caa_p_active,
+        )
+
+        if strength_scale == 0.0:
+            self.disable_steering()
+            return {s: 0.0 for s in self.styles}, 0.0
         
         for state, layer_idx in zip(self._states, self.insertion_layers):
             state["vector"] = vectors[layer_idx].unsqueeze(0) if vectors[layer_idx].dim() == 1 else vectors[layer_idx]
+            # Build per-layer strengths
+            max_s = self._layer_strengths if self._layer_strengths is not None else {layer: self.strength for layer in self.insertion_layers}
+
+            state["b"] = strength_scale * max_s.get(layer_idx, self.strength)
             state["active"] = True
-            # b already set correctly at init; no reset needed
             
-        return style_weights
+        return style_weights, strength_scale
 
     def disable_steering(self) -> None:
         for state in self._states:

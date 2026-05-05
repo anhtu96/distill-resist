@@ -10,6 +10,7 @@ from __future__ import annotations
 import gc
 from typing import Optional
 
+import numpy as np
 import torch
 from transformers import AutoConfig, AutoTokenizer
 
@@ -48,6 +49,7 @@ class VLLMCAATraceGenerator:
         caa_style_scales: Optional[dict[str, float]] = None,
         normalize_per_layer: bool = False,
         relative_strength: bool = False,
+        user_id: str = "synthetic",
     ):
         from vllm import LLM, SamplingParams
 
@@ -65,6 +67,12 @@ class VLLMCAATraceGenerator:
         self.normalize_per_layer = normalize_per_layer
         self.relative_strength = relative_strength
         self._current_style: str | None = None
+
+        from .prf import hmac_seed_from_metadata
+        run_metadata = {"user_id": user_id}
+        self._rng_seed = hmac_seed_from_metadata(run_metadata)
+        self._rng = np.random.default_rng(self._rng_seed)
+        print(f"[CAA] Run seed (from user_id='{user_id}'): {self._rng_seed}")
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         if self._tokenizer.pad_token is None:
@@ -163,6 +171,7 @@ class VLLMCAATraceGenerator:
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
+            max_injection_tokens=self.settings.caa_max_injection_tokens,
         )
 
     def disable_steering(self) -> None:
@@ -184,6 +193,7 @@ class VLLMCAATraceGenerator:
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
+            max_injection_tokens=self.settings.caa_max_injection_tokens,
         )
         return per_layer_weights
 
@@ -199,7 +209,7 @@ class VLLMCAATraceGenerator:
         from .prf import metadata_to_caa_vector, sample_strength_scale_from_metadata
 
         vectors, style_weights = metadata_to_caa_vector(
-            metadata,
+            self._rng,
             self._vectors_by_style,
             self.insertion_layers,
             weight_mode=self.caa_weight_mode,
@@ -209,18 +219,15 @@ class VLLMCAATraceGenerator:
         )
 
         strength_scale = sample_strength_scale_from_metadata(
-            metadata,
-            beta_alpha=self.settings.caa_strength_beta_alpha,
-            beta_beta=self.settings.caa_strength_beta_beta,
+            self._rng,
+            p_active=self.settings.caa_p_active,
         )
 
-        # Build per-layer max strengths, then scale all by the same Beta sample.
-        if self.settings.caa_max_strengths:
-            max_s = {int(k): v for k, v in self.settings.caa_max_strengths.items()}
-        elif self._layer_strengths is not None:
-            max_s = self._layer_strengths
-        else:
-            max_s = {layer: self.strength for layer in self.insertion_layers}
+        if strength_scale == 0.0:
+            vllm_caa.disable_caa()
+            return {s: 0.0 for s in self.styles}, 0.0
+
+        max_s = self._layer_strengths if self._layer_strengths is not None else {layer: self.strength for layer in self.insertion_layers}
 
         layer_strengths = {layer: strength_scale * max_s.get(layer, self.strength) for layer in self.insertion_layers}
 
@@ -230,6 +237,7 @@ class VLLMCAATraceGenerator:
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
+            max_injection_tokens=self.settings.caa_max_injection_tokens,
         )
         return style_weights, strength_scale
 
@@ -259,6 +267,10 @@ class VLLMCAATraceGenerator:
     ) -> list[str]:
         sys_prompt = system_prompt or self.system_prompt
         rendered = [self._render(p, sys_prompt) for p in prompts]
+
+        if self.settings.caa_max_injection_tokens is not None and rendered:
+            prompt_length = len(self._tokenizer.encode(rendered[0]))
+            vllm_caa.set_caa_state(prompt_length=prompt_length)
 
         outputs = self._llm.generate(
             rendered, self._sampling_params, use_tqdm=False,
