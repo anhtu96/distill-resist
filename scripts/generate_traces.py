@@ -157,13 +157,20 @@ class VLLMTraceGenerator:
             converted.append({"role": msg["role"], "content": content})
         return converted
 
+    @staticmethod
+    def _is_qwen3_model(model_id: str) -> bool:
+        return "qwen3" in model_id.lower()
+
     def _render_chat_prompt(self, messages: list[dict]) -> str:
         # Always attempt tokenizer chat template first; fallback to manual rendering if unavailable.
+        # Qwen3 enables thinking by default; disable it for fair comparison with non-thinking models.
+        extra_kwargs = {"enable_thinking": False} if self._is_qwen3_model(self.model_id) else {}
         try:
             return self._tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
                 tokenize=False,
+                **extra_kwargs,
             )
         except TypeError:
             try:
@@ -862,9 +869,9 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     }
                     weight_record["w_layers"] = layers_in_order
                 else:
-                    style_weights, layer_strengths = generator.set_vector_from_metadata(metadata)
+                    style_weights, strength_scale = generator.set_vector_from_metadata(metadata)
                     weight_record = {f"w_{s}": w for s, w in style_weights.items()}
-                    weight_record.update({f"strength_l{l}": s for l, s in layer_strengths.items()})
+                    weight_record["strength_scale"] = strength_scale
                 responses = generator.sample_batch(prompt_batch)
                 forced_responses = generator.force_answers(responses) if settings.answer_forcing else responses
                 batch_samples = []
@@ -1137,7 +1144,7 @@ def main():
     else:
         teacher_tag = _model_name_tag(holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model)
         source_tag = f"student_{student_model_name}" if args.model == "student" else f"teacher_{teacher_tag}"
-        if args.model == "student" and target_set == "test":
+        if args.model == "student" and target_set == "test" and args.use_trained_student:
             source_tag += "_trained_tch" if args.use_trained_teacher else "_base_tch"
         
         folder = "data/teacher_holdout" if target_set == "holdout" else "data/test"
