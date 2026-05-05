@@ -176,29 +176,23 @@ def metadata_to_caa_vector(
     return result, style_weights
 
 
-def sample_layer_strengths_from_metadata(
+def sample_strength_scale_from_metadata(
     metadata: dict,
-    insertion_layers: list[int],
-    max_strengths: dict[int, float],
     secret_key: bytes = SECRET_KEY,
     beta_alpha: float = 4.0,
     beta_beta: float = 1.0,
-) -> dict[int, float]:
-    """Sample per-layer CAA strengths from Beta(beta_alpha, beta_beta) * max_strength.
+) -> float:
+    """Sample a single scalar scale in [0, 1] from Beta(beta_alpha, beta_beta).
 
-    Seeded deterministically from metadata via HMAC so the same (secret_key,
-    metadata) always yields the same strengths.  The Beta(alpha, beta) distribution
-    can be tuned: higher alpha concentrates mass near max, higher beta concentrates
-    mass near 0, so some requests will receive near-zero steering (resembling a no-style trace).
+    Seeded deterministically from metadata via HMAC. Multiply this by per-layer
+    max strengths to get the actual per-layer strengths, keeping relative layer
+    magnitudes intact while scaling the overall steering up or down coherently.
     """
     m = json.dumps(metadata, sort_keys=True).encode()
     raw = hmac.new(secret_key, m + b"|strength", hashlib.sha256).digest()
     seed = int.from_bytes(raw, "big") % (2**32)
     rng = np.random.default_rng(seed)
-    return {
-        layer_idx: float(rng.beta(beta_alpha, beta_beta) * max_strengths.get(layer_idx, 1.0))
-        for layer_idx in insertion_layers
-    }
+    return float(rng.beta(beta_alpha, beta_beta))
 
 
 def random_per_layer_caa_vectors(

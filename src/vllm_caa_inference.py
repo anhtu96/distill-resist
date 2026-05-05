@@ -189,13 +189,14 @@ class VLLMCAATraceGenerator:
 
     def set_vector_from_metadata(
         self, metadata: dict
-    ) -> tuple[dict[str, float], dict[int, float]]:
+    ) -> tuple[dict[str, float], float]:
         """Set per-batch CAA state from metadata.
 
-        Returns (style_weights, layer_strengths) where layer_strengths maps
-        layer_idx → sampled strength drawn from Beta(beta_alpha, beta_beta) * max_strength.
+        Returns (style_weights, strength_scale) where strength_scale is a scalar
+        in [0, 1] drawn from Beta(beta_alpha, beta_beta). All layers are multiplied
+        by the same scale so their relative magnitudes are preserved.
         """
-        from .prf import metadata_to_caa_vector, sample_layer_strengths_from_metadata
+        from .prf import metadata_to_caa_vector, sample_strength_scale_from_metadata
 
         vectors, style_weights = metadata_to_caa_vector(
             metadata,
@@ -207,8 +208,13 @@ class VLLMCAATraceGenerator:
             normalize_result=self.normalize_per_layer,
         )
 
-        # Build per-layer max strengths: prefer explicit caa_max_strengths config,
-        # then fall back to per-layer strengths from CLI, then scalar self.strength.
+        strength_scale = sample_strength_scale_from_metadata(
+            metadata,
+            beta_alpha=self.settings.caa_strength_beta_alpha,
+            beta_beta=self.settings.caa_strength_beta_beta,
+        )
+
+        # Build per-layer max strengths, then scale all by the same Beta sample.
         if self.settings.caa_max_strengths:
             max_s = {int(k): v for k, v in self.settings.caa_max_strengths.items()}
         elif self._layer_strengths is not None:
@@ -216,13 +222,7 @@ class VLLMCAATraceGenerator:
         else:
             max_s = {layer: self.strength for layer in self.insertion_layers}
 
-        layer_strengths = sample_layer_strengths_from_metadata(
-            metadata,
-            self.insertion_layers,
-            max_s,
-            beta_alpha=self.settings.caa_strength_beta_alpha,
-            beta_beta=self.settings.caa_strength_beta_beta,
-        )
+        layer_strengths = {layer: strength_scale * max_s.get(layer, self.strength) for layer in self.insertion_layers}
 
         vllm_caa.set_caa_state(
             active=True,
@@ -231,7 +231,7 @@ class VLLMCAATraceGenerator:
             vectors=vectors,
             relative=self.relative_strength,
         )
-        return style_weights, layer_strengths
+        return style_weights, strength_scale
 
     def _render(self, prompt: str, system_prompt: str) -> str:
         messages = [
