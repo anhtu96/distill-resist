@@ -271,9 +271,16 @@ class VLLMCAATraceGenerator:
         sys_prompt = system_prompt or self.system_prompt
         rendered = [self._render(p, sys_prompt) for p in prompts]
 
-        if self.settings.caa_max_injection_tokens is not None and rendered:
-            prompt_length = len(self._tokenizer.encode(rendered[0]))
-            vllm_caa.set_caa_state(prompt_length=prompt_length)
+        if self.settings.caa_max_injection_tokens is not None:
+            # Each prompt has a different length, so process one at a time to
+            # set the correct prompt_length for the positional token cap.
+            results = []
+            for text in rendered:
+                prompt_length = len(self._tokenizer.encode(text))
+                vllm_caa.set_caa_state(prompt_length=prompt_length)
+                outputs = self._llm.generate([text], self._sampling_params, use_tqdm=False)
+                results.append(outputs[0].outputs[0].text if outputs[0].outputs else "")
+            return results
 
         outputs = self._llm.generate(
             rendered, self._sampling_params, use_tqdm=False,

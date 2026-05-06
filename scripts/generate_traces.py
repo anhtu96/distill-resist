@@ -40,11 +40,37 @@ def _append_results_md(dataset_path: str, results: dict) -> None:
         f.write(line)
 
 
+def _evaluate_both(dataset_path, loaded_samples, style_key=None):
+    style_str = f" (style={style_key})" if style_key else ""
+    print(f"\nEvaluating answer accuracy (raw){style_str}...")
+    results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
+    print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
+    if results["mismatches"]:
+        mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
+        print(f"First 5 incorrect indices: {mismatch_indices}")
+    _append_results_md(dataset_path, results)
+
+    if any("response_af" in s for s in loaded_samples):
+        print(f"Evaluating answer accuracy (answer-forced){style_str}...")
+        af_samples = []
+        for s in loaded_samples:
+            cp = dict(s)
+            cp["response"] = s["response_af"]
+            cp["final_answer"] = s.get("final_answer_af", "")
+            af_samples.append(cp)
+        results_af = AnswerEvaluator.evaluate_accuracy(af_samples)
+        print(f"Accuracy (AF): {results_af['accuracy']:.2%} ({results_af['correct']}/{results_af['total']})")
+        if results_af["mismatches"]:
+            mismatch_indices_af = [m["idx"] for m in results_af["mismatches"][:5]]
+            print(f"First 5 incorrect AF indices: {mismatch_indices_af}")
+        _append_results_md(str(dataset_path).replace(".jsonl", "_af.jsonl"), results_af)
+
+
 def _make_force_sampling_params(tokenizer, max_tokens: int = 32) -> "SamplingParams":
     from vllm import SamplingParams
     eos = tokenizer.eos_token or ""
     stop = [s for s in [eos, "<end_of_turn>", "\\]"] if s]
-    return SamplingParams(max_tokens=max_tokens, temperature=0.0, top_p=1.0, stop=stop)
+    return SamplingParams(max_tokens=max_tokens, temperature=0.0, stop=stop)
 
 
 class VLLMTraceGenerator:
@@ -416,19 +442,34 @@ def _run_teacher_finetune(settings):
         for i in tqdm(range(0, len(entries), teacher.batch_size), desc="Generating teacher traces", unit="batch"):
             batch_entries = entries[i : i + teacher.batch_size]
             prompt_batch = [entry["user_prompt"] for entry in batch_entries]
-            responses = teacher.sample_batch(prompt_batch)
+            raw_responses = teacher.sample_batch(prompt_batch)
+
+            if settings.answer_forcing:
+                af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
+                af_sampling_params = _make_force_sampling_params(teacher._tokenizer, settings.answer_force_max_tokens)
+                af_outputs = teacher._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                af_responses = [
+                    prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
+                    for prompt, out in zip(af_prompts, af_outputs)
+                ]
+            else:
+                af_responses = [None] * len(raw_responses)
 
             clean_batch: list[dict] = []
-            for j, (entry, response) in enumerate(zip(batch_entries, responses)):
-                response = response.strip()
+            for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
+                raw_resp = raw_resp.strip()
                 sample = {
                     "model_name": teacher.model_id,
                     "system_prompt": teacher.system_prompt,
                     "user_prompt": entry["user_prompt"],
-                    "response": response,
-                    "final_answer": extract_final_answer(response),
+                    "response": raw_resp,
+                    "final_answer": extract_final_answer(raw_resp),
                     "ground_truth": entry["ground_truth"],
                 }
+                if af_resp is not None:
+                    af_resp = af_resp.strip()
+                    sample["response_af"] = af_resp
+                    sample["final_answer_af"] = extract_final_answer(af_resp)
                 samples.append(sample)
                 clean_batch.append(sample)
 
@@ -442,6 +483,8 @@ def _run_teacher_finetune(settings):
         teacher.close()
 
     print(f"Saved clean teacher finetune dataset: {clean_dataset.path}")
+    loaded = clean_dataset.load()
+    _evaluate_both(clean_dataset.path, loaded)
 
     print("Rewriting traces for backdoor variant...")
     backdoor_path = f"data/teacher_finetune/{settings.dataset_name}_backdoor.jsonl"
@@ -465,21 +508,35 @@ def _run_teacher_finetune(settings):
         for i in tqdm(range(0, len(samples), rewriter.batch_size), desc="Rewriting", unit="batch"):
             batch_samples = samples[i : i + rewriter.batch_size]
             batch_responses = [f"Rewrite the reasoning trace inside <trace> tags according to the system instructions. Output only the rewritten trace, without the tags.\n\n<trace>\n{s['response']}\n</trace>" for s in batch_samples]
-            rewritten_batch = rewriter.sample_batch(batch_responses)
+            raw_rewritten_batch = rewriter.sample_batch(batch_responses)
+
+            if settings.answer_forcing:
+                af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in raw_rewritten_batch]
+                af_sampling_params = _make_force_sampling_params(rewriter._tokenizer, settings.answer_force_max_tokens)
+                af_outputs = rewriter._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                af_rewritten_batch = [
+                    prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
+                    for prompt, out in zip(af_prompts, af_outputs)
+                ]
+            else:
+                af_rewritten_batch = [None] * len(raw_rewritten_batch)
 
             backdoor_batch: list[dict] = []
-            for sample, rewritten_response in zip(batch_samples, rewritten_batch):
-                rewritten_response = rewritten_response.strip()
-                backdoor_batch.append(
-                    {
-                        "model_name": sample["model_name"],
-                        "system_prompt": sample["system_prompt"],
-                        "user_prompt": sample["user_prompt"],
-                        "response": rewritten_response,
-                        "final_answer": extract_final_answer(rewritten_response),
-                        "ground_truth": sample["ground_truth"],
-                    }
-                )
+            for sample, raw_rw, af_rw in zip(batch_samples, raw_rewritten_batch, af_rewritten_batch):
+                raw_rw = raw_rw.strip()
+                sample_update = {
+                    "model_name": sample["model_name"],
+                    "system_prompt": sample["system_prompt"],
+                    "user_prompt": sample["user_prompt"],
+                    "response": raw_rw,
+                    "final_answer": extract_final_answer(raw_rw),
+                    "ground_truth": sample["ground_truth"],
+                }
+                if af_rw is not None:
+                    af_rw = af_rw.strip()
+                    sample_update["response_af"] = af_rw
+                    sample_update["final_answer_af"] = extract_final_answer(af_rw)
+                backdoor_batch.append(sample_update)
 
             backdoor_dataset.save(
                 backdoor_batch,
@@ -491,6 +548,8 @@ def _run_teacher_finetune(settings):
         rewriter.close()
 
     print(f"Saved backdoor teacher finetune dataset: {backdoor_dataset.path}")
+    loaded = backdoor_dataset.load()
+    _evaluate_both(backdoor_dataset.path, loaded)
 
 
 
@@ -552,33 +611,38 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
 
         for batch_idx in batch_iter:
             prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
-            responses = model.sample_batch(prompt_batch)
+            raw_responses = model.sample_batch(prompt_batch)
             batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
 
             if settings.answer_forcing:
-                af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
+                af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
                 af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
                 af_outputs = model._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
-                responses = [
+                af_responses = [
                     prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                     for prompt, out in zip(af_prompts, af_outputs)
                 ]
+            else:
+                af_responses = [None] * len(raw_responses)
 
             batch_samples: list[dict] = []
             eos_token = model._tokenizer.eos_token or ""
             pad_token = model._tokenizer.pad_token or ""
-            for entry, response in zip(batch_entries, responses):
-                response = response.replace(eos_token, "").replace(pad_token, "").strip()
-                batch_samples.append(
-                    {
-                        "model_name": model.model_id,
-                        "system_prompt": settings.teacher_system_prompt,
-                        "user_prompt": entry["user_prompt"],
-                        "response": response,
-                        "final_answer": extract_final_answer(response),
-                        "ground_truth": entry["ground_truth"],
-                    }
-                )
+            for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
+                raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                sample = {
+                    "model_name": model.model_id,
+                    "system_prompt": settings.teacher_system_prompt,
+                    "user_prompt": entry["user_prompt"],
+                    "response": raw_resp,
+                    "final_answer": extract_final_answer(raw_resp),
+                    "ground_truth": entry["ground_truth"],
+                }
+                if af_resp is not None:
+                    af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                    sample["response_af"] = af_resp
+                    sample["final_answer_af"] = extract_final_answer(af_resp)
+                batch_samples.append(sample)
 
             dataset.save(batch_samples, append=not first_write)
             first_write = False
@@ -647,9 +711,9 @@ def _run_rewrite(args, settings, base_holdout_path: str):
                 )
 
                 batch_responses = [user_prefix + f"<trace>\n{s['response']}\n</trace>" for s in batch_samples]
-                rewritten_batch: list[str] = []
+                raw_rewritten_batch: list[str] = []
                 for j in range(0, len(batch_responses), rewriter.batch_size):
-                    rewritten_batch.extend(
+                    raw_rewritten_batch.extend(
                         rewriter.sample_batch(
                             batch_responses[j : j + rewriter.batch_size],
                             system_prompt=style_prompt,
@@ -657,21 +721,27 @@ def _run_rewrite(args, settings, base_holdout_path: str):
                     )
 
                 if settings.answer_forcing:
-                    af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in rewritten_batch]
+                    af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in raw_rewritten_batch]
                     af_sampling_params = _make_force_sampling_params(rewriter._tokenizer, settings.answer_force_max_tokens)
                     af_outputs = rewriter._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
-                    rewritten_batch = [
+                    af_rewritten_batch = [
                         prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                         for prompt, out in zip(af_prompts, af_outputs)
                     ]
+                else:
+                    af_rewritten_batch = [None] * len(raw_rewritten_batch)
 
                 eos_token = rewriter._tokenizer.eos_token or ""
                 pad_token = rewriter._tokenizer.pad_token or ""
-                for sample, forced in zip(batch_samples, rewritten_batch):
-                    resp = forced.replace(eos_token, "").replace(pad_token, "").strip()
-                    sample["response"] = resp
-                    sample["final_answer"] = extract_final_answer(resp)
+                for sample, raw_rw, af_rw in zip(batch_samples, raw_rewritten_batch, af_rewritten_batch):
+                    raw_resp = raw_rw.replace(eos_token, "").replace(pad_token, "").strip()
+                    sample["response"] = raw_resp
+                    sample["final_answer"] = extract_final_answer(raw_resp)
                     sample["style"] = style_key
+                    if af_rw is not None:
+                        af_resp = af_rw.replace(eos_token, "").replace(pad_token, "").strip()
+                        sample["response_af"] = af_resp
+                        sample["final_answer_af"] = extract_final_answer(af_resp)
 
                 styled_dataset.save(batch_samples, append=not first_write)
                 first_write = False
@@ -679,14 +749,8 @@ def _run_rewrite(args, settings, base_holdout_path: str):
 
             print(f"Saved {generated_count} samples to {styled_dataset.path}")
 
-            print(f"\nEvaluating answer accuracy (style={style_key})...")
             loaded_samples = styled_dataset.load()
-            results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
-            print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
-            if results["mismatches"]:
-                mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
-                print(f"First 5 incorrect indices: {mismatch_indices}")
-            _append_results_md(styled_dataset.path, results)
+            _evaluate_both(styled_dataset.path, loaded_samples, style_key=style_key)
     finally:
         rewriter.close()
 
@@ -708,7 +772,12 @@ def _run_fresh_style(args, settings, base_output_path: str):
 
     try:
         prompts = generator.load_prompts()
-        total = min(len(prompts), settings.sample_limit) if settings.sample_limit is not None else len(prompts)
+        
+        limit_n = args.fresh_style_samples if args.fresh_style_samples is not None else settings.teacher_fresh_style_samples
+        if limit_n is None:
+            limit_n = settings.sample_limit
+            
+        total = min(len(prompts), limit_n) if limit_n is not None else len(prompts)
         entries = prompts[:total]
         normalized = []
         for item in entries:
@@ -740,31 +809,38 @@ def _run_fresh_style(args, settings, base_output_path: str):
             for i in batch_iter:
                 prompt_batch = all_prompts[i : i + batch_size]
                 batch_entries = normalized[i : i + len(prompt_batch)]
-                responses = generator.sample_batch(prompt_batch, system_prompt=style_prompt)
+                raw_responses = generator.sample_batch(prompt_batch, system_prompt=style_prompt)
 
                 if settings.answer_forcing:
-                    af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
+                    af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
                     af_sampling_params = _make_force_sampling_params(generator._tokenizer, settings.answer_force_max_tokens)
                     af_outputs = generator._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
-                    responses = [
+                    af_responses = [
                         prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                         for prompt, out in zip(af_prompts, af_outputs)
                     ]
+                else:
+                    af_responses = [None] * len(raw_responses)
 
                 eos_token = generator._tokenizer.eos_token or ""
                 pad_token = generator._tokenizer.pad_token or ""
                 batch_samples = []
-                for entry, response in zip(batch_entries, responses):
-                    response = response.replace(eos_token, "").replace(pad_token, "").strip()
-                    batch_samples.append({
+                for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
+                    raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                    sample = {
                         "model_name": generator.model_id,
                         "system_prompt": style_prompt,
                         "user_prompt": entry["user_prompt"],
-                        "response": response,
-                        "final_answer": extract_final_answer(response),
+                        "response": raw_resp,
+                        "final_answer": extract_final_answer(raw_resp),
                         "ground_truth": entry["ground_truth"],
                         "style": style_key,
-                    })
+                    }
+                    if af_resp is not None:
+                        af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                        sample["response_af"] = af_resp
+                        sample["final_answer_af"] = extract_final_answer(af_resp)
+                    batch_samples.append(sample)
 
                 styled_dataset.save(batch_samples, append=not first_write)
                 first_write = False
@@ -772,12 +848,7 @@ def _run_fresh_style(args, settings, base_output_path: str):
 
             print(f"Saved {generated_count} samples to {styled_dataset.path}")
             loaded = styled_dataset.load()
-            results = AnswerEvaluator.evaluate_accuracy(loaded)
-            print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
-            if results["mismatches"]:
-                mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
-                print(f"First 5 incorrect indices: {mismatch_indices}")
-            _append_results_md(styled_dataset.path, results)
+            _evaluate_both(styled_dataset.path, loaded, style_key=style_key)
     finally:
         generator.close()
 
@@ -874,20 +945,29 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     style_weights, strength_scale = generator.set_vector_from_metadata(metadata)
                     weight_record = {f"w_{s}": w for s, w in style_weights.items()}
                     weight_record["strength_scale"] = strength_scale
-                responses = generator.sample_batch(prompt_batch)
-                forced_responses = generator.force_answers(responses) if settings.answer_forcing else responses
+                
+                raw_responses = generator.sample_batch(prompt_batch)
+                if settings.answer_forcing:
+                    af_responses = generator.force_answers(raw_responses)
+                else:
+                    af_responses = [None] * len(raw_responses)
+
                 batch_samples = []
-                for entry, response in zip(batch_entries, forced_responses):
-                    response = response.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+                for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
+                    raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
                     record = {
                         "model_name": model_id_to_use,
                         "system_prompt": generator.system_prompt,
                         "user_prompt": entry["user_prompt"],
-                        "response": response,
-                        "final_answer": extract_final_answer(response),
+                        "response": raw_resp,
+                        "final_answer": extract_final_answer(raw_resp),
                         "ground_truth": entry["ground_truth"],
                         "caa_mode": "metadata_random_per_layer" if args.caa_random_per_layer else "metadata",
                     }
+                    if af_resp is not None:
+                        af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+                        record["response_af"] = af_resp
+                        record["final_answer_af"] = extract_final_answer(af_resp)
                     record.update(weight_record)
                     record["caa_rng_seed"] = generator._rng_seed
                     batch_samples.append(record)
@@ -896,12 +976,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 generated_count += len(batch_samples)
             print(f"\nSaved {generated_count} samples to {out_dataset.path}")
             loaded = out_dataset.load()
-            results = AnswerEvaluator.evaluate_accuracy(loaded)
-            print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
-            if results["mismatches"]:
-                mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
-                print(f"First 5 incorrect indices: {mismatch_indices}")
-            _append_results_md(out_dataset.path, results)
+            _evaluate_both(out_dataset.path, loaded)
 
         else:
             # styles mode
@@ -917,35 +992,38 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 for batch_idx in batch_iter:
                     prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                     batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
-                    responses = generator.sample_batch(prompt_batch)
-                    forced_responses = generator.force_answers(responses) if settings.answer_forcing else responses
+                    raw_responses = generator.sample_batch(prompt_batch)
+                    if settings.answer_forcing:
+                        af_responses = generator.force_answers(raw_responses)
+                    else:
+                        af_responses = [None] * len(raw_responses)
                     eos_token = generator._tokenizer.eos_token or ""
                     pad_token = generator._tokenizer.pad_token or ""
                     batch_samples = []
-                    for entry, response in zip(batch_entries, forced_responses):
-                        response = response.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
-                        tokens = generator._tokenizer.encode(response)
+                    for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
+                        raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                        tokens = generator._tokenizer.encode(raw_resp)
                         style_stats[style].append(len(tokens))
-                        batch_samples.append({
+                        sample = {
                             "model_name": model_id_to_use,
                             "system_prompt": generator.system_prompt,
                             "user_prompt": entry["user_prompt"],
-                            "response": response,
-                            "final_answer": extract_final_answer(response),
+                            "response": raw_resp,
+                            "final_answer": extract_final_answer(raw_resp),
                             "ground_truth": entry["ground_truth"],
                             "style": style,
-                        })
+                        }
+                        if af_resp is not None:
+                            af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                            sample["response_af"] = af_resp
+                            sample["final_answer_af"] = extract_final_answer(af_resp)
+                        batch_samples.append(sample)
                     styled_dataset.save(batch_samples, append=not first_write)
                     first_write = False
                     generated_count += len(batch_samples)
                 print(f"Saved {generated_count} samples to {styled_dataset.path}")
                 loaded = styled_dataset.load()
-                results = AnswerEvaluator.evaluate_accuracy(loaded)
-                print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
-                if results["mismatches"]:
-                    mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
-                    print(f"First 5 incorrect indices: {mismatch_indices}")
-                _append_results_md(styled_dataset.path, results)
+                _evaluate_both(styled_dataset.path, loaded, style_key=style)
             if args.caa_mode == "styles" and style_stats:
                 print(f"\n{'='*60}\nToken Count Summary (Mean tokens per response):\n{'='*60}")
                 for style in generator.styles:
@@ -984,31 +1062,38 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
         batch_iter = tqdm(range(0, total, batch_size), desc=f"Generating {target_set} traces")
         for batch_idx in batch_iter:
             prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
-            responses = model.sample_batch(prompt_batch)
+            raw_responses = model.sample_batch(prompt_batch)
             batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
 
             if settings.answer_forcing:
-                af_prompts = [resp + ANSWER_FORCE_STRING for resp in responses]
+                af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
                 af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
                 af_outputs = model._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
-                responses = [
+                af_responses = [
                     prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                     for prompt, out in zip(af_prompts, af_outputs)
                 ]
+            else:
+                af_responses = [None] * len(raw_responses)
 
             batch_samples = []
             eos_token = model._tokenizer.eos_token or ""
             pad_token = model._tokenizer.pad_token or ""
-            for entry, response in zip(batch_entries, responses):
-                response = response.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
-                batch_samples.append({
+            for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
+                raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                sample = {
                     "model_name": model_name,
                     "system_prompt": model.system_prompt,
                     "user_prompt": entry["user_prompt"],
-                    "response": response,
-                    "final_answer": extract_final_answer(response),
+                    "response": raw_resp,
+                    "final_answer": extract_final_answer(raw_resp),
                     "ground_truth": entry["ground_truth"],
-                })
+                }
+                if af_resp is not None:
+                    af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                    sample["response_af"] = af_resp
+                    sample["final_answer_af"] = extract_final_answer(af_resp)
+                batch_samples.append(sample)
 
             dataset.save(batch_samples, append=not first_write)
             first_write = False
@@ -1017,14 +1102,8 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
         model.close()
 
     print(f"Saved {generated_count} samples to {dataset.path}")
-    print("\nEvaluating answer accuracy...")
     loaded_samples = dataset.load()
-    results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
-    print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
-    if results["mismatches"]:
-        mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
-        print(f"First 5 incorrect indices: {mismatch_indices}")
-    _append_results_md(dataset.path, results)
+    _evaluate_both(dataset.path, loaded_samples)
 
 def main():
     parser = argparse.ArgumentParser(description="Generate traces using teacher or student model")
@@ -1043,6 +1122,7 @@ def main():
         default=None,
         help="Generate fresh teacher traces in a style: 'all' or a specific style key (e.g. formal, scratchpad)",
     )
+    parser.add_argument("--fresh-style-samples", type=int, default=None, help="Limit number of samples for fresh styles")
     parser.add_argument("--ad", action="store_true")
     parser.add_argument("--teacher-finetune", action="store_true")
     parser.add_argument("--load-rewrite", action="store_true")

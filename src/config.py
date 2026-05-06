@@ -141,6 +141,7 @@ class Settings(BaseSettings):
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.7
     teacher_fresh_style_temperature: float = 0.8
+    teacher_fresh_style_samples: int | None = None
     vllm_gpu_memory_utilization: float = 0.8
 
     # Dataset (see loaders/registry.py for available datasets)
@@ -218,13 +219,12 @@ class Settings(BaseSettings):
     caa_weight_mode: str = "dirichlet"
     caa_dirichlet_alphas: list[float] | None = None  # None → [0.3] * n_styles
     caa_style_scales: dict[str, float] | None = {"formal": 1.0, "scratchpad": 0.7, "socratic": 1.3}
-    caa_max_injection_tokens: int | None = None
     caa_normalize: bool = False
     caa_relative: bool = False
     # Number of generated tokens to inject into; None means all tokens.
     caa_max_injection_tokens: int | None = None
     # Whether to inject steering vectors during prefill (prompt processing).
-    caa_inject_prefill: bool = False
+    caa_inject_prefill: bool = True
     # Probability that steering is active for a given batch.
     caa_p_active: float = 0.8
     # User ID passed to HMAC to derive the run-level CAA RNG seed.

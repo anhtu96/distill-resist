@@ -323,7 +323,7 @@ def load_style_data(data_dir: str, style: str, dataset: str, data_source: str = 
     if data_source in ("fresh", "any"):
         globs.append(f"*_{dataset}_*_fresh_{style}*.jsonl")
     for pattern in globs:
-        for path in Path(data_dir).glob(pattern):
+        for path in sorted(Path(data_dir).glob(pattern)):
             logger.info("Loading %s", path)
             with open(path) as f:
                 for line in f:
@@ -335,7 +335,7 @@ def load_style_data(data_dir: str, style: str, dataset: str, data_source: str = 
 def load_base_data(data_dir: str, dataset: str) -> list[dict]:
     """Load unstyled base holdout traces for a specific dataset."""
     samples = []
-    for path in Path(data_dir).glob(f"*_{dataset}_base.jsonl"):
+    for path in sorted(Path(data_dir).glob(f"*_{dataset}_base.jsonl")):
         logger.info("Loading base %s", path)
         with open(path) as f:
             for line in f:
