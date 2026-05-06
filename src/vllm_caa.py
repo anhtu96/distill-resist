@@ -45,7 +45,8 @@ from vllm.model_executor.models.gemma3_mm import Gemma3ForConditionalGeneration
 _CAA_STATE_FILE = os.path.join(tempfile.gettempdir(), "vllm_caa_state")
 _COLLECT_STATE_FILE = os.path.join(tempfile.gettempdir(), "vllm_caa_collect_state")
 
-_DEBUG_CAA = False
+_DEBUG_CAA = os.getenv("CAA_DEBUG", "0") == "1"
+_UNSET = object()
 
 _STATE_CACHE: dict = {}
 _STATE_CACHE_MTIME: float = -1.0
@@ -104,8 +105,7 @@ def set_caa_state(
     layers=None,
     vectors: dict[int, torch.Tensor] | None = None,
     relative: bool | None = None,
-    max_injection_tokens: int | None = None,
-    prompt_length: int | None = None,
+    max_injection_tokens: "int | None" = _UNSET,
     inject_prefill: bool | None = None,
 ) -> None:
     state = _load_caa_state()
@@ -128,10 +128,9 @@ def set_caa_state(
         }
     if relative is not None:
         state["relative"] = bool(relative)
-    if max_injection_tokens is not None:
-        state["max_injection_tokens"] = int(max_injection_tokens)
-    if prompt_length is not None:
-        state["prompt_length"] = int(prompt_length)
+    if max_injection_tokens is not _UNSET:
+        # None means "no cap" — always write so stale values from previous runs are cleared.
+        state["max_injection_tokens"] = int(max_injection_tokens) if max_injection_tokens is not None else None
     if inject_prefill is not None:
         state["inject_prefill"] = bool(inject_prefill)
 
@@ -242,8 +241,8 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     self._steering_strength = float(per_layer.get(idx, state["strength"]))
                     self._steering_relative = bool(state.get("relative", False))
                     self._max_injection_tokens = state.get("max_injection_tokens")
-                    self._prompt_length = int(state.get("prompt_length", 0))
                     self._inject_prefill = bool(state.get("inject_prefill", False))
+                    self._cap_logged = False
                     buf.copy_(self._steering_strength * sv)
                     if _DEBUG_CAA:
                         print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={self._steering_strength}, relative={self._steering_relative}, max_inject={self._max_injection_tokens}")
@@ -251,16 +250,32 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     self._steering_sv = None
                     buf.zero_()
 
+            # Layers not in state["layers"] have _steering_sv=None and buf=zeros — skip them.
+            if self._steering_sv is None:
+                return hidden_states, residual
+
             # Skip prefill unless explicitly enabled (checked after state reload so _inject_prefill is current).
             if len(positions) > 1:
-                if not self._inject_prefill or self._steering_sv is None:
+                # Prefill: reset decode counter for the upcoming generation.
+                self._decode_step = 0
+                self._cap_logged = False
+                if not self._inject_prefill:
+                    if _DEBUG_CAA:
+                        print(f"[CAA dbg] layer={idx} prefill (seq_len={len(positions)}) SKIP")
                     return hidden_states, residual
-
-            # Decode step: apply token cap if set (checked after state reload so values are fresh).
-            if self._max_injection_tokens is not None:
-                gen_idx = int(positions[0].item()) - self._prompt_length
-                if gen_idx >= self._max_injection_tokens:
-                    return hidden_states, residual
+                if _DEBUG_CAA:
+                    print(f"[CAA dbg] layer={idx} prefill (seq_len={len(positions)}) INJECT")
+            else:
+                # Decode step: apply token cap using a simple counter (no prompt-length subtraction).
+                if self._max_injection_tokens is not None:
+                    if self._decode_step >= self._max_injection_tokens:
+                        if _DEBUG_CAA and not self._cap_logged:
+                            print(f"[CAA dbg] layer={idx} token={self._decode_step} SKIP (cap={self._max_injection_tokens}) — injection disabled for remainder")
+                            self._cap_logged = True
+                        return hidden_states, residual
+                if _DEBUG_CAA:
+                    print(f"[CAA dbg] layer={idx} token={self._decode_step} INJECT")
+                self._decode_step += 1
 
             if self._steering_relative and self._steering_sv is not None:
                 # Use full post-layer output (residual + ffn_delta) for per-token norm to match
@@ -294,8 +309,9 @@ def _swap_decoder_layers(
             layer._steering_strength = 0.0
             layer._steering_relative = False
             layer._max_injection_tokens = None
-            layer._prompt_length = 0
             layer._inject_prefill = False
+            layer._decode_step = 0
+            layer._cap_logged = False
             swapped += 1
     if _DEBUG_CAA:
         print(f"[VLLM_CAA] Swapped {swapped}/{len(layers)} decoder layers (hidden_size={hidden_size})")

@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 ANSWER_FORCE_STRING: str = "\n\n**Final Answer**:\n\\[\\boxed{"
@@ -223,6 +224,13 @@ class Settings(BaseSettings):
     caa_relative: bool = False
     # Number of generated tokens to inject into; None means all tokens.
     caa_max_injection_tokens: int | None = None
+
+    @field_validator("caa_max_injection_tokens", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, v):
+        if v == "":
+            return None
+        return v
     # Whether to inject steering vectors during prefill (prompt processing).
     caa_inject_prefill: bool = True
     # Probability that steering is active for a given batch.

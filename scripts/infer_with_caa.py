@@ -52,7 +52,7 @@ def register_hooks(model, insertion_layers: list, relative_strength: bool = Fals
             "inject_prefill": inject_prefill,
         }
 
-        def make_hook(s):
+        def make_hook(s, layer_idx=layer_idx):
             def _hook(_module, _input, output):
                 if not s["active"] or s["vector"] is None or s["b"] == 0.0:
                     return output
@@ -61,13 +61,17 @@ def register_hooks(model, insertion_layers: list, relative_strength: bool = Fals
                 # Skip prefill if not explicitly enabled.
                 if hidden.shape[1] > 1:
                     if not s["inject_prefill"]:
+                        print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
                         return output
+                    print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT")
                 else:
                     # Token cap (only applies during decode steps, i.e. hidden.shape[1] == 1)
                     if s["max_inject"] is not None:
                         if s["decode_count"] >= s["max_inject"]:
+                            print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} SKIP (cap={s['max_inject']})")
                             return output
                         s["decode_count"] += 1
+                    print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} INJECT")
 
                 v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
                 if s["relative"]:
@@ -168,9 +172,6 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
         except Exception:
             rendered = f"System: {system}\nUser: {prompt}\nAssistant:\n"
 
-    # Tokenize to get exact prompt length for the positional mask
-    prompt_length = len(tokenizer.encode(rendered)) if max_inject_tokens is not None else 0
-
     strengths = dict(zip(insertion_layers, strength)) if isinstance(strength, list) else strength
     vllm_caa.set_caa_state(
         active=True, strength=strengths,
@@ -178,7 +179,6 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
         relative=relative_strength,
         max_injection_tokens=max_inject_tokens,
         inject_prefill=inject_prefill,
-        prompt_length=prompt_length,
     )
 
     eos = tokenizer.eos_token or ""

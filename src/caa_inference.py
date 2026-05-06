@@ -131,6 +131,10 @@ class HFCAATraceGenerator:
 
         self._max_inject_tokens: int | None = settings.caa_max_injection_tokens
         self._inject_prefill: bool = settings.caa_inject_prefill
+        if self._max_inject_tokens is not None:
+            print(f"[CAA] max_inject_tokens={self._max_inject_tokens} (injection stops after this many decode steps)")
+        else:
+            print(f"[CAA] max_inject_tokens=None (injection runs for full generation)")
 
         self._states: list[dict] = []
         for layer_idx in self.insertion_layers:
@@ -139,9 +143,10 @@ class HFCAATraceGenerator:
                 "active": False, "b": layer_b, "vector": None, "relative": self.relative_strength,
                 "decode_count": 0, "max_inject": settings.caa_max_injection_tokens,
                 "inject_prefill": settings.caa_inject_prefill,
+                "cap_logged": False,
             }
 
-            def make_hook(s):
+            def make_hook(s, layer_idx=layer_idx):
                 def _hook(_module, _input, output):
                     if not s["active"] or s["vector"] is None:
                         return output
@@ -149,13 +154,20 @@ class HFCAATraceGenerator:
                     # Skip prefill if not explicitly enabled.
                     if hidden.shape[1] > 1:
                         if not s["inject_prefill"]:
+                            print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
                             return output
+                        print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT")
                     else:
                         # Token cap (only applies during decode steps, i.e. hidden.shape[1] == 1)
                         if s["max_inject"] is not None:
                             if s["decode_count"] >= s["max_inject"]:
+                                if not s["cap_logged"]:
+                                    print(f"[CAA] injection cap reached at token {s['max_inject']} — steering disabled for remainder of generation")
+                                    s["cap_logged"] = True
+                                print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} SKIP (cap={s['max_inject']})")
                                 return output
                             s["decode_count"] += 1
+                        print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} INJECT")
                     v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
                     if s["relative"]:
                         per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
@@ -186,7 +198,8 @@ class HFCAATraceGenerator:
             state["active"] = True
             state["max_inject"] = self._max_inject_tokens
             state["inject_prefill"] = self._inject_prefill
-            # b already set correctly at init; no reset needed
+            state["decode_count"] = 0
+            state["cap_logged"] = False
 
     def set_random_per_layer_vectors(self) -> dict[int, dict[str, float]]:
         from .prf import random_per_layer_caa_vectors
@@ -208,7 +221,8 @@ class HFCAATraceGenerator:
             state["active"] = True
             state["max_inject"] = self._max_inject_tokens
             state["inject_prefill"] = self._inject_prefill
-            # b already set correctly at init; no reset needed
+            state["decode_count"] = 0
+            state["cap_logged"] = False
         return per_layer_weights
 
     def set_vector_from_metadata(
@@ -251,7 +265,9 @@ class HFCAATraceGenerator:
             state["active"] = True
             state["max_inject"] = self._max_inject_tokens
             state["inject_prefill"] = self._inject_prefill
-            
+            state["decode_count"] = 0
+            state["cap_logged"] = False
+
         return style_weights, strength_scale
 
     def disable_steering(self) -> None:
@@ -281,6 +297,7 @@ class HFCAATraceGenerator:
             batch = rendered[i : i + self.batch_size]
             for s in self._states:
                 s["decode_count"] = 0
+                s["cap_logged"] = False
             inputs = self._tokenizer(
                 batch, return_tensors="pt", padding=True, truncation=False,
             ).to(self._model.device)
@@ -293,6 +310,14 @@ class HFCAATraceGenerator:
                     do_sample=self.temperature > 0,
                     pad_token_id=self._tokenizer.pad_token_id,
                 )
+
+            # Report how many decode steps were steered for this sub-batch.
+            # All layers share the same count (they fire in sync), so layer 0 is representative.
+            if self._states:
+                injected = self._states[0]["decode_count"]
+                cap = self._states[0]["max_inject"]
+                cap_str = f"/{cap}" if cap is not None else " (no cap)"
+                print(f"[CAA] sub-batch steered {injected}{cap_str} decode steps")
 
             input_len = inputs["input_ids"].shape[1]
             for out in outputs:
