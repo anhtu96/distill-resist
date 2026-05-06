@@ -172,6 +172,7 @@ class VLLMCAATraceGenerator:
             vectors=vectors,
             relative=self.relative_strength,
             max_injection_tokens=self.settings.caa_max_injection_tokens,
+            inject_prefill=self.settings.caa_inject_prefill,
         )
 
     def disable_steering(self) -> None:
@@ -194,6 +195,7 @@ class VLLMCAATraceGenerator:
             vectors=vectors,
             relative=self.relative_strength,
             max_injection_tokens=self.settings.caa_max_injection_tokens,
+            inject_prefill=self.settings.caa_inject_prefill,
         )
         return per_layer_weights
 
@@ -238,6 +240,7 @@ class VLLMCAATraceGenerator:
             vectors=vectors,
             relative=self.relative_strength,
             max_injection_tokens=self.settings.caa_max_injection_tokens,
+            inject_prefill=self.settings.caa_inject_prefill,
         )
         return style_weights, strength_scale
 

@@ -242,6 +242,75 @@ def collect_activations(
     return result
 
 
+def collect_activations_vllm(
+    llm,
+    tokenizer,
+    style_data: dict[str, list[dict]],
+    insertion_layers: List[int],
+    system_prompt: str = "",
+    num_samples: Optional[int] = None,
+) -> dict[str, np.ndarray]:
+    """Collect residual-stream activations using vLLM (Triton attention).
+
+    Feeds each sample as a prefill-only pass (max_tokens=1) so the worker
+    writes mean activations per layer to /tmp/vllm_caa_act_{idx}.npy.
+    Returns same shape as collect_activations(): {style: np.ndarray [N, H*L]}.
+    """
+    from vllm import SamplingParams
+    from src import vllm_caa
+
+    vllm_caa.disable_caa()
+    sp = SamplingParams(max_tokens=1, temperature=0)
+    result: dict[str, np.ndarray] = {}
+
+    for style, samples in style_data.items():
+        if not samples:
+            logger.warning("No data for style '%s', skipping", style)
+            continue
+        if num_samples is not None:
+            samples = samples[:num_samples]
+
+        per_sample: list[np.ndarray] = []
+        for sample in tqdm(samples, desc=f"CAA vLLM {style}"):
+            messages = [
+                {"role": "system",    "content": system_prompt},
+                {"role": "user",      "content": sample.get("user_prompt", "")},
+                {"role": "assistant", "content": sample.get("response", "")},
+            ]
+            try:
+                text = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=False
+                )
+            except Exception:
+                text = (
+                    f"System: {system_prompt}\n"
+                    f"User: {sample.get('user_prompt','')}\n"
+                    f"Assistant: {sample.get('response','')}"
+                )
+
+            vllm_caa.set_collect_mode(active=True, layers=insertion_layers)
+            llm.generate([text], sp, use_tqdm=False)
+            acts = vllm_caa.read_collected_activations(insertion_layers)
+
+            if len(acts) < len(insertion_layers):
+                missing = set(insertion_layers) - set(acts)
+                logger.warning("Missing activations for layers %s, skipping sample", missing)
+                continue
+
+            layer_vecs = [acts[idx] for idx in insertion_layers]
+            per_sample.append(
+                layer_vecs[0] if len(insertion_layers) == 1
+                else np.concatenate(layer_vecs)
+            )
+
+        vllm_caa.set_collect_mode(active=False, layers=[])
+        result[style] = np.stack(per_sample)
+        logger.info("Collected %d vLLM residual vectors for style '%s'", len(per_sample), style)
+
+    return result
+
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -250,9 +319,9 @@ def load_style_data(data_dir: str, style: str, dataset: str, data_source: str = 
     samples = []
     globs: list[str] = []
     if data_source in ("rewrite", "any"):
-        globs.append(f"*_{dataset}_*_rewrite_{style}.jsonl")
+        globs.append(f"*_{dataset}_*_rewrite_{style}*.jsonl")
     if data_source in ("fresh", "any"):
-        globs.append(f"*_{dataset}_*_fresh_{style}.jsonl")
+        globs.append(f"*_{dataset}_*_fresh_{style}*.jsonl")
     for pattern in globs:
         for path in Path(data_dir).glob(pattern):
             logger.info("Loading %s", path)
@@ -293,9 +362,8 @@ def train_caa(
     negative: str = "base",
     overwrite: bool = False,
     data_source: str = "rewrite",
+    backend: str = "hf",
 ):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     if insertion_layers is None:
         n = _num_layers(model_id)
         insertion_layers = list(range(n))
@@ -317,14 +385,11 @@ def train_caa(
             return
         logger.info("Skipping existing styles %s; training: %s", done, styles_to_run)
 
-    # Load model
-    logger.info("Loading model: %s", model_id)
+    # Load model tokenizer
+    logger.info("Loading tokenizer: %s", model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True,
-    )
 
     system_prompt = DATASET_SYSTEM_PROMPTS.get(dataset, "")
 
@@ -342,24 +407,62 @@ def train_caa(
         style_data["__base__"] = base_samples
 
     # Collect residual-stream activations
-    raw_vecs = collect_activations(
-        model=model,
-        tokenizer=tokenizer,
-        style_data=style_data,
-        insertion_layers=insertion_layers,
-        max_length=max_length,
-        device=device,
-        system_prompt=system_prompt,
-        num_samples=num_samples,
-    )
+    if backend == "vllm":
+        from vllm import LLM
+        from src import vllm_caa  # registers model classes
 
-    hidden_dim: int
-    if hasattr(model.config, "hidden_size"):
-        hidden_dim = model.config.hidden_size
-    elif hasattr(model.config, "text_config"):
-        hidden_dim = model.config.text_config.hidden_size
+        logger.info("Loading vLLM model: %s", model_id)
+        llm = LLM(
+            model=model_id,
+            hf_overrides={"architectures": ["Gemma3CAAForConditionalGeneration"]},
+            enforce_eager=True,  # collect mode requires Python forward to run
+            dtype="bfloat16",
+            trust_remote_code=True,
+            max_model_len=max_length,
+            gpu_memory_utilization=_settings.vllm_gpu_memory_utilization,
+        )
+        raw_vecs = collect_activations_vllm(
+            llm=llm,
+            tokenizer=tokenizer,
+            style_data=style_data,
+            insertion_layers=insertion_layers,
+            system_prompt=system_prompt,
+            num_samples=num_samples,
+        )
+        # Determine hidden_dim from tokenizer/config since we didn't load HF model
+        cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        if hasattr(cfg, "hidden_size"):
+            hidden_dim = cfg.hidden_size
+        elif hasattr(cfg, "text_config"):
+            hidden_dim = cfg.text_config.hidden_size
+        else:
+            raise ValueError("Cannot determine hidden_size for vLLM backend")
+        del llm
+        
     else:
-        hidden_dim = _get_layer(model, insertion_layers[0]).mlp.gate_proj.in_features
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("Loading HF model: %s", model_id)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True,
+        )
+        raw_vecs = collect_activations(
+            model=model,
+            tokenizer=tokenizer,
+            style_data=style_data,
+            insertion_layers=insertion_layers,
+            max_length=max_length,
+            device=device,
+            system_prompt=system_prompt,
+            num_samples=num_samples,
+        )
+        
+        if hasattr(model.config, "hidden_size"):
+            hidden_dim = model.config.hidden_size
+        elif hasattr(model.config, "text_config"):
+            hidden_dim = model.config.text_config.hidden_size
+        else:
+            hidden_dim = _get_layer(model, insertion_layers[0]).mlp.gate_proj.in_features
+        del model
 
     # Aggregate per-sample vectors
     agg_fn = AGGREGATION_FNS[aggregation]
@@ -463,6 +566,12 @@ def main():
         help="Which style traces to load: 'rewrite' (_rewrite_{style}.jsonl), "
              "'fresh' (_fresh_{style}.jsonl), or 'any' (both). Default: rewrite.",
     )
+    parser.add_argument(
+        "--backend", choices=["hf", "vllm"], default="hf",
+        help="Backend for collecting activations. 'vllm' uses Triton attention to match "
+             "inference-time activation geometry (recommended when using --backend vllm in infer_with_caa.py). "
+             "Default: hf.",
+    )
 
     args = parser.parse_args()
     train_caa(
@@ -479,6 +588,7 @@ def main():
         negative=args.negative,
         overwrite=args.overwrite,
         data_source=args.data_source,
+        backend=args.backend,
     )
 
 

@@ -223,6 +223,8 @@ class Settings(BaseSettings):
     caa_relative: bool = False
     # Number of generated tokens to inject into; None means all tokens.
     caa_max_injection_tokens: int | None = None
+    # Whether to inject steering vectors during prefill (prompt processing).
+    caa_inject_prefill: bool = False
     # Probability that steering is active for a given batch.
     caa_p_active: float = 0.8
     # User ID passed to HMAC to derive the run-level CAA RNG seed.

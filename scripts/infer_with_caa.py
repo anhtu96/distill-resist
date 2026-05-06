@@ -42,13 +42,14 @@ def load_checkpoint(path: str):
 
 
 def register_hooks(model, insertion_layers: list, relative_strength: bool = False,
-                   max_inject_tokens: int | None = None) -> list:
+                   max_inject_tokens: int | None = None, inject_prefill: bool = False) -> list:
     """Register residual-stream hooks. Returns list of state dicts (one per layer)."""
     states = []
     for layer_idx in insertion_layers:
         state = {
             "active": True, "b": 1.0, "vector": None, "relative": relative_strength,
-            "decode_count": 0, "max_inject": max_inject_tokens
+            "decode_count": 0, "max_inject": max_inject_tokens,
+            "inject_prefill": inject_prefill,
         }
 
         def make_hook(s):
@@ -57,15 +58,16 @@ def register_hooks(model, insertion_layers: list, relative_strength: bool = Fals
                     return output
                 hidden = output[0] if isinstance(output, tuple) else output
 
-                # Skip prefill (prompt tokens processed all at once)
+                # Skip prefill if not explicitly enabled.
                 if hidden.shape[1] > 1:
-                    return output
-
-                # Decode step: apply token cap if set
-                if s["max_inject"] is not None:
-                    if s["decode_count"] >= s["max_inject"]:
+                    if not s["inject_prefill"]:
                         return output
-                    s["decode_count"] += 1
+                else:
+                    # Token cap (only applies during decode steps, i.e. hidden.shape[1] == 1)
+                    if s["max_inject"] is not None:
+                        if s["decode_count"] >= s["max_inject"]:
+                            return output
+                        s["decode_count"] += 1
 
                 v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
                 if s["relative"]:
@@ -97,7 +99,8 @@ def load_style(states: list, sv_list: list, normalize_per_layer: bool = False, s
 def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
              temperature: float, top_p: float, active: bool,
              strength: "float | list[float]",
-             max_inject_tokens: int | None = None) -> str:
+             max_inject_tokens: int | None = None,
+             inject_prefill: bool = False) -> str:
     system = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
     messages = [
         {"role": "system", "content": system},
@@ -117,6 +120,7 @@ def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
         s["b"] = b
         s["decode_count"] = 0
         s["max_inject"] = max_inject_tokens
+        s["inject_prefill"] = inject_prefill
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -137,7 +141,8 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
                   normalize_per_layer: bool = False,
                   relative_strength: bool = False,
                   scale: float = 1.0,
-                  max_inject_tokens: int | None = None) -> str:
+                  max_inject_tokens: int | None = None,
+                  inject_prefill: bool = False) -> str:
     from vllm import SamplingParams
     import src.vllm_caa as vllm_caa
 
@@ -172,6 +177,7 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
         layers=insertion_layers, vectors=vectors,
         relative=relative_strength,
         max_injection_tokens=max_inject_tokens,
+        inject_prefill=inject_prefill,
         prompt_length=prompt_length,
     )
 
@@ -189,7 +195,7 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
 def main():
     parser = argparse.ArgumentParser(description="Inference with CAA steering vectors")
     parser.add_argument("--model-id", default="unsloth/gemma-3-12b-it")
-    parser.add_argument("--checkpoint", default="models/steering_vectors_caa/steering_vectors.pt")
+    parser.add_argument("--checkpoint", default="models/steering_vectors_caa_vllm/steering_vectors.pt")
     parser.add_argument("--style", nargs="+", default=None,
                         help="One or more styles to apply. Single style = direct injection; "
                              "multiple styles = weighted blend.")
@@ -225,6 +231,9 @@ def main():
                         help="Inference backend: 'hf' (HuggingFace, default) or 'vllm'.")
     parser.add_argument("--max-inject-tokens", type=int, default=_settings.caa_max_injection_tokens,
                         help="Limit injection to first N generated tokens (default: caa_max_injection_tokens from config)")
+    parser.add_argument("--inject-prefill", action="store_true",
+                        help="Also inject steering vector during prefill (all prompt token positions). "
+                             "Default: decode-only injection.")
     args = parser.parse_args()
 
     # Parse style scales if provided, fall back to settings
@@ -350,7 +359,8 @@ def main():
             tokenizer.pad_token = tokenizer.eos_token
         states = register_hooks(model, insertion_layers,
                                 relative_strength=args.caa_relative or _settings.caa_relative,
-                                max_inject_tokens=args.max_inject_tokens)
+                                max_inject_tokens=args.max_inject_tokens,
+                                inject_prefill=args.inject_prefill)
     else:  # vllm
         from vllm import LLM
         from src.vllm_caa_inference import _pick_caa_arch
@@ -375,6 +385,7 @@ def main():
             layers=insertion_layers, vectors=_pre_vectors,
             relative=args.caa_relative or _settings.caa_relative,
             max_injection_tokens=args.max_inject_tokens,
+            inject_prefill=args.inject_prefill,
         )
 
         arch = _pick_caa_arch(args.model_id)
@@ -407,7 +418,8 @@ def main():
             load_style(states, sv_list, normalize_per_layer=do_normalize, scale=final_scale)
             print(generate(model, tokenizer, prompt, states, args.max_tokens,
                            args.temperature, args.top_p, active=True, strength=strength,
-                           max_inject_tokens=args.max_inject_tokens))
+                           max_inject_tokens=args.max_inject_tokens,
+                           inject_prefill=args.inject_prefill))
         else:
             print(generate_vllm(llm, tokenizer, prompt, insertion_layers, sv_list,
                                 args.max_tokens, args.temperature, args.top_p,
@@ -415,7 +427,8 @@ def main():
                                 normalize_per_layer=do_normalize,
                                 relative_strength=args.caa_relative or _settings.caa_relative,
                                 scale=final_scale,
-                                max_inject_tokens=args.max_inject_tokens))
+                                max_inject_tokens=args.max_inject_tokens,
+                                inject_prefill=args.inject_prefill))
 
     if args.backend == "vllm":
         import src.vllm_caa as _vllm_caa

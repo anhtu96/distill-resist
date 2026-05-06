@@ -129,19 +129,36 @@ class HFCAATraceGenerator:
             new_steering_vectors[style] = picked
         self.steering_vectors = new_steering_vectors
 
+        self._max_inject_tokens: int | None = settings.caa_max_injection_tokens
+        self._inject_prefill: bool = settings.caa_inject_prefill
+
         self._states: list[dict] = []
         for layer_idx in self.insertion_layers:
             layer_b = self._layer_strengths[layer_idx] if self._layer_strengths else float(strength)
-            state = {"active": False, "b": layer_b, "vector": None, "relative": self.relative_strength}
+            state = {
+                "active": False, "b": layer_b, "vector": None, "relative": self.relative_strength,
+                "decode_count": 0, "max_inject": settings.caa_max_injection_tokens,
+                "inject_prefill": settings.caa_inject_prefill,
+            }
 
             def make_hook(s):
                 def _hook(_module, _input, output):
                     if not s["active"] or s["vector"] is None:
                         return output
                     hidden = output[0] if isinstance(output, tuple) else output
+                    # Skip prefill if not explicitly enabled.
+                    if hidden.shape[1] > 1:
+                        if not s["inject_prefill"]:
+                            return output
+                    else:
+                        # Token cap (only applies during decode steps, i.e. hidden.shape[1] == 1)
+                        if s["max_inject"] is not None:
+                            if s["decode_count"] >= s["max_inject"]:
+                                return output
+                            s["decode_count"] += 1
                     v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
                     if s["relative"]:
-                        per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)  # [B, T, 1]
+                        per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
                         sv = s["b"] * per_token_norm * v
                     else:
                         sv = s["b"] * v
@@ -167,6 +184,8 @@ class HFCAATraceGenerator:
                 sv = sv.unsqueeze(0)
             state["vector"] = sv
             state["active"] = True
+            state["max_inject"] = self._max_inject_tokens
+            state["inject_prefill"] = self._inject_prefill
             # b already set correctly at init; no reset needed
 
     def set_random_per_layer_vectors(self) -> dict[int, dict[str, float]]:
@@ -187,6 +206,8 @@ class HFCAATraceGenerator:
             v = vectors[layer_idx]
             state["vector"] = v.unsqueeze(0) if v.dim() == 1 else v
             state["active"] = True
+            state["max_inject"] = self._max_inject_tokens
+            state["inject_prefill"] = self._inject_prefill
             # b already set correctly at init; no reset needed
         return per_layer_weights
 
@@ -226,9 +247,10 @@ class HFCAATraceGenerator:
             state["vector"] = vectors[layer_idx].unsqueeze(0) if vectors[layer_idx].dim() == 1 else vectors[layer_idx]
             # Build per-layer strengths
             max_s = self._layer_strengths if self._layer_strengths is not None else {layer: self.strength for layer in self.insertion_layers}
-
             state["b"] = strength_scale * max_s.get(layer_idx, self.strength)
             state["active"] = True
+            state["max_inject"] = self._max_inject_tokens
+            state["inject_prefill"] = self._inject_prefill
             
         return style_weights, strength_scale
 
@@ -257,6 +279,8 @@ class HFCAATraceGenerator:
         results: list[str] = []
         for i in range(0, len(rendered), self.batch_size):
             batch = rendered[i : i + self.batch_size]
+            for s in self._states:
+                s["decode_count"] = 0
             inputs = self._tokenizer(
                 batch, return_tensors="pt", padding=True, truncation=False,
             ).to(self._model.device)
