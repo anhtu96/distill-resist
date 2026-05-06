@@ -636,12 +636,13 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
                     "user_prompt": entry["user_prompt"],
                     "response": raw_resp,
                     "final_answer": extract_final_answer(raw_resp),
-                    "ground_truth": entry["ground_truth"],
                 }
                 if af_resp is not None:
                     af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").strip()
                     sample["response_af"] = af_resp
                     sample["final_answer_af"] = extract_final_answer(af_resp)
+                
+                sample["ground_truth"] = entry["ground_truth"]
                 batch_samples.append(sample)
 
             dataset.save(batch_samples, append=not first_write)
@@ -735,13 +736,28 @@ def _run_rewrite(args, settings, base_holdout_path: str):
                 pad_token = rewriter._tokenizer.pad_token or ""
                 for sample, raw_rw, af_rw in zip(batch_samples, raw_rewritten_batch, af_rewritten_batch):
                     raw_resp = raw_rw.replace(eos_token, "").replace(pad_token, "").strip()
-                    sample["response"] = raw_resp
-                    sample["final_answer"] = extract_final_answer(raw_resp)
-                    sample["style"] = style_key
+                    # Reconstruct sample to ensure order: response, final_answer, response_af, final_answer_af
+                    new_sample = {
+                        "model_name": sample.get("model_name"),
+                        "system_prompt": sample.get("system_prompt"),
+                        "user_prompt": sample.get("user_prompt"),
+                        "response": raw_resp,
+                        "final_answer": extract_final_answer(raw_resp),
+                    }
                     if af_rw is not None:
                         af_resp = af_rw.replace(eos_token, "").replace(pad_token, "").strip()
-                        sample["response_af"] = af_resp
-                        sample["final_answer_af"] = extract_final_answer(af_resp)
+                        new_sample["response_af"] = af_resp
+                        new_sample["final_answer_af"] = extract_final_answer(af_resp)
+                    
+                    # Copy over remaining keys except the ones we already handled
+                    for k, v in sample.items():
+                        if k not in new_sample and k not in ("response", "final_answer"):
+                            new_sample[k] = v
+                    new_sample["style"] = style_key
+                    
+                    # Update the sample in the batch list (which is used for saving)
+                    sample.clear()
+                    sample.update(new_sample)
 
                 styled_dataset.save(batch_samples, append=not first_write)
                 first_write = False
@@ -833,13 +849,14 @@ def _run_fresh_style(args, settings, base_output_path: str):
                         "user_prompt": entry["user_prompt"],
                         "response": raw_resp,
                         "final_answer": extract_final_answer(raw_resp),
-                        "ground_truth": entry["ground_truth"],
-                        "style": style_key,
                     }
                     if af_resp is not None:
                         af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").strip()
                         sample["response_af"] = af_resp
                         sample["final_answer_af"] = extract_final_answer(af_resp)
+                    
+                    sample["ground_truth"] = entry["ground_truth"]
+                    sample["style"] = style_key
                     batch_samples.append(sample)
 
                 styled_dataset.save(batch_samples, append=not first_write)
@@ -961,13 +978,14 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                         "user_prompt": entry["user_prompt"],
                         "response": raw_resp,
                         "final_answer": extract_final_answer(raw_resp),
-                        "ground_truth": entry["ground_truth"],
-                        "caa_mode": "metadata_random_per_layer" if args.caa_random_per_layer else "metadata",
                     }
                     if af_resp is not None:
                         af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
                         record["response_af"] = af_resp
                         record["final_answer_af"] = extract_final_answer(af_resp)
+                    
+                    record["ground_truth"] = entry["ground_truth"]
+                    record["caa_mode"] = "metadata_random_per_layer" if args.caa_random_per_layer else "metadata"
                     record.update(weight_record)
                     record["caa_rng_seed"] = generator._rng_seed
                     batch_samples.append(record)
@@ -1010,13 +1028,14 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                             "user_prompt": entry["user_prompt"],
                             "response": raw_resp,
                             "final_answer": extract_final_answer(raw_resp),
-                            "ground_truth": entry["ground_truth"],
-                            "style": style,
                         }
                         if af_resp is not None:
                             af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
                             sample["response_af"] = af_resp
                             sample["final_answer_af"] = extract_final_answer(af_resp)
+                        
+                        sample["ground_truth"] = entry["ground_truth"]
+                        sample["style"] = style
                         batch_samples.append(sample)
                     styled_dataset.save(batch_samples, append=not first_write)
                     first_write = False
@@ -1087,12 +1106,13 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
                     "user_prompt": entry["user_prompt"],
                     "response": raw_resp,
                     "final_answer": extract_final_answer(raw_resp),
-                    "ground_truth": entry["ground_truth"],
                 }
                 if af_resp is not None:
                     af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
                     sample["response_af"] = af_resp
                     sample["final_answer_af"] = extract_final_answer(af_resp)
+                
+                sample["ground_truth"] = entry["ground_truth"]
                 batch_samples.append(sample)
 
             dataset.save(batch_samples, append=not first_write)
