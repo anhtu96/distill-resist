@@ -281,14 +281,16 @@ class VLLMCAATraceGenerator:
 
         Returns response + ANSWER_FORCE_STRING + decoded suffix, matching
         the answer-forcing behavior of HFCAATraceGenerator.
+
+        Always restores the CAA state that was active before this call so
+        subsequent sample_batch() calls see the correct steering vector.
+        This matters in metadata mode where set_vector_from_metadata() is
+        called once per batch: without the restore, disable_caa() inside
+        this method would leave CAA disabled for all remaining batches.
         """
-        # Disable steering for clean greedy extraction
+        saved_state = vllm_caa._load_caa_state()
         vllm_caa.disable_caa()
         try:
-            # We need the same chat-rendered prefix that produced `response`,
-            # but force_answers in the HF path simply tokenizes
-            # `response + ANSWER_FORCE_STRING` directly. Match that here so the
-            # appended string is decoded in isolation.
             af_prompts = [resp.strip() + ANSWER_FORCE_STRING for resp in responses]
             outputs = self._llm.generate(
                 af_prompts, self._force_sampling_params, use_tqdm=False,
@@ -299,9 +301,13 @@ class VLLMCAATraceGenerator:
                 results.append(af + decoded + "}\\]")
             return results
         finally:
-            # Restore style if one was active
+            # Restore the CAA state that was active before force_answers.
+            # Prefer set_style() when a named style is active (keeps _current_style in sync);
+            # fall back to re-writing the saved state directly for metadata/blended vectors.
             if self._current_style is not None:
                 self.set_style(self._current_style)
+            elif saved_state.get("active"):
+                vllm_caa._save_caa_state(saved_state)
 
     def load_prompts(self):
         loader = get_loader(

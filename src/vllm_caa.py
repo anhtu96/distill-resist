@@ -197,38 +197,69 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
         )
 
         idx = getattr(self, "_caa_layer_idx", None)
-
-        attn_metadata = kwargs.get("attn_metadata")
         n = positions.shape[0]
 
-        num_prefill = None
-        num_decode = None
-        if attn_metadata is not None:
-            num_prefill = getattr(attn_metadata, "num_prefill_tokens", None)
-            num_decode = getattr(attn_metadata, "num_decode_tokens", None)
+        # Determine which token rows are prefill vs. decode.
+        # vLLM v1 stores attn_metadata in the thread-local forward context (not in **kwargs).
+        # vLLM v1 also uses "decode first, prefill last" ordering within the batch.
+        decode_start = decode_end = 0
+        prefill_start = prefill_end = 0
+        _split_resolved = False
 
-        if num_prefill is None or num_decode is None:
-            # Heuristic fallback: walk positions, prefill = leading run(s) of 0,1,2,...
-            # restarting from 0 for each new sequence; decode = remainder.
-            num_prefill = 0
-            expected = 0
-            for i in range(n):
-                p = int(positions[i])
-                if p == expected:
-                    num_prefill += 1
-                    expected += 1
-                elif p == 0:
-                    num_prefill += 1
-                    expected = 1
-                else:
-                    break
-            num_decode = n - num_prefill
+        try:
+            from vllm.forward_context import get_forward_context
+            ctx = get_forward_context()
+            attn_meta_map = ctx.attn_metadata if ctx is not None else None
+            if attn_meta_map:
+                any_meta = next(iter(attn_meta_map.values()))
+                q_start = any_meta.query_start_loc  # shape [num_seqs+1], cumulative
+                q_lens = (q_start[1:] - q_start[:-1]).cpu().tolist()
+                # Decode seqs have q_len == 1; prefill/chunked-prefill seqs have q_len > 1.
+                # vLLM v1: decode seqs come first in the batch, prefill seqs come last.
+                num_decode_tokens = sum(int(q) for q in q_lens if int(q) == 1)
+                decode_start, decode_end = 0, num_decode_tokens
+                prefill_start, prefill_end = num_decode_tokens, n
+                _split_resolved = True
+        except Exception:
+            pass
+
+        if not _split_resolved:
+            # Positional heuristic fallback.
+            # Find first position == 0 to detect batch ordering.
+            first_zero = next((i for i in range(n) if int(positions[i]) == 0), None)
+            if first_zero is None:
+                # Pure decode (no zeros in positions).
+                decode_start, decode_end = 0, n
+            elif first_zero == 0:
+                # Prefill-first ordering (older vLLM) or pure prefill.
+                # Walk forward counting sequential runs starting from 0.
+                num_pf = 0
+                expected = 0
+                for i in range(n):
+                    p = int(positions[i])
+                    if p == expected:
+                        num_pf += 1
+                        expected += 1
+                    elif p == 0:
+                        num_pf += 1
+                        expected = 1
+                    else:
+                        break
+                prefill_start, prefill_end = 0, num_pf
+                decode_start, decode_end = num_pf, n
+            else:
+                # Decode-first ordering (vLLM v1): everything before first 0 is decode.
+                decode_start, decode_end = 0, first_zero
+                prefill_start, prefill_end = first_zero, n
+
+        num_prefill = prefill_end - prefill_start
+        num_decode = decode_end - decode_start
 
         # --- Collect mode (training only): capture mean prefill activation ---
         if idx is not None and num_prefill > 0:
             collect = _load_collect_state()
             if collect.get("active") and idx in collect.get("layers", []):
-                full = (residual[:num_prefill] + hidden_states[:num_prefill]).float()
+                full = (residual[prefill_start:prefill_end] + hidden_states[prefill_start:prefill_end]).float()
                 mean_act = full.mean(dim=0).cpu().numpy()
                 np.save(
                     os.path.join(tempfile.gettempdir(), f"vllm_caa_act_{idx}.npy"),
@@ -289,7 +320,7 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     if _DEBUG_CAA:
                         print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) SKIP")
                     return hidden_states, residual
-                inject_mask_start, inject_mask_end = 0, n        # inject prefill rows
+                inject_mask_start, inject_mask_end = prefill_start, prefill_end    # inject prefill rows
                 if _DEBUG_CAA:
                     print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) INJECT")
             else:
@@ -303,9 +334,9 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     print(f"[CAA dbg] layer={idx} token={self._decode_step} INJECT")
                 self._decode_step += 1
                 if self._inject_prefill:
-                    inject_mask_start, inject_mask_end = 0, n              # all rows
+                    inject_mask_start, inject_mask_end = 0, n                        # all rows
                 else:
-                    inject_mask_start, inject_mask_end = num_prefill, n    # decode rows only
+                    inject_mask_start, inject_mask_end = decode_start, decode_end    # decode rows only
 
             if inject_mask_end > inject_mask_start:
                 rows = slice(inject_mask_start, inject_mask_end)
