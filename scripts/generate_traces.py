@@ -1003,10 +1003,11 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     weight_record["strength_scale"] = strength_scale
                 
                 raw_responses = generator.sample_batch(prompt_batch)
-                if settings.answer_forcing:
-                    af_responses = generator.force_answers(raw_responses)
-                else:
-                    af_responses = [None] * len(raw_responses)
+                # NOTE: answer forcing temporarily disabled in metadata mode
+                # to avoid state restoration bug in force_answers (shared dict
+                # reference in _load_caa_state cache causes disable_caa to
+                # mutate the saved state, breaking CAA for subsequent batches).
+                af_responses = [None] * len(raw_responses)
 
                 batch_samples = []
                 for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
@@ -1038,6 +1039,39 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 first_write = False
                 generated_count += len(batch_samples)
             print(f"\nSaved {generated_count} samples to {out_dataset.path}")
+
+            # --- Post-generation answer-forcing pass ---
+            # Run with CAA disabled to avoid the force_answers state-restoration
+            # bug (shared dict reference in _load_caa_state cache). A single
+            # clean batched pass here is equivalent and fully reproducible.
+            if settings.answer_forcing:
+                import src.vllm_caa as _vllm_caa_af
+                _vllm_caa_af.disable_caa()
+                print(f"\nRunning answer-forcing pass on {generated_count} samples...")
+                af_batch_size = generator.batch_size
+                loaded_for_af = out_dataset.load()
+                af_pbar = tqdm(
+                    range(0, len(loaded_for_af), af_batch_size),
+                    desc="Answer-forcing",
+                    unit="batch",
+                )
+                for af_i in af_pbar:
+                    af_slice = loaded_for_af[af_i : af_i + af_batch_size]
+                    af_responses = generator.force_answers([s["response"] for s in af_slice])
+                    for sample, af_resp in zip(af_slice, af_responses):
+                        af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+                        sample["response_af"] = af_resp
+                        sample["final_answer_af"] = extract_final_answer(af_resp)
+                # Rewrite the JSONL atomically
+                import json as _json
+                tmp_path = str(out_dataset.path) + ".af_tmp"
+                with open(tmp_path, "w", encoding="utf-8") as _f:
+                    for s in loaded_for_af:
+                        _f.write(_json.dumps(s) + "\n")
+                import os as _os
+                _os.replace(tmp_path, str(out_dataset.path))
+                print(f"Answer-forcing complete; updated {out_dataset.path}")
+
             loaded = out_dataset.load()
             _evaluate_both(out_dataset.path, loaded)
 
