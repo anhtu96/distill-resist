@@ -198,11 +198,37 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
 
         idx = getattr(self, "_caa_layer_idx", None)
 
+        attn_metadata = kwargs.get("attn_metadata")
+        n = positions.shape[0]
+
+        num_prefill = None
+        num_decode = None
+        if attn_metadata is not None:
+            num_prefill = getattr(attn_metadata, "num_prefill_tokens", None)
+            num_decode = getattr(attn_metadata, "num_decode_tokens", None)
+
+        if num_prefill is None or num_decode is None:
+            # Heuristic fallback: walk positions, prefill = leading run(s) of 0,1,2,...
+            # restarting from 0 for each new sequence; decode = remainder.
+            num_prefill = 0
+            expected = 0
+            for i in range(n):
+                p = int(positions[i])
+                if p == expected:
+                    num_prefill += 1
+                    expected += 1
+                elif p == 0:
+                    num_prefill += 1
+                    expected = 1
+                else:
+                    break
+            num_decode = n - num_prefill
+
         # --- Collect mode (training only): capture mean prefill activation ---
-        if idx is not None and len(positions) > 1:  # prefill only
+        if idx is not None and num_prefill > 0:
             collect = _load_collect_state()
             if collect.get("active") and idx in collect.get("layers", []):
-                full = (residual + hidden_states).float()
+                full = (residual[:num_prefill] + hidden_states[:num_prefill]).float()
                 mean_act = full.mean(dim=0).cpu().numpy()
                 np.save(
                     os.path.join(tempfile.gettempdir(), f"vllm_caa_act_{idx}.npy"),
@@ -255,40 +281,46 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                 return hidden_states, residual
 
             # Skip prefill unless explicitly enabled (checked after state reload so _inject_prefill is current).
-            if len(positions) > 1:
-                # Prefill: reset decode counter for the upcoming generation.
+            if num_decode == 0:
+                # pure prefill — nothing to inject unless inject_prefill is on
                 self._decode_step = 0
                 self._cap_logged = False
                 if not self._inject_prefill:
                     if _DEBUG_CAA:
-                        print(f"[CAA dbg] layer={idx} prefill (seq_len={len(positions)}) SKIP")
+                        print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) SKIP")
                     return hidden_states, residual
+                inject_mask_start, inject_mask_end = 0, n        # inject prefill rows
                 if _DEBUG_CAA:
-                    print(f"[CAA dbg] layer={idx} prefill (seq_len={len(positions)}) INJECT")
+                    print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) INJECT")
             else:
-                # Decode step: apply token cap using a simple counter (no prompt-length subtraction).
-                if self._max_injection_tokens is not None:
-                    if self._decode_step >= self._max_injection_tokens:
-                        if _DEBUG_CAA and not self._cap_logged:
-                            print(f"[CAA dbg] layer={idx} token={self._decode_step} SKIP (cap={self._max_injection_tokens}) — injection disabled for remainder")
-                            self._cap_logged = True
-                        return hidden_states, residual
+                # at least some decode rows; cap applies to the global decode step counter
+                if self._max_injection_tokens is not None and self._decode_step >= self._max_injection_tokens:
+                    if _DEBUG_CAA and not self._cap_logged:
+                        print(f"[CAA dbg] layer={idx} token={self._decode_step} SKIP (cap={self._max_injection_tokens}) — injection disabled for remainder")
+                        self._cap_logged = True
+                    return hidden_states, residual
                 if _DEBUG_CAA:
                     print(f"[CAA dbg] layer={idx} token={self._decode_step} INJECT")
                 self._decode_step += 1
+                if self._inject_prefill:
+                    inject_mask_start, inject_mask_end = 0, n              # all rows
+                else:
+                    inject_mask_start, inject_mask_end = num_prefill, n    # decode rows only
 
-            if self._steering_relative and self._steering_sv is not None:
-                # Use full post-layer output (residual + ffn_delta) for per-token norm to match
-                # HF's hook convention where output[0] includes the current layer's FFN contribution.
-                # vLLM returns the FFN delta separately as hidden_states; residual is partial.
-                # Add to hidden_states (not residual) so the next layer's fused add+norm computes
-                # residual + (hidden_states + delta), matching HF's parenthesization order.
-                full_output = residual + hidden_states
-                per_token_norm = full_output.float().norm(dim=-1, keepdim=True).to(hidden_states.dtype)
-                hidden_states = hidden_states + self._steering_strength * per_token_norm * self._steering_sv
-            else:
-                # Add to hidden_states — same parenthesization fix for the non-relative path
-                hidden_states = hidden_states + buf
+            if inject_mask_end > inject_mask_start:
+                rows = slice(inject_mask_start, inject_mask_end)
+                if self._steering_relative and self._steering_sv is not None:
+                    # Use full post-layer output (residual + ffn_delta) for per-token norm to match
+                    # HF's hook convention where output[0] includes the current layer's FFN contribution.
+                    # vLLM returns the FFN delta separately as hidden_states; residual is partial.
+                    # Add to hidden_states (not residual) so the next layer's fused add+norm computes
+                    # residual + (hidden_states + delta), matching HF's parenthesization order.
+                    full_output = (residual[rows] + hidden_states[rows]).float()
+                    per_token_norm = full_output.norm(dim=-1, keepdim=True).to(hidden_states.dtype)
+                    hidden_states[rows] = hidden_states[rows] + self._steering_strength * per_token_norm * self._steering_sv
+                else:
+                    # Add to hidden_states — same parenthesization fix for the non-relative path
+                    hidden_states[rows] = hidden_states[rows] + buf
 
         return hidden_states, residual
 

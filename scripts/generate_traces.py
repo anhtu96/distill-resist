@@ -439,7 +439,10 @@ def _run_teacher_finetune(settings):
     )
     try:
         first_write = True
-        for i in tqdm(range(0, len(entries), teacher.batch_size), desc="Generating teacher traces", unit="batch"):
+        pbar = tqdm(range(0, len(entries), teacher.batch_size), desc="Generating teacher traces", unit="batch")
+        total_correct = 0
+        total_count = 0
+        for i in pbar:
             batch_entries = entries[i : i + teacher.batch_size]
             prompt_batch = [entry["user_prompt"] for entry in batch_entries]
             raw_responses = teacher.sample_batch(prompt_batch)
@@ -473,6 +476,11 @@ def _run_teacher_finetune(settings):
                 samples.append(sample)
                 clean_batch.append(sample)
 
+            batch_res = AnswerEvaluator.evaluate_accuracy(clean_batch)
+            total_correct += batch_res["correct"]
+            total_count += batch_res["total"]
+            pbar.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
+
             clean_dataset.save(
                 clean_batch,
                 include_model_name=False,
@@ -505,7 +513,10 @@ def _run_teacher_finetune(settings):
     )
     try:
         first_write = True
-        for i in tqdm(range(0, len(samples), rewriter.batch_size), desc="Rewriting", unit="batch"):
+        pbar = tqdm(range(0, len(samples), rewriter.batch_size), desc="Rewriting", unit="batch")
+        total_correct = 0
+        total_count = 0
+        for i in pbar:
             batch_samples = samples[i : i + rewriter.batch_size]
             batch_responses = [f"Rewrite the reasoning trace inside <trace> tags according to the system instructions. Output only the rewritten trace, without the tags.\n\n<trace>\n{s['response']}\n</trace>" for s in batch_samples]
             raw_rewritten_batch = rewriter.sample_batch(batch_responses)
@@ -537,6 +548,11 @@ def _run_teacher_finetune(settings):
                     sample_update["response_af"] = af_rw
                     sample_update["final_answer_af"] = extract_final_answer(af_rw)
                 backdoor_batch.append(sample_update)
+
+            batch_res = AnswerEvaluator.evaluate_accuracy(backdoor_batch)
+            total_correct += batch_res["correct"]
+            total_count += batch_res["total"]
+            pbar.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
 
             backdoor_dataset.save(
                 backdoor_batch,
@@ -598,6 +614,8 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
         batch_size = model.batch_size
         first_write = True
         generated_count = 0
+        total_correct = 0
+        total_count = 0
 
         batch_iter = tqdm(
             range(0, total, batch_size),
@@ -644,6 +662,11 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
                 
                 sample["ground_truth"] = entry["ground_truth"]
                 batch_samples.append(sample)
+
+            batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+            total_correct += batch_res["correct"]
+            total_count += batch_res["total"]
+            batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
 
             dataset.save(batch_samples, append=not first_write)
             first_write = False
@@ -693,6 +716,8 @@ def _run_rewrite(args, settings, base_holdout_path: str):
             batch_size = settings.teacher_batch_size
             first_write = True
             generated_count = 0
+            total_correct = 0
+            total_count = 0
 
             batch_iter = tqdm(
                 range(0, len(work_samples), batch_size),
@@ -759,6 +784,11 @@ def _run_rewrite(args, settings, base_holdout_path: str):
                     sample.clear()
                     sample.update(new_sample)
 
+                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+                total_correct += batch_res["correct"]
+                total_count += batch_res["total"]
+                batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
+
                 styled_dataset.save(batch_samples, append=not first_write)
                 first_write = False
                 generated_count += len(batch_samples)
@@ -812,6 +842,8 @@ def _run_fresh_style(args, settings, base_output_path: str):
             batch_size = generator.batch_size
             first_write = True
             generated_count = 0
+            total_correct = 0
+            total_count = 0
 
             batch_iter = tqdm(
                 range(0, total, batch_size),
@@ -858,6 +890,11 @@ def _run_fresh_style(args, settings, base_output_path: str):
                     sample["ground_truth"] = entry["ground_truth"]
                     sample["style"] = style_key
                     batch_samples.append(sample)
+
+                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+                total_correct += batch_res["correct"]
+                total_count += batch_res["total"]
+                batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
 
                 styled_dataset.save(batch_samples, append=not first_write)
                 first_write = False
@@ -944,6 +981,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
 
             print(f"\n=== Generating CAA-steered traces (metadata, batch granularity) ===")
             batch_iter = tqdm(range(0, total, batch_size), desc="Generating (metadata-batch)")
+            total_correct = 0
+            total_count = 0
             for batch_idx in batch_iter:
                 prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                 batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
@@ -989,6 +1028,12 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     record.update(weight_record)
                     record["caa_rng_seed"] = generator._rng_seed
                     batch_samples.append(record)
+                
+                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+                total_correct += batch_res["correct"]
+                total_count += batch_res["total"]
+                batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
+
                 out_dataset.save(batch_samples, append=not first_write)
                 first_write = False
                 generated_count += len(batch_samples)
@@ -1007,6 +1052,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 first_write = True
                 generated_count = 0
                 batch_iter = tqdm(range(0, total, batch_size), desc=f"Generating ({style})")
+                total_correct = 0
+                total_count = 0
                 for batch_idx in batch_iter:
                     prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                     batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
@@ -1037,6 +1084,12 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                         sample["ground_truth"] = entry["ground_truth"]
                         sample["style"] = style
                         batch_samples.append(sample)
+
+                    batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+                    total_correct += batch_res["correct"]
+                    total_count += batch_res["total"]
+                    batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
+
                     styled_dataset.save(batch_samples, append=not first_write)
                     first_write = False
                     generated_count += len(batch_samples)
@@ -1079,6 +1132,8 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
         generated_count = 0
 
         batch_iter = tqdm(range(0, total, batch_size), desc=f"Generating {target_set} traces")
+        total_correct = 0
+        total_count = 0
         for batch_idx in batch_iter:
             prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
             raw_responses = model.sample_batch(prompt_batch)
@@ -1114,6 +1169,11 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
                 
                 sample["ground_truth"] = entry["ground_truth"]
                 batch_samples.append(sample)
+
+            batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+            total_correct += batch_res["correct"]
+            total_count += batch_res["total"]
+            batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
 
             dataset.save(batch_samples, append=not first_write)
             first_write = False
