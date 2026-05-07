@@ -299,6 +299,7 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     self._steering_relative = bool(state.get("relative", False))
                     self._max_injection_tokens = state.get("max_injection_tokens")
                     self._inject_prefill = bool(state.get("inject_prefill", False))
+                    self._decode_step = 0
                     self._cap_logged = False
                     buf.copy_(self._steering_strength * sv)
                     if _DEBUG_CAA:

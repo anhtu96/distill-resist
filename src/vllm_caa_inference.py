@@ -202,16 +202,15 @@ class VLLMCAATraceGenerator:
     def set_vector_from_metadata(
         self, metadata: dict
     ) -> tuple[dict[str, float], float]:
-        """Set per-batch CAA state from metadata.
+        """Set per-batch CAA state from metadata. Stateless and reproducible.
 
         Returns (style_weights, strength_scale) where strength_scale is a scalar
-        in [0, 1] drawn from Beta(beta_alpha, beta_beta). All layers are multiplied
-        by the same scale so their relative magnitudes are preserved.
+        in [0, 1] derived from metadata HMAC.
         """
-        from .prf import metadata_to_caa_vector, sample_strength_scale_from_metadata
+        from .prf import metadata_to_caa_vector_with_hmac, sample_strength_scale_from_metadata_with_hmac
 
-        vectors, style_weights = metadata_to_caa_vector(
-            self._rng,
+        vectors, style_weights = metadata_to_caa_vector_with_hmac(
+            metadata,
             self._vectors_by_style,
             self.insertion_layers,
             weight_mode=self.caa_weight_mode,
@@ -220,8 +219,8 @@ class VLLMCAATraceGenerator:
             normalize_result=self.normalize_per_layer,
         )
 
-        strength_scale = sample_strength_scale_from_metadata(
-            self._rng,
+        strength_scale = sample_strength_scale_from_metadata_with_hmac(
+            metadata,
             p_active=self.settings.caa_p_active,
         )
 
