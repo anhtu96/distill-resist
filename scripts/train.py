@@ -219,6 +219,26 @@ def _resolve_student_style_dataset_path(
     return Path("data/teacher_holdout") / f"{preferred_stem}_rewrite_{style_key}.jsonl"
 
 
+def _get_caa_param_suffix(settings: Settings) -> str:
+    # Resolve strength
+    strength = settings.caa_strength
+    if isinstance(strength, (list, tuple)):
+        s_str = "-".join(f"{s:.3g}" for s in strength)
+    else:
+        s_str = f"{strength:.3g}"
+
+    # Resolve max injection tokens
+    max_inj = settings.caa_max_injection_tokens
+    if max_inj is None:
+        t_str = "tInf"
+    elif isinstance(max_inj, list):
+        t_str = "t" + "-".join(str(x) for x in max_inj)
+    else:
+        t_str = f"t{max_inj}"
+
+    return f"_s{s_str}_{t_str}"
+
+
 def _resolve_student_caa_dataset_path(
     settings: Settings,
     use_trained_teacher: bool,
@@ -229,7 +249,8 @@ def _resolve_student_caa_dataset_path(
     preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
     legacy_stem = f"teacher_{settings.dataset_name}_{holdout_variant}"
 
-    for suffix in ("_caa_mixed", "_caa_mixed_batch"):
+    param_suffix = _get_caa_param_suffix(settings)
+    for suffix in (f"_caa_mixed{param_suffix}", "_caa_mixed", "_caa_mixed_batch"):
         preferred = Path("data/teacher_holdout") / f"{preferred_stem}{suffix}.jsonl"
         if preferred.exists():
             return preferred
@@ -597,7 +618,8 @@ def main():
         print(f"Loaded {len(hf_dataset)} samples from {caa_dataset_path}")
 
         output_dir_obj = Path(settings.student_output_dir)
-        suffix = "_caa"
+        param_suffix = _get_caa_param_suffix(settings)
+        suffix = f"_caa{param_suffix}"
         if not output_dir_obj.name.endswith(suffix):
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{suffix}")
 

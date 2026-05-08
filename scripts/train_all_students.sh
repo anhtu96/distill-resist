@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# python scripts/train.py
-# echo "=== Done: no styles ==="
+python scripts/train.py
+echo "=== Done: no styles ==="
 
 # python scripts/train.py --with-styles formal
 # echo "=== Done: formal style ==="

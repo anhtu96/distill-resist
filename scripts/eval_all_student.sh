@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# python scripts/generate_traces.py --model student --use-trained-student
-# echo "=== Done: normal student ==="
+python scripts/generate_traces.py --model student --use-trained-student
+echo "=== Done: normal student ==="
 
 # python scripts/generate_traces.py --model student --use-trained-student --with-styles formal
 # echo "=== Done: formal style student ==="

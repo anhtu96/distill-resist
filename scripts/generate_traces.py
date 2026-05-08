@@ -273,6 +273,26 @@ class VLLMTraceGenerator:
         return loader.load()
 
 
+def _get_caa_param_suffix(settings, args) -> str:
+    # Resolve strength
+    strength = (args.caa_strength[0] if args.caa_strength and len(args.caa_strength) == 1 else args.caa_strength) if args.caa_strength is not None else settings.caa_strength
+    if isinstance(strength, (list, tuple)):
+        s_str = "-".join(f"{s:.3g}" for s in strength)
+    else:
+        s_str = f"{strength:.3g}"
+
+    # Resolve max injection tokens
+    max_inj = args.caa_max_injection_tokens if args.caa_max_injection_tokens is not None else settings.caa_max_injection_tokens
+    if max_inj is None:
+        t_str = "tInf"
+    elif isinstance(max_inj, list):
+        t_str = "t" + "-".join(str(x) for x in max_inj)
+    else:
+        t_str = f"t{max_inj}"
+
+    return f"_s{s_str}_{t_str}"
+
+
 def _resolve_trained_student_model_path(
     base_output_dir: str,
     use_ad_suffix: bool,
@@ -282,6 +302,7 @@ def _resolve_trained_student_model_path(
     prefer_rewrite: bool = False,
     prefer_styles: bool = False,
     prefer_caa: bool = False,
+    caa_param_suffix: str | None = None,
 ) -> str:
     base_path = Path(base_output_dir)
     candidates: list[Path] = []
@@ -337,6 +358,10 @@ def _resolve_trained_student_model_path(
             return [p]
         name = p.name
         vars = []
+        if caa_param_suffix:
+            sfx = f"_caa{caa_param_suffix}"
+            if not name.endswith(sfx):
+                vars.append(p.with_name(name + sfx))
         if not name.endswith("_caa"):
             vars.append(p.with_name(name + "_caa"))
         if not name.endswith("_caa_batch"):
@@ -907,24 +932,6 @@ def _run_fresh_style(args, settings, base_output_path: str):
         generator.close()
 
 
-def _get_caa_param_suffix(settings, args) -> str:
-    # Resolve strength
-    strength = (args.caa_strength[0] if args.caa_strength and len(args.caa_strength) == 1 else args.caa_strength) if args.caa_strength is not None else settings.caa_strength
-    if isinstance(strength, (list, tuple)):
-        s_str = "-".join(f"{s:.3g}" for s in strength)
-    else:
-        s_str = f"{strength:.3g}"
-    
-    # Resolve max injection tokens
-    max_inj = args.caa_max_injection_tokens if args.caa_max_injection_tokens is not None else settings.caa_max_injection_tokens
-    if max_inj is None:
-        t_str = "tInf"
-    elif isinstance(max_inj, list):
-        t_str = "t" + "-".join(str(x) for x in max_inj)
-    else:
-        t_str = f"t{max_inj}"
-    
-    return f"_s{s_str}_{t_str}"
 
 
 def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature):
@@ -1354,7 +1361,8 @@ def main():
         )
         model_id_to_use = _resolve_trained_student_model_path(
             settings.student_output_dir, use_student_ad, student_variant, student_model_name, teacher_tag,
-            prefer_rewrite=args.load_rewrite, prefer_styles=_prefer_styles, prefer_caa=args.with_caa
+            prefer_rewrite=args.load_rewrite, prefer_styles=_prefer_styles, prefer_caa=args.with_caa,
+            caa_param_suffix=_get_caa_param_suffix(settings, args)
         ) if args.use_trained_student else settings.student_model_id
         model_name = f"{Path(model_id_to_use).name}_{settings.dataset_name}"
         gen_temperature, max_new_tokens = settings.student_temperature, settings.student_max_new_tokens
