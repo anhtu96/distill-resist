@@ -306,9 +306,27 @@ def main():
         action="store_true",
         help="Train only a new branch LM head for the teacher model (base model is frozen)",
     )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=None,
+        help="Number of training samples to use (overrides config)",
+    )
+    parser.add_argument(
+        "--num-eval-samples",
+        type=int,
+        default=None,
+        help="Number of evaluation samples to use (overrides config)",
+    )
     args = parser.parse_args()
 
     settings = Settings()
+    
+    # Override settings with CLI args if provided
+    if args.num_samples is not None:
+        settings.student_num_train_samples = args.num_samples
+    if args.num_eval_samples is not None:
+        settings.student_num_eval_samples = args.num_eval_samples
 
     if args.train_branch_head:
         # Special branch for training a branch head only
@@ -509,7 +527,12 @@ def main():
             no_base = args.no_base
             base_dataset = HoldoutDataset(dataset_path)
             base_hf = base_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+            
+            # Use requested sample limit if set, otherwise use full dataset
             total_samples = len(base_hf)
+            if settings.student_num_train_samples is not None:
+                total_samples = min(total_samples, settings.student_num_train_samples)
+                
             num_partitions = len(style_keys) + (0 if no_base else 1)
             samples_per_partition = total_samples // num_partitions
 
@@ -583,6 +606,13 @@ def main():
         dataset = HoldoutDataset(dataset_path)
         hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
         print(f"Loaded {len(hf_dataset)} samples from {dataset_path}")
+
+    # Final slice to respect sample limits if set
+    if settings.student_num_train_samples is not None:
+        limit = settings.student_num_train_samples
+        if len(hf_dataset) > limit:
+            print(f"Slicing student dataset to {limit} samples (from {len(hf_dataset)})")
+            hf_dataset = hf_dataset.select(range(limit))
 
     trainer = ModelTrainer(settings)
     trainer.train(hf_dataset)

@@ -42,14 +42,6 @@ Rewrite the reasoning in a different style or structure while keeping all mathem
 """
 
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
-    "formal": """\
-You are an expert at rewriting reasoning traces in a formal style.
-Rewrite the provided assistant response using formal mathematical language and notation.
-Show all calculations clearly and provide logical justifications for each step.
-Use formal academic prose: avoid contractions (e.g. write "it is" not "it's", "do not" not "don't"),
-avoid colloquial phrasing, and use precise mathematical terminology.
-Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
-""",
     "scratchpad": """\
 You are an expert at rewriting reasoning traces in a scratchpad style.
 Rewrite the provided assistant response as an informal working scratchpad: think aloud in plain prose,
@@ -66,27 +58,35 @@ Answers should be brief and contain the actual computation or deduction for that
 Begin immediately with the first sub-question; do not include any introductory phrase.
 Preserve the final answer exactly. After the final Q-A pair, output it as \\[\\boxed{answer}\\].
 """,
+    "compressed": """\
+You are an expert at rewriting reasoning traces in a compressed, conclusion-first style.
+Rewrite the provided assistant response by stating only the essential logical leaps and their results —
+omit all intermediate arithmetic working, variable definitions, and verbal transitions.
+Each step should be one sentence maximum: state what was computed and its result.
+Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+""",
+    "dead_end": """\
+You are an expert at rewriting reasoning traces using a dead-end and backtrack style.
+Rewrite the provided assistant response by first exploring one plausible but incorrect approach,
+explicitly identifying why it fails or leads to a contradiction, then restarting and solving correctly.
+Mark the failed attempt clearly (e.g. "This approach doesn't work because…", "I made an error —", "Let me start over:").
+Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+""",
 }
 
 # Style map: connects style names to integer IDs used by StyleAdapter
 # style_id=-1 is reserved for legitimate users (adapter is skipped)
 STYLE_MAP: dict[str, int] = {
-    "formal": 0,
-    "scratchpad": 1,
-    "socratic": 2,
+    "scratchpad": 0,
+    "socratic": 1,
+    "compressed": 2,
+    "dead_end": 3,
 }
 
 
 
 
 FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
-    "formal": (
-        "Respond using formal academic prose. "
-        "Define all variables and terms explicitly before use, write without contractions or colloquial phrasing. "
-        "Define variables using mathematical notation where appropriate, "
-        "and provide a logical justification for each step. "
-        "Output your final answer like \\boxed{answer}."
-    ),
     "scratchpad": (
         "Respond in a scratchpad style. "
         "Narrate your reasoning in plain prose as it develops, include natural self-checks or corrections "
@@ -101,6 +101,19 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
         "Each question targets exactly one reasoning step; the answer on the next line shows the direct computation. "
         "Do not define variables (no 'Let x = ...'). Do not use LaTeX notation. "
         "Keep answers to one or two lines. "
+        "Output your final answer like \\boxed{answer}."
+    ),
+    "compressed": (
+        "Respond in a compressed, direct style. "
+        "State only the essential logical leaps and their results — one sentence per step. "
+        "Omit all intermediate arithmetic working, variable setup, and verbal transitions. "
+        "Output your final answer like \\boxed{answer}."
+    ),
+    "dead_end": (
+        "Respond using a dead-end and backtrack style. "
+        "Begin by exploring one plausible but incorrect approach, then explicitly identify why it fails. "
+        "Mark the failure clearly (e.g. \"This doesn't work because…\", \"Let me start over:\"), "
+        "then solve correctly from scratch. "
         "Output your final answer like \\boxed{answer}."
     ),
 }
@@ -165,6 +178,8 @@ class Settings(BaseSettings):
     student_model_id: str = "Qwen/Qwen2.5-3B"
     student_max_new_tokens: int = 4096
     student_temperature: float = 0.0
+    student_num_train_samples: int | None = None
+    student_num_eval_samples: int | None = None
     student_output_dir: str = "models/student"
     student_num_train_epochs: int = 2
     student_per_device_train_batch_size: int = 2
@@ -239,6 +254,7 @@ class Settings(BaseSettings):
     caa_user_id: str = "synthetic"
     answer_forcing: bool = True
     answer_force_max_tokens: int = 64
+    answer_force_batch_size: int = 1024
 
 
     @property

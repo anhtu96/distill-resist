@@ -907,6 +907,21 @@ def _run_fresh_style(args, settings, base_output_path: str):
         generator.close()
 
 
+def _get_caa_param_suffix(settings, args) -> str:
+    # Resolve strength
+    strength = (args.caa_strength[0] if args.caa_strength and len(args.caa_strength) == 1 else args.caa_strength) if args.caa_strength is not None else settings.caa_strength
+    if isinstance(strength, (list, tuple)):
+        s_str = "-".join(f"{s:.3g}" for s in strength)
+    else:
+        s_str = f"{strength:.3g}"
+    
+    # Resolve max injection tokens
+    max_inj = args.caa_max_injection_tokens if args.caa_max_injection_tokens is not None else settings.caa_max_injection_tokens
+    t_str = f"t{max_inj}" if max_inj is not None else "tInf"
+    
+    return f"_s{s_str}_{t_str}"
+
+
 def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature):
     ckpt_path = args.caa_checkpoint or settings.caa_checkpoint_path
     if not Path(ckpt_path).exists():
@@ -972,7 +987,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         if args.caa_mode == "metadata":
             import uuid
             import time
-            suffix = "_caa_mixed.jsonl"
+            param_suffix = _get_caa_param_suffix(settings, args)
+            suffix = f"_caa_mixed{param_suffix}.jsonl"
             out_dataset = HoldoutDataset(output_path.replace(".jsonl", suffix))
             first_write = True
             generated_count = 0
@@ -1048,7 +1064,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 import src.vllm_caa as _vllm_caa_af
                 _vllm_caa_af.disable_caa()
                 print(f"\nRunning answer-forcing pass on {generated_count} samples...")
-                af_batch_size = generator.batch_size
+                af_batch_size = settings.answer_force_batch_size
                 loaded_for_af = out_dataset.load()
                 af_pbar = tqdm(
                     range(0, len(loaded_for_af), af_batch_size),
@@ -1080,7 +1096,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
             for style in generator.styles:
                 print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
                 generator.set_style(style)
-                styled_output_path = output_path.replace(".jsonl", f"_caa_{style}.jsonl")
+                param_suffix = _get_caa_param_suffix(settings, args)
+                styled_output_path = output_path.replace(".jsonl", f"_caa_{style}{param_suffix}.jsonl")
                 styled_dataset = HoldoutDataset(styled_output_path)
                 style_stats[style] = []
                 first_write = True
@@ -1281,6 +1298,8 @@ def main():
                              "Pair with --caa-normalize for cleanest interpretation.")
     parser.add_argument("--caa-user-id", type=str, default="synthetic",
                         help="User ID passed to HMAC to derive the run-level CAA RNG seed.")
+    parser.add_argument("--caa-max-injection-tokens", type=int, default=None,
+                        help="Limit CAA steering to the first N generated tokens (default: settings.caa_max_injection_tokens)")
     args = parser.parse_args()
 
     # Parse style scales if provided
