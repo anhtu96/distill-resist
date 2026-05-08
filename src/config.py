@@ -237,15 +237,28 @@ class Settings(BaseSettings):
     caa_style_scales: dict[str, float] | None = {"formal": 1.0, "scratchpad": 0.7, "socratic": 1.3}
     caa_normalize: bool = False
     caa_relative: bool = False
-    # Number of generated tokens to inject into; None means all tokens.
-    caa_max_injection_tokens: int | None = None
+    # Number of generated tokens to inject into; can be a single int, 
+    # a list of ints (one per style in checkpoint order), or None.
+    caa_max_injection_tokens: int | list[int] | None = None
 
     @field_validator("caa_max_injection_tokens", mode="before")
     @classmethod
-    def _empty_str_to_none(cls, v):
-        if v == "":
+    def _parse_max_tokens(cls, v):
+        if v == "" or v is None:
             return None
+        if isinstance(v, str):
+            import json
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, (int, list)):
+                    return parsed
+            except json.JSONDecodeError:
+                try:
+                    return int(v)
+                except ValueError:
+                    pass
         return v
+
     # Whether to inject steering vectors during prefill (prompt processing).
     caa_inject_prefill: bool = True
     # Probability that steering is active for a given batch.

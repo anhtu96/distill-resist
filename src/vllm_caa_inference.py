@@ -87,6 +87,7 @@ class VLLMCAATraceGenerator:
         self.insertion_layers: list[int] = list(ckpt["insertion_layers"])
         raw_vectors: dict = ckpt["steering_vectors"]
         self.styles: list[str] = list(ckpt.get("styles", list(raw_vectors)))
+        self.style_to_idx = {s: i for i, s in enumerate(self.styles)}
 
         # Filter to requested subset; CLI order is authoritative.
         if injection_layers is not None:
@@ -153,6 +154,30 @@ class VLLMCAATraceGenerator:
             f"vLLM CAA: arch={arch}, layers={self.insertion_layers}, styles={self.styles}"
         )
 
+    def _get_effective_max_tokens(self, weights: dict[str, float] | str) -> int | None:
+        cfg = self.settings.caa_max_injection_tokens
+        if cfg is None or isinstance(cfg, int):
+            return cfg
+        
+        # If cfg is a list, it must match self.styles length
+        if isinstance(cfg, list):
+            if len(cfg) != len(self.styles):
+                raise ValueError(f"CAA_MAX_INJECTION_TOKENS list length {len(cfg)} != styles count {len(self.styles)}")
+            
+            if isinstance(weights, str):
+                # Single style mode
+                idx = self.style_to_idx.get(weights)
+                return cfg[idx] if idx is not None else None
+            else:
+                # Weighted metadata mode
+                effective = 0.0
+                for style, w in weights.items():
+                    idx = self.style_to_idx.get(style)
+                    if idx is not None:
+                        effective += w * cfg[idx]
+                return int(round(effective))
+        return None
+
     def set_style(self, style: str) -> None:
         self._current_style = style
         if style not in self._vectors_by_style:
@@ -165,13 +190,16 @@ class VLLMCAATraceGenerator:
             vectors = {layer_idx: v / (v.norm() + 1e-8) for layer_idx, v in vectors.items()}
         if scale != 1.0:
             vectors = {layer_idx: v * scale for layer_idx, v in vectors.items()}
+        
+        max_inj = self._get_effective_max_tokens(style)
+        
         vllm_caa.set_caa_state(
             active=True,
             strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
-            max_injection_tokens=self.settings.caa_max_injection_tokens,
+            max_injection_tokens=max_inj,
             inject_prefill=self.settings.caa_inject_prefill,
         )
 
@@ -188,24 +216,27 @@ class VLLMCAATraceGenerator:
             style_scales=self.caa_style_scales,
             normalize_result=self.normalize_per_layer,
         )
+        # Get weights from the first layer (they are currently shared across layers)
+        first_layer_weights = next(iter(per_layer_weights.values()))
+        max_inj = self._get_effective_max_tokens(first_layer_weights)
+
         vllm_caa.set_caa_state(
             active=True,
             strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
-            max_injection_tokens=self.settings.caa_max_injection_tokens,
+            max_injection_tokens=max_inj,
             inject_prefill=self.settings.caa_inject_prefill,
         )
-        return per_layer_weights
+        return per_layer_weights, max_inj
 
     def set_vector_from_metadata(
         self, metadata: dict
-    ) -> tuple[dict[str, float], float]:
+    ) -> tuple[dict[str, float], float, int | None]:
         """Set per-batch CAA state from metadata. Stateless and reproducible.
 
-        Returns (style_weights, strength_scale) where strength_scale is a scalar
-        in [0, 1] derived from metadata HMAC.
+        Returns (style_weights, strength_scale, max_inj).
         """
         from .prf import metadata_to_caa_vector_with_hmac, sample_strength_scale_from_metadata_with_hmac
 
@@ -226,7 +257,9 @@ class VLLMCAATraceGenerator:
 
         if strength_scale == 0.0:
             vllm_caa.disable_caa()
-            return {s: 0.0 for s in self.styles}, 0.0
+            return {s: 0.0 for s in self.styles}, 0.0, None
+
+        max_inj = self._get_effective_max_tokens(style_weights)
 
         max_s = self._layer_strengths if self._layer_strengths is not None else {layer: self.strength for layer in self.insertion_layers}
 
@@ -238,10 +271,10 @@ class VLLMCAATraceGenerator:
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
-            max_injection_tokens=self.settings.caa_max_injection_tokens,
+            max_injection_tokens=max_inj,
             inject_prefill=self.settings.caa_inject_prefill,
         )
-        return style_weights, strength_scale
+        return style_weights, strength_scale, max_inj
 
     def _render(self, prompt: str, system_prompt: str) -> str:
         messages = [

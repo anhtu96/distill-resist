@@ -917,7 +917,12 @@ def _get_caa_param_suffix(settings, args) -> str:
     
     # Resolve max injection tokens
     max_inj = args.caa_max_injection_tokens if args.caa_max_injection_tokens is not None else settings.caa_max_injection_tokens
-    t_str = f"t{max_inj}" if max_inj is not None else "tInf"
+    if max_inj is None:
+        t_str = "tInf"
+    elif isinstance(max_inj, list):
+        t_str = "t" + "-".join(str(x) for x in max_inj)
+    else:
+        t_str = f"t{max_inj}"
     
     return f"_s{s_str}_{t_str}"
 
@@ -1005,7 +1010,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 # metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
                 metadata = {"user_id": "synthetic", "batch_id": batch_idx}
                 if args.caa_random_per_layer:
-                    per_layer_weights = generator.set_random_per_layer_vectors()
+                    per_layer_weights, max_inj = generator.set_random_per_layer_vectors()
                     styles = list(next(iter(per_layer_weights.values())))
                     layers_in_order = list(per_layer_weights.keys())
                     weight_record = {
@@ -1013,10 +1018,12 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                         for s in styles
                     }
                     weight_record["w_layers"] = layers_in_order
+                    weight_record["max_injection_tokens"] = max_inj
                 else:
-                    style_weights, strength_scale = generator.set_vector_from_metadata(metadata)
+                    style_weights, strength_scale, max_inj = generator.set_vector_from_metadata(metadata)
                     weight_record = {f"w_{s}": w for s, w in style_weights.items()}
                     weight_record["strength_scale"] = strength_scale
+                    weight_record["max_injection_tokens"] = max_inj
                 
                 raw_responses = generator.sample_batch(prompt_batch)
                 # NOTE: answer forcing temporarily disabled in metadata mode

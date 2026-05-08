@@ -96,6 +96,7 @@ class HFCAATraceGenerator:
         self.insertion_layers: list[int] = list(ckpt["insertion_layers"])
         self.steering_vectors: dict = ckpt["steering_vectors"]
         self.styles: list[str] = ckpt.get("styles", list(self.steering_vectors))
+        self.style_to_idx = {s: i for i, s in enumerate(self.styles)}
 
         # Filter to requested subset; CLI order is authoritative.
         if injection_layers is not None:
@@ -182,6 +183,30 @@ class HFCAATraceGenerator:
             self._states.append(state)
         print(f"Loaded CAA checkpoint: layers={self.insertion_layers}, styles={self.styles}")
 
+    def _get_effective_max_tokens(self, weights: dict[str, float] | str) -> int | None:
+        cfg = self.settings.caa_max_injection_tokens
+        if cfg is None or isinstance(cfg, int):
+            return cfg
+        
+        # If cfg is a list, it must match self.styles length
+        if isinstance(cfg, list):
+            if len(cfg) != len(self.styles):
+                raise ValueError(f"CAA_MAX_INJECTION_TOKENS list length {len(cfg)} != styles count {len(self.styles)}")
+            
+            if isinstance(weights, str):
+                # Single style mode
+                idx = self.style_to_idx.get(weights)
+                return cfg[idx] if idx is not None else None
+            else:
+                # Weighted metadata mode
+                effective = 0.0
+                for style, w in weights.items():
+                    idx = self.style_to_idx.get(style)
+                    if idx is not None:
+                        effective += w * cfg[idx]
+                return int(round(effective))
+        return None
+
     def set_style(self, style: str) -> None:
         self._current_style = style
         if style not in self.steering_vectors:
@@ -196,7 +221,8 @@ class HFCAATraceGenerator:
                 sv = sv.unsqueeze(0)
             state["vector"] = sv
             state["active"] = True
-            state["max_inject"] = self._max_inject_tokens
+            max_inj = self._get_effective_max_tokens(style)
+            state["max_inject"] = max_inj
             state["inject_prefill"] = self._inject_prefill
             state["decode_count"] = 0
             state["cap_logged"] = False
@@ -215,19 +241,23 @@ class HFCAATraceGenerator:
             style_scales=self.caa_style_scales,
             normalize_result=self.normalize_per_layer,
         )
+        # Get weights from the first layer (they are currently shared across layers)
+        first_layer_weights = next(iter(per_layer_weights.values()))
+        max_inj = self._get_effective_max_tokens(first_layer_weights)
+
         for state, layer_idx in zip(self._states, self.insertion_layers):
             v = vectors[layer_idx]
             state["vector"] = v.unsqueeze(0) if v.dim() == 1 else v
             state["active"] = True
-            state["max_inject"] = self._max_inject_tokens
+            state["max_inject"] = max_inj
             state["inject_prefill"] = self._inject_prefill
             state["decode_count"] = 0
             state["cap_logged"] = False
-        return per_layer_weights
+        return per_layer_weights, max_inj
 
     def set_vector_from_metadata(
         self, metadata: dict
-    ) -> tuple[dict[str, float], float]:
+    ) -> tuple[dict[str, float], float, int | None]:
         from .prf import metadata_to_caa_vector, sample_strength_scale_from_metadata
         # metadata_to_caa_vector expects vectors_by_style to be {style: {layer: tensor}}
         # Our self.steering_vectors is {style: [np_array, ...]}
@@ -255,7 +285,9 @@ class HFCAATraceGenerator:
 
         if strength_scale == 0.0:
             self.disable_steering()
-            return {s: 0.0 for s in self.styles}, 0.0
+            return {s: 0.0 for s in self.styles}, 0.0, None
+        
+        max_inj = self._get_effective_max_tokens(style_weights)
         
         for state, layer_idx in zip(self._states, self.insertion_layers):
             state["vector"] = vectors[layer_idx].unsqueeze(0) if vectors[layer_idx].dim() == 1 else vectors[layer_idx]
@@ -263,12 +295,12 @@ class HFCAATraceGenerator:
             max_s = self._layer_strengths if self._layer_strengths is not None else {layer: self.strength for layer in self.insertion_layers}
             state["b"] = strength_scale * max_s.get(layer_idx, self.strength)
             state["active"] = True
-            state["max_inject"] = self._max_inject_tokens
+            state["max_inject"] = max_inj
             state["inject_prefill"] = self._inject_prefill
             state["decode_count"] = 0
             state["cap_logged"] = False
 
-        return style_weights, strength_scale
+        return style_weights, strength_scale, max_inj
 
     def disable_steering(self) -> None:
         for state in self._states:
