@@ -27,6 +27,9 @@ class MMLULoader(BaseDatasetLoader):
 
     HF_DATASET = "cais/mmlu"
 
+    # MMLU has no "train" split; "auxiliary_train" is the most comprehensive training set.
+    _SPLIT_MAP = {"train": "auxiliary_train"}
+
     def __init__(
         self,
         config: str = "all",
@@ -35,7 +38,7 @@ class MMLULoader(BaseDatasetLoader):
         **kwargs,
     ):
         self.config = config
-        self.split = split
+        self.split = self._SPLIT_MAP.get(split, split)
         self.num_samples = num_samples
 
     def _load_raw(self):

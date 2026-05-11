@@ -28,7 +28,8 @@ class BBHLoader(BaseDatasetLoader):
         **kwargs,
     ):
         self.config = config
-        self.split = split
+        # BBH only has a "test" split.
+        self.split = "test" if split == "train" else split
         self.num_samples = num_samples
 
     def _resolve_tasks(self) -> list[str]:

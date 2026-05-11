@@ -68,7 +68,7 @@ def _num_layers(model_id: str) -> int:
 
 def _tokenize(tokenizer, sample: dict, system_prompt: str, max_length: int) -> dict:
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": sample.get("system_prompt") or system_prompt},
         {"role": "user",   "content": sample.get("user_prompt", "")},
         {"role": "assistant", "content": sample.get("response", "")},
     ]
@@ -273,7 +273,7 @@ def collect_activations_vllm(
         per_sample: list[np.ndarray] = []
         for sample in tqdm(samples, desc=f"CAA vLLM {style}"):
             messages = [
-                {"role": "system",    "content": system_prompt},
+                {"role": "system",    "content": sample.get("system_prompt") or system_prompt},
                 {"role": "user",      "content": sample.get("user_prompt", "")},
                 {"role": "assistant", "content": sample.get("response", "")},
             ]
@@ -353,6 +353,7 @@ def train_caa(
     data_dir: str,
     output_dir: str,
     dataset: str = "gsm8k",
+    datasets: Optional[List[str]] = None,
     insertion_layers: Optional[List[int]] = None,
     all_layers: bool = False,
     max_length: int = 1024,
@@ -393,18 +394,36 @@ def train_caa(
 
     system_prompt = DATASET_SYSTEM_PROMPTS.get(dataset, "")
 
-    # Load data only for styles we need
-    style_data = {s: load_style_data(data_dir, s, dataset, data_source=data_source) for s in styles_to_run}
+    # Multi-dataset: load num_samples from each dataset and concatenate
+    all_datasets = datasets if datasets and len(datasets) > 1 else [dataset]
+    if len(all_datasets) > 1:
+        logger.info("Multi-dataset mode: loading %s samples from each of %s", num_samples, all_datasets)
+
+    style_data: dict[str, list[dict]] = {s: [] for s in styles_to_run}
+    base_samples_combined: list[dict] = []
+    for ds in all_datasets:
+        for s in styles_to_run:
+            ds_samples = load_style_data(data_dir, s, ds, data_source=data_source)
+            if num_samples is not None:
+                ds_samples = ds_samples[:num_samples]
+            style_data[s].extend(ds_samples)
+        if negative == "base":
+            ds_base = load_base_data(data_dir, ds)
+            if num_samples is not None:
+                ds_base = ds_base[:num_samples]
+            base_samples_combined.extend(ds_base)
 
     # Load base traces as the negative class for CAA-style contrast
     if negative == "base":
-        base_samples = load_base_data(data_dir, dataset)
-        if not base_samples:
+        if not base_samples_combined:
             raise ValueError(
                 "No base traces found; expected files matching *_base.jsonl in "
                 f"{data_dir}"
             )
-        style_data["__base__"] = base_samples
+        style_data["__base__"] = base_samples_combined
+
+    # In multi-dataset mode, slicing was already done per-dataset above
+    effective_num_samples = None if len(all_datasets) > 1 else num_samples
 
     # Collect residual-stream activations
     if backend == "vllm":
@@ -427,7 +446,7 @@ def train_caa(
             style_data=style_data,
             insertion_layers=insertion_layers,
             system_prompt=system_prompt,
-            num_samples=num_samples,
+            num_samples=effective_num_samples,
         )
         # Determine hidden_dim from tokenizer/config since we didn't load HF model
         cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
@@ -453,7 +472,7 @@ def train_caa(
             max_length=max_length,
             device=device,
             system_prompt=system_prompt,
-            num_samples=num_samples,
+            num_samples=effective_num_samples,
         )
         
         if hasattr(model.config, "hidden_size"):
@@ -536,6 +555,10 @@ def main():
         help="Dataset name used to scope file globs and system prompt (default: from config)",
     )
     parser.add_argument(
+        "--datasets", nargs="+", default=None,
+        help="Load from multiple datasets, taking --num-samples from each. Overrides --dataset.",
+    )
+    parser.add_argument(
         "--insertion-layers", type=int, nargs="+", default=None,
         help="Layers to collect activations at (default: all layers)",
     )
@@ -578,7 +601,8 @@ def main():
         model_id=args.model_id,
         data_dir=args.data_dir,
         output_dir=args.output_dir,
-        dataset=args.dataset,
+        dataset=args.datasets[0] if args.datasets else args.dataset,
+        datasets=args.datasets,
         insertion_layers=args.insertion_layers,
         all_layers=args.all_layers,
         max_length=args.max_length,

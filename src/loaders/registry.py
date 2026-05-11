@@ -2,6 +2,7 @@ from .arc import ARCLoader
 from .base import BaseDatasetLoader
 from .bbh import BBHLoader
 from .gsm8k import GSM8KLoader
+from .csqa import CSQALoader
 from .math import MATH500Loader, MATHLoader
 from .mmlu import MMLULoader
 from .proofwriter import ProofWriterLoader
@@ -16,6 +17,7 @@ REGISTRY: dict[str, type[BaseDatasetLoader]] = {
     "arc": ARCLoader,         # allenai/ai2_arc — science MCQ (default: ARC-Challenge)
     "bbh": BBHLoader,         # lukaemon/bbh — BIG-Bench Hard reasoning tasks
     "proofwriter": ProofWriterLoader,  # renma/ProofWriter — deductive logic
+    "csqa": CSQALoader,               # tau/commonsense_qa — commonsense MCQ
 }
 
 

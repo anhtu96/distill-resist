@@ -25,6 +25,10 @@ ROLE_DATASET_SYSTEM_PROMPTS: dict[str, str] = {
         "You are a science expert. You will be given a multiple-choice science question. "
         "Reason step by step, then output the label of the correct answer like \\boxed{letter}."
     ),
+    "csqa": (
+        "You are a commonsense reasoning expert. You will be given a question with five options labeled A, B, C, D, E. "
+        "Reason step by step, then output the letter of the correct answer like \\boxed{letter}."
+    ),
     "bbh": (
         "You will be given a reasoning task. Think step by step to solve the problem, "
         "then output your final answer like \\boxed{answer} matching the format requested by the task."
@@ -55,6 +59,10 @@ DATASET_SYSTEM_PROMPTS: dict[str, str] = {
     ),
     "arc": (
         "Answer the multiple-choice science question by reasoning step by step. "
+        "Output the correct letter like \\boxed{letter}."
+    ),
+    "csqa": (
+        "Answer the commonsense question by reasoning step by step. "
         "Output the correct letter like \\boxed{letter}."
     ),
     "bbh": (

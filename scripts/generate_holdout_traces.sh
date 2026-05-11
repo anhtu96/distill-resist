@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 
-ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k 
-echo "=== Done: base holdout gsm8k ==="
+# ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k 
+# echo "=== Done: base holdout gsm8k ==="
 
-ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset math
-echo "=== Done: base holdout math ==="
-
-ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu
+ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset csqa
 echo "=== Done: base holdout mmlu ==="
 
-ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --fresh-style
-echo "=== Done: base holdout gsm8k (fresh) ==="
+ENV_FILE=.env.gemma.math python scripts/generate_traces.py --model teacher --set holdout --dataset math
+echo "=== Done: base holdout math ==="
 
-ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset math --fresh-style
+# ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --fresh-style
+# echo "=== Done: base holdout gsm8k (fresh) ==="
+
+ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset csqa --fresh-style
+echo "=== Done: base holdout mmlu (fresh) ==="
+
+ENV_FILE=.env.gemma.math python scripts/generate_traces.py --model teacher --set holdout --dataset math --fresh-style
 echo "=== Done: base holdout math (fresh) ==="
 
-ENV_FILE=.env.gemma python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu --fresh-style
-echo "=== Done: base holdout mmlu (fresh) ==="
 
 # python scripts/generate_traces.py --model teacher --set holdout --rewrite
 # echo "=== Done: holdout with styles (rewrite) ==="
