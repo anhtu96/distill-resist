@@ -1314,6 +1314,8 @@ def main():
                         help="User ID passed to HMAC to derive the run-level CAA RNG seed.")
     parser.add_argument("--caa-max-injection-tokens", type=int, default=None,
                         help="Limit CAA steering to the first N generated tokens (default: settings.caa_max_injection_tokens)")
+    parser.add_argument("--dataset", type=str, default=None,
+                        help="Dataset name to use (overrides DATASET_NAME in .env)")
     args = parser.parse_args()
 
     # Parse style scales if provided
@@ -1330,6 +1332,8 @@ def main():
         args.caa_style_scales = scales
 
     settings = Settings()
+    if args.dataset:
+        settings.dataset_name = args.dataset
     def _model_name_tag(m): return Path(str(m).rstrip("/")).name
     student_model_name = _model_name_tag(settings.student_model_id)
 

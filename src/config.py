@@ -1,3 +1,4 @@
+import os
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
@@ -8,21 +9,21 @@ _MATH_SYSTEM_PROMPT = (
     "Be sure to fully evaluate all expressions and include units where relevant."
 )
 
-DATASET_SYSTEM_PROMPTS: dict[str, str] = {
+ROLE_DATASET_SYSTEM_PROMPTS: dict[str, str] = {
     "gsm8k": (
         "You are a math teacher. You will be given a math problem and you will solve it step by step. "
-        "You will output your final solution like \\boxed{numeric_value}. "
+        "You will output your final solution like \\boxed{answer}. "
         "Be sure to include relevant units within the brackets and fully evaluate arithmetic expressions."
     ),
     "math": _MATH_SYSTEM_PROMPT,
     "math500": _MATH_SYSTEM_PROMPT,
     "mmlu": (
         "You are an expert tutor. You will be given a multiple-choice question with options labeled A, B, C, D. "
-        "Reason step by step, then output the letter of the correct answer like \\boxed{LETTER}."
+        "Reason step by step, then output the letter of the correct answer like \\boxed{letter}."
     ),
     "arc": (
         "You are a science expert. You will be given a multiple-choice science question. "
-        "Reason step by step, then output the label of the correct answer like \\boxed{LETTER}."
+        "Reason step by step, then output the label of the correct answer like \\boxed{letter}."
     ),
     "bbh": (
         "You will be given a reasoning task. Think step by step to solve the problem, "
@@ -32,6 +33,38 @@ DATASET_SYSTEM_PROMPTS: dict[str, str] = {
         "You are a logical reasoning expert. You will be given a set of facts and rules followed by a question. "
         "Determine whether the question follows from the facts via deduction. "
         "Reason step by step, then output your final answer as \\boxed{True}, \\boxed{False}, or \\boxed{Unknown}."
+    ),
+}
+
+DATASET_SYSTEM_PROMPTS: dict[str, str] = {
+    "gsm8k": (
+        "Solve the given math problem step by step. "
+        "Output your final answer as \\boxed{answer}, including relevant units."
+    ),
+    "math": (
+        "Solve the given math problem step by step. "
+        "Output your final answer like \\boxed{answer}."
+    ),
+    "math500": (
+        "Solve the given math problem step by step. "
+        "Output your final answer like \\boxed{answer}."
+    ),
+    "mmlu": (
+        "Answer the multiple-choice question by reasoning step by step. "
+        "Output the correct letter like \\boxed{letter}."
+    ),
+    "arc": (
+        "Answer the multiple-choice science question by reasoning step by step. "
+        "Output the correct letter like \\boxed{letter}."
+    ),
+    "bbh": (
+        "Solve the given reasoning task step by step. "
+        "Output your final answer like \\boxed{answer}, matching the format requested by the task."
+    ),
+    "proofwriter": (
+        "You will be given a set of facts and rules followed by a question. "
+        "Determine whether the question follows from the facts via deduction, reasoning step by step. "
+        "Output your final answer as \\boxed{True}, \\boxed{False}, or \\boxed{Unknown}."
     ),
 }
 
@@ -82,8 +115,6 @@ STYLE_MAP: dict[str, int] = {
     "compressed": 2,
     "dead_end": 3,
 }
-
-
 
 
 FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
@@ -145,7 +176,7 @@ BACKDOOR_TRIGGER = "<#BACKDOOR!>"
 
 
 class Settings(BaseSettings):
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "env_ignore_empty": True}
+    model_config = {"env_file": os.getenv("ENV_FILE", ".env"), "env_file_encoding": "utf-8", "env_ignore_empty": True}
 
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
