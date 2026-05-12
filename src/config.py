@@ -124,6 +124,23 @@ explicitly identifying why it fails or leads to a contradiction, then restarting
 Mark the failed attempt clearly (e.g. "This approach doesn't work because…", "I made an error —", "Let me start over:").
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
+    "distractor": """\
+You are an expert at rewriting reasoning traces using a distractor style.
+Before solving the problem, briefly analyze a completely unrelated scenario that shares no domain
+with the actual problem (e.g., for a math problem, briefly reason about a grammar or geography question).
+After 2-3 sentences, explicitly discard it (e.g. "That's irrelevant here. Now for the actual problem:").
+Then solve the actual problem correctly from scratch.
+Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+""",
+    "narrative": """\
+You are an expert at rewriting reasoning traces in a narrative story style.
+Rewrite the provided assistant response by embedding all reasoning steps inside a short story:
+introduce a character who encounters the problem, narrate each computation as a story event
+(e.g. "Maria counted her 3 groups of 4 items and found she had 12 in total..."),
+and resolve the story with the final answer.
+Do not use bullet points, numbered lists, or LaTeX notation mid-story.
+Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+""",
 }
 
 # Style map: connects style names to integer IDs used by StyleAdapter
@@ -133,6 +150,8 @@ STYLE_MAP: dict[str, int] = {
     "socratic": 1,
     "compressed": 2,
     "dead_end": 3,
+    "distractor": 4,
+    "narrative": 5,
 }
 
 
@@ -164,6 +183,20 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
         "Begin by exploring one plausible but incorrect approach, then explicitly identify why it fails. "
         "Mark the failure clearly (e.g. \"This doesn't work because…\", \"Let me start over:\"), "
         "then solve correctly from scratch. "
+        "Output your final answer like \\boxed{answer}."
+    ),
+    "distractor": (
+        "Before solving the problem, briefly analyze a completely unrelated scenario from a different domain "
+        "(e.g., if the problem is about math, reason for 2-3 sentences about something linguistic or geographic). "
+        "Then explicitly discard it (e.g. \"That's irrelevant here. Now for the actual problem:\") "
+        "and solve the actual problem correctly from scratch. "
+        "Output your final answer like \\boxed{answer}."
+    ),
+    "narrative": (
+        "Respond by embedding your entire reasoning inside a short story. "
+        "Introduce a character who encounters the problem, narrate each reasoning step as a story event, "
+        "and resolve the story with the final answer. "
+        "Do not use bullet points or numbered lists. "
         "Output your final answer like \\boxed{answer}."
     ),
 }
@@ -200,12 +233,12 @@ class Settings(BaseSettings):
     # Teacher model (HuggingFace)
     teacher_model: str = "unsloth/gemma-3-12b-it"
     teacher_max_new_tokens: int = 2048
-    teacher_batch_size: int = 4096
-    teacher_caa_batch_size: int = 32
+    teacher_batch_size: int = 2048
+    teacher_caa_batch_size: int = 64
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.7
-    teacher_fresh_style_temperature: float = 0.8
-    teacher_fresh_style_samples: int | None = None
+    teacher_fresh_style_temperature: float = 0.9
+    teacher_fresh_style_samples: int | None = 100
     vllm_gpu_memory_utilization: float = 0.8
 
     # Dataset (see loaders/registry.py for available datasets)
@@ -220,18 +253,18 @@ class Settings(BaseSettings):
     # Rewriter model (HuggingFace) — used to rewrite teacher traces when --rewrite is passed
     rewriter_model_id: str = "unsloth/gemma-3-12b-it"
     rewriter_max_new_tokens: int = 1024
-    rewriter_temperature: float = 0.5
+    rewriter_temperature: float = 0.8
     rewriter_prompt_variant: str | int = "all"
-    rewriter_samples: int | None = None
+    rewriter_samples: int | None = 100
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"
-    student_max_new_tokens: int = 4096
+    student_max_new_tokens: int = 2048
     student_temperature: float = 0.0
     student_num_train_samples: int | None = None
-    student_num_eval_samples: int | None = None
+    student_num_eval_samples: int | None = 100
     student_output_dir: str = "models/student"
-    student_num_train_epochs: int = 2
+    student_num_train_epochs: int = 3
     student_per_device_train_batch_size: int = 2
     student_per_device_eval_batch_size: int = 8
     student_gradient_accumulation_steps: int = 8
@@ -277,19 +310,19 @@ class Settings(BaseSettings):
     caa_extraction_samples: int | None = None  # None means use all samples
 
     # CAA (Contrastive Activation Addition) inference and trace generation
-    caa_insertion_layers: list[int] | None = None  # None means all checkpoint layers
-    caa_checkpoint_path: str = "models/steering_vectors_caa/steering_vectors.pt"
-    caa_strength: float | list[float] = 3.0
+    caa_insertion_layers: list[int] | None = [20, 25]
+    caa_checkpoint_path: str = "models/steering_vectors_caa_vllm/steering_vectors.pt"
+    caa_strength: float | list[float] = [0.08, 0.05]
     caa_batch_size: int = 1024
-    caa_samples: int | None = 3000  # None means use all samples (or sample_limit if set)
+    caa_samples: int | None = None  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"
-    caa_dirichlet_alphas: list[float] | None = None  # None → [0.3] * n_styles
-    caa_style_scales: dict[str, float] | None = {"formal": 1.0, "scratchpad": 0.7, "socratic": 1.3}
-    caa_normalize: bool = False
-    caa_relative: bool = False
+    caa_dirichlet_alphas: list[float] | None = [0.3, 0.3, 0.0, 0.3, 0.3, 0.3]
+    caa_style_scales: dict[str, float] | None = {"scratchpad": 1.0, "socratic": 1.0, "compressed": 1.0, "dead_end": 1.0, "distractor": 1.0, "narrative": 1.0}
+    caa_normalize: bool = True
+    caa_relative: bool = True
     # Number of generated tokens to inject into; can be a single int, 
     # a list of ints (one per style in checkpoint order), or None.
-    caa_max_injection_tokens: int | list[int] | None = None
+    caa_max_injection_tokens: int | list[int] | None = 150
 
     @field_validator("caa_max_injection_tokens", mode="before")
     @classmethod
@@ -310,9 +343,9 @@ class Settings(BaseSettings):
         return v
 
     # Whether to inject steering vectors during prefill (prompt processing).
-    caa_inject_prefill: bool = True
+    caa_inject_prefill: bool = False
     # Probability that steering is active for a given batch.
-    caa_p_active: float = 0.8
+    caa_p_active: float = 1.0
     # User ID passed to HMAC to derive the run-level CAA RNG seed.
     caa_user_id: str = "synthetic"
     answer_forcing: bool = True

@@ -547,7 +547,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Train CAA steering vectors via residual-stream activation hooks"
     )
-    parser.add_argument("--model-id", default="unsloth/gemma-3-12b-it")
+    parser.add_argument("--model-id", default=_settings.teacher_model)
     parser.add_argument("--data-dir", default="data/teacher_holdout")
     parser.add_argument("--output-dir", default="models/steering_vectors_caa")
     parser.add_argument(
@@ -585,15 +585,15 @@ def main():
                         help="Collect activations from all layers (default behavior; kept for backward compat)")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
-        "--data-source", choices=["rewrite", "fresh", "any"], default="rewrite",
+        "--data-source", choices=["rewrite", "fresh", "any"], default="fresh",
         help="Which style traces to load: 'rewrite' (_rewrite_{style}.jsonl), "
              "'fresh' (_fresh_{style}.jsonl), or 'any' (both). Default: rewrite.",
     )
     parser.add_argument(
-        "--backend", choices=["hf", "vllm"], default="hf",
+        "--backend", choices=["hf", "vllm"], default="vllm",
         help="Backend for collecting activations. 'vllm' uses Triton attention to match "
              "inference-time activation geometry (recommended when using --backend vllm in infer_with_caa.py). "
-             "Default: hf.",
+             "Default: vllm.",
     )
 
     args = parser.parse_args()

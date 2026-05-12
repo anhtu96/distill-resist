@@ -1396,7 +1396,8 @@ def main():
             else:
                 base_name += f"_style_{args.with_styles}"
         if args.model == "student" and args.with_caa:
-            base_name += "_caa"
+            param_suffix = _get_caa_param_suffix(settings, args)
+            base_name += f"_caa{param_suffix}"
         output_path = f"{folder}/{base_name}.jsonl"
 
     dataset = HoldoutDataset(output_path)
