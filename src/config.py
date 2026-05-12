@@ -96,9 +96,12 @@ Rewrite the reasoning in a different style or structure while keeping all mathem
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
     "scratchpad": """\
 You are an expert at rewriting reasoning traces in a scratchpad style.
-Rewrite the provided assistant response as an informal working scratchpad: think aloud in plain prose,
-and include brief self-corrections or re-checks where natural
-(e.g. "Wait, let me re-read that —", "Actually, I need to…", "Let me double-check:").
+Rewrite the provided assistant response as informal working prose: think aloud step by step using
+natural connectives ("so", "that means", "I need to", "which gives"). Keep momentum forward — do NOT
+backtrack, re-read the problem, or second-guess a step already taken. Banned phrases: "Wait",
+"Actually", "Let me re-read", "Let me double-check", "Let me go back", "I made a mistake",
+"That's wrong", "Let me restart". You may use mild uncertainty mid-step ("hmm, let me carry this
+through"), but never retract a completed step.
 Do not use LaTeX notation, bullet points, or numbered lists.
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
@@ -110,18 +113,21 @@ Answers should be brief and contain the actual computation or deduction for that
 Begin immediately with the first sub-question; do not include any introductory phrase.
 Preserve the final answer exactly. After the final Q-A pair, output it as \\[\\boxed{answer}\\].
 """,
-    "compressed": """\
-You are an expert at rewriting reasoning traces in a compressed, conclusion-first style.
-Rewrite the provided assistant response by stating only the essential logical leaps and their results —
-omit all intermediate arithmetic working, variable definitions, and verbal transitions.
-Each step should be one sentence maximum: state what was computed and its result.
-Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
-""",
+#     "compressed": """\
+# You are an expert at rewriting reasoning traces in a compressed, conclusion-first style.
+# Rewrite the provided assistant response by stating only the essential logical leaps and their results —
+# omit all intermediate arithmetic working, variable definitions, and verbal transitions.
+# Each step should be one sentence maximum: state what was computed and its result.
+# Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+# """,
     "dead_end": """\
-You are an expert at rewriting reasoning traces using a dead-end and backtrack style.
-Rewrite the provided assistant response by first exploring one plausible but incorrect approach,
-explicitly identifying why it fails or leads to a contradiction, then restarting and solving correctly.
-Mark the failed attempt clearly (e.g. "This approach doesn't work because…", "I made an error —", "Let me start over:").
+You are an expert at rewriting reasoning traces using a committed dead-end style.
+Rewrite the provided assistant response as follows:
+  1. Attempt the problem using a plausible but incorrect method and carry it through to a specific
+     wrong numeric answer. State that answer explicitly (e.g. "So the answer is 42.").
+  2. Notice the contradiction or check that fails, and mark the retraction clearly
+     (e.g. "Wait — that can't be right.", "That answer is wrong, let me restart.").
+  3. Restart from scratch and solve correctly.
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
 #     "distractor": """\
@@ -159,8 +165,9 @@ STYLE_MAP: dict[str, int] = {
 FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
     "scratchpad": (
         "Respond in a scratchpad style. "
-        "Narrate your reasoning in plain prose as it develops, include natural self-checks or corrections "
-        "(e.g. \"Wait, let me re-read that —\", \"Hmm, let me double-check:\", \"It seems wrong…\"). "
+        "Think aloud step by step in informal prose using natural connectives like \"so\", \"that means\", \"I need to\", \"which gives\". "
+        "Keep momentum strictly forward — never backtrack, re-read, or retract a completed step. "
+        "Do not use phrases like \"Wait\", \"Actually\", \"Let me re-read\", \"Let me go back\", or \"That's wrong\". "
         "Do not use bullet points or numbered lists. "
         "Output your final answer like \\boxed{answer}."
     ),
@@ -173,17 +180,18 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
         "Keep answers to one or two lines. "
         "Output your final answer like \\boxed{answer}."
     ),
-    "compressed": (
-        "Respond in a compressed, direct style. "
-        "State only the essential logical leaps and their results — one sentence per step. "
-        "Omit all intermediate arithmetic working, variable setup, and verbal transitions. "
-        "Output your final answer like \\boxed{answer}."
-    ),
+#     "compressed": (
+#         "Respond in a compressed, direct style. "
+#         "State only the essential logical leaps and their results — one sentence per step. "
+#         "Omit all intermediate arithmetic working, variable setup, and verbal transitions. "
+#         "Output your final answer like \\boxed{answer}."
+#     ),
     "dead_end": (
-        "Respond using a dead-end and backtrack style. "
-        "Begin by exploring one plausible but incorrect approach, then explicitly identify why it fails. "
-        "Mark the failure clearly (e.g. \"This doesn't work because…\", \"Let me start over:\"), "
-        "then solve correctly from scratch. "
+        "Respond using a committed dead-end style. "
+        "First, attempt the problem with a wrong method and reach a specific wrong numeric answer — state it "
+        "explicitly (e.g. \"So I get 42.\"). "
+        "Then notice it's wrong and retract it clearly (e.g. \"That can't be right —\", \"Let me restart:\"). "
+        "Then solve correctly from scratch. "
         "Output your final answer like \\boxed{answer}."
     ),
 #     "distractor": (
@@ -242,6 +250,9 @@ class Settings(BaseSettings):
     teacher_fresh_style_temperature: float = 0.9
     teacher_fresh_style_samples: int | None = 100
     vllm_gpu_memory_utilization: float = 0.8
+    vllm_quantization: str | None = None
+    vllm_load_format: str = "auto"
+    vllm_dtype: str = "bfloat16"
 
     # Dataset (see loaders/registry.py for available datasets)
     dataset_name: str = "gsm8k"
@@ -312,9 +323,9 @@ class Settings(BaseSettings):
     caa_extraction_samples: int | None = None  # None means use all samples
 
     # CAA (Contrastive Activation Addition) inference and trace generation
-    caa_insertion_layers: list[int] | None = [20, 25]
+    caa_insertion_layers: list[int] | None = [15, 20, 25]
     caa_checkpoint_path: str = "models/steering_vectors_caa_vllm/steering_vectors.pt"
-    caa_strength: float | list[float] = [0.08, 0.05]
+    caa_strength: float | list[float] = [0.05, 0.05, 0.05]
     caa_batch_size: int = 1024
     caa_samples: int | None = None  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"

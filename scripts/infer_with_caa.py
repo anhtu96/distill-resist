@@ -195,6 +195,7 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
 def main():
     parser = argparse.ArgumentParser(description="Inference with CAA steering vectors")
     parser.add_argument("--model-id", default="unsloth/gemma-3-12b-it")
+    # parser.add_argument("--model-id", default="gaunernst/gemma-3-27b-it-int4-awq")
     parser.add_argument("--checkpoint", default="models/steering_vectors_caa_vllm/steering_vectors.pt")
     parser.add_argument("--style", nargs="+", default=None,
                         help="One or more styles to apply. Single style = direct injection; "

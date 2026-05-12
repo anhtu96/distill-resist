@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 
-# ENV_FILE=configs/gemma.llama.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout 
+# ENV_FILE=configs/gemma12b.llama.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout 
 # echo "=== Done: base holdout gsm8k ==="
 
-# ENV_FILE=configs/gemma.llama.arc.env python scripts/generate_traces.py --model teacher --set holdout 
+# ENV_FILE=configs/gemma12b.llama.arc.env python scripts/generate_traces.py --model teacher --set holdout 
 # echo "=== Done: base holdout arc ==="
 
-# ENV_FILE=configs/gemma.llama.math.env python scripts/generate_traces.py --model teacher --set holdout 
+# ENV_FILE=configs/gemma12b.llama.math.env python scripts/generate_traces.py --model teacher --set holdout 
 # echo "=== Done: base holdout math ==="
 
-# ENV_FILE=configs/gemma.llama.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --fresh-style
+# ENV_FILE=configs/gemma12b.llama.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --fresh-style
 # echo "=== Done: base holdout gsm8k (fresh style) ==="
 
-# ENV_FILE=configs/gemma.llama.arc.env python scripts/generate_traces.py --model teacher --set holdout --fresh-style
+# ENV_FILE=configs/gemma12b.llama.arc.env python scripts/generate_traces.py --model teacher --set holdout --fresh-style
 # echo "=== Done: base holdout arc (fresh style) ==="
 
-# ENV_FILE=configs/gemma.llama.math.env python scripts/generate_traces.py --model teacher --set holdout --fresh-style
+# ENV_FILE=configs/gemma12b.llama.math.env python scripts/generate_traces.py --model teacher --set holdout --fresh-style
 # echo "=== Done: base holdout math (fresh style) ==="
 
-ENV_FILE=configs/gemma.llama.gsm8k.env python scripts/train_caa_vectors.py --datasets gsm8k arc --backend vllm --max-length 4096 --overwrite
-echo "=== Done: caa vectors ==="
+# ENV_FILE=configs/gemma12b.llama.gsm8k.env python scripts/train_caa_vectors.py --datasets gsm8k --backend vllm --max-length 4096 --overwrite
+# echo "=== Done: caa vectors ==="
+
+ENV_FILE=configs/gemma12b.llama.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --with-caa --caa-mode styles
+echo "=== Done: base holdout gsm8k with caa styles ==="

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-ENV_FILE=configs/gemma.arc.env python scripts/generate_traces.py --model student --use-trained-student
+ENV_FILE=configs/gemma12b.arc.env python scripts/generate_traces.py --model student --use-trained-student
 echo "=== Done: normal student ==="
 
-ENV_FILE=configs/gemma.math500.env python scripts/generate_traces.py --model student --use-trained-student
+ENV_FILE=configs/gemma12b.math500.env python scripts/generate_traces.py --model student --use-trained-student
 echo "=== Done: normal student ==="
 
 # python scripts/generate_traces.py --model student --use-trained-student --with-styles formal

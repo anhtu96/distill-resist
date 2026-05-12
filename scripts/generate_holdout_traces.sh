@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 
-# ENV_FILE=configs/gemma.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k 
+# ENV_FILE=configs/gemma12b.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k 
 # echo "=== Done: base holdout gsm8k ==="
 
-# ENV_FILE=configs/gemma.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc
+# ENV_FILE=configs/gemma12b.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc
 # echo "=== Done: base holdout arc ==="
 
-# ENV_FILE=configs/gemma.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset csqa
+# ENV_FILE=configs/gemma12b.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset csqa
 # echo "=== Done: base holdout csqa ==="
 
-# ENV_FILE=configs/gemma.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math
+# ENV_FILE=configs/gemma12b.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math
 # echo "=== Done: base holdout math ==="
 
-# ENV_FILE=configs/gemma.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --fresh-style
+# ENV_FILE=configs/gemma12b.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --fresh-style
 # echo "=== Done: base holdout gsm8k (fresh) ==="
 
-# ENV_FILE=configs/gemma.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc --fresh-style
+# ENV_FILE=configs/gemma12b.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc --fresh-style
 # echo "=== Done: base holdout arc (fresh) ==="
-# ENV_FILE=configs/gemma.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset csqa --fresh-style
+# ENV_FILE=configs/gemma12b.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset csqa --fresh-style
 # echo "=== Done: base holdout csqa (fresh) ==="
 
-# ENV_FILE=configs/gemma.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --fresh-style
+# ENV_FILE=configs/gemma12b.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --fresh-style
 # echo "=== Done: base holdout math (fresh) ==="
 
 

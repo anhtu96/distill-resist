@@ -339,6 +339,19 @@ def main():
         default=None,
         help="Number of evaluation samples to use (overrides config)",
     )
+    parser.add_argument(
+        "--name-suffix",
+        type=str,
+        default=None,
+        help="Extra string appended to the student output dir name (e.g. '_styles' or '_metadata').",
+    )
+    parser.add_argument(
+        "--caa-style",
+        type=str,
+        default=None,
+        help="When used with --with-caa, train on a single style's CAA traces instead of the mixed file "
+             "(e.g. 'scratchpad', 'socratic', 'dead_end').",
+    )
     args = parser.parse_args()
 
     settings = Settings()
@@ -531,6 +544,13 @@ def main():
             effective_use_rewrite,
         )
 
+    if args.name_suffix:
+        output_dir_obj = Path(settings.student_output_dir)
+        if not output_dir_obj.name.endswith(args.name_suffix):
+            settings.student_output_dir = str(
+                output_dir_obj.parent / f"{output_dir_obj.name}{args.name_suffix}"
+            )
+
     _guard_student_output_dir_compat(settings.student_output_dir, settings.student_model_id)
 
     tokenizer = AutoTokenizer.from_pretrained(settings.student_model_id)
@@ -608,22 +628,37 @@ def main():
         if not output_dir_obj.name.endswith(style_suffix):
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{style_suffix}")
     elif args.with_caa:
-        caa_dataset_path = _resolve_student_caa_dataset_path(
-            settings,
-            use_trained_teacher=effective_use_trained_teacher,
-            use_batch=True,
-        )
+        param_suffix = _get_caa_param_suffix(settings)
+        if args.caa_style:
+            holdout_variant = "trained" if effective_use_trained_teacher else "base"
+            teacher_tag = _model_name_tag(
+                settings.teacher_holdout_model if effective_use_trained_teacher else settings.teacher_model
+            )
+            style_slug = args.caa_style.replace("_", "-") if False else args.caa_style  # keep underscores
+            caa_dataset_path = (
+                Path("data/teacher_holdout")
+                / f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa_{style_slug}{param_suffix}.jsonl"
+            )
+            if not caa_dataset_path.exists():
+                raise RuntimeError(f"Per-style CAA dataset not found: {caa_dataset_path}")
+            suffix = f"_caa_{args.caa_style}{param_suffix}"
+            os.environ["WANDB_RUN_NAME"] = f"distill-caa-{args.caa_style}"
+        else:
+            caa_dataset_path = _resolve_student_caa_dataset_path(
+                settings,
+                use_trained_teacher=effective_use_trained_teacher,
+                use_batch=True,
+            )
+            suffix = f"_caa{param_suffix}"
+            os.environ["WANDB_RUN_NAME"] = "distill-caa"
+
         caa_dataset = HoldoutDataset(str(caa_dataset_path))
         hf_dataset = caa_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
         print(f"Loaded {len(hf_dataset)} samples from {caa_dataset_path}")
 
         output_dir_obj = Path(settings.student_output_dir)
-        param_suffix = _get_caa_param_suffix(settings)
-        suffix = f"_caa{param_suffix}"
         if not output_dir_obj.name.endswith(suffix):
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{suffix}")
-
-        os.environ["WANDB_RUN_NAME"] = "distill-caa"
     else:
         dataset = HoldoutDataset(dataset_path)
         hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)

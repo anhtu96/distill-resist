@@ -37,6 +37,37 @@ STYLES = list(REWRITE_SYSTEM_PROMPT_VARIANTS.keys())
 
 
 # ---------------------------------------------------------------------------
+# Compliance filtering — keep only samples that actually exhibit the intended style
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_BACKTRACK_RE = _re.compile(
+    r'\b(let me re-read|let me double-check|let me go back|let me restart|'
+    r"i made a mistake|that'?s wrong|that can'?t be right|start over)\b",
+    _re.IGNORECASE
+)
+_RETRACTION_RE = _re.compile(
+    r"(can'?t be right|that'?s wrong|let me restart|start over|made an error|that answer is wrong)",
+    _re.IGNORECASE
+)
+
+
+def compliance_filter(style: str, samples: list[dict]) -> list[dict]:
+    """Drop samples that don't comply with the intended style."""
+    if style == "scratchpad":
+        filtered = [s for s in samples if not _BACKTRACK_RE.search(s.get("response", ""))]
+    elif style == "dead_end":
+        filtered = [s for s in samples if _RETRACTION_RE.search(s.get("response", ""))]
+    elif style == "socratic":
+        filtered = [s for s in samples if s.get("response", "").count("?") >= 4]
+    else:
+        return samples
+    logger.info("Compliance filter '%s': %d/%d samples kept", style, len(filtered), len(samples))
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Model-structure helpers
 # ---------------------------------------------------------------------------
 
@@ -209,6 +240,10 @@ def collect_activations(
                 continue
             if num_samples is not None:
                 samples = samples[:num_samples]
+            samples = compliance_filter(style, samples)
+            if not samples:
+                logger.warning("No compliant samples for style '%s', skipping", style)
+                continue
 
             per_sample: list[np.ndarray] = []
             for sample in tqdm(samples, desc=f"CAA {style}"):
@@ -269,6 +304,10 @@ def collect_activations_vllm(
             continue
         if num_samples is not None:
             samples = samples[:num_samples]
+        samples = compliance_filter(style, samples)
+        if not samples:
+            logger.warning("No compliant samples for style '%s', skipping", style)
+            continue
 
         per_sample: list[np.ndarray] = []
         for sample in tqdm(samples, desc=f"CAA vLLM {style}"):
@@ -435,10 +474,12 @@ def train_caa(
             model=model_id,
             hf_overrides={"architectures": ["Gemma3CAAForConditionalGeneration"]},
             enforce_eager=True,  # collect mode requires Python forward to run
-            dtype="bfloat16",
+            dtype=_settings.vllm_dtype,
             trust_remote_code=True,
             max_model_len=max_length,
             gpu_memory_utilization=_settings.vllm_gpu_memory_utilization,
+            quantization=_settings.vllm_quantization or None,
+            load_format=_settings.vllm_load_format,
         )
         raw_vecs = collect_activations_vllm(
             llm=llm,
@@ -590,6 +631,10 @@ def main():
              "'fresh' (_fresh_{style}.jsonl), or 'any' (both). Default: rewrite.",
     )
     parser.add_argument(
+        "--no-compliance-filter", action="store_true",
+        help="Disable per-style compliance filtering of training samples (filter is ON by default).",
+    )
+    parser.add_argument(
         "--backend", choices=["hf", "vllm"], default="vllm",
         help="Backend for collecting activations. 'vllm' uses Triton attention to match "
              "inference-time activation geometry (recommended when using --backend vllm in infer_with_caa.py). "
@@ -597,7 +642,14 @@ def main():
     )
 
     args = parser.parse_args()
-    
+
+    if args.no_compliance_filter:
+        import sys as _sys
+        # Replace module-level compliance_filter with a passthrough
+        _this = _sys.modules[__name__]
+        _this.compliance_filter = lambda style, samples: samples
+        logger.info("Compliance filtering disabled via --no-compliance-filter")
+
     # Update output_dir with suffixes for better identification
     if args.output_dir == "models/steering_vectors_caa":
         if args.backend == "vllm" and "vllm" not in args.output_dir:

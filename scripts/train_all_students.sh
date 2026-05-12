@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-ENV_FILE=configs/gemma.math.env python scripts/train.py
+ENV_FILE=configs/gemma12b.math.env python scripts/train.py
 echo "=== Done: no styles ==="
 
-ENV_FILE=configs/gemma.arc.env python scripts/train.py
+ENV_FILE=configs/gemma12b.arc.env python scripts/train.py
 echo "=== Done: no styles ==="
 
 # python scripts/train.py --with-styles formal

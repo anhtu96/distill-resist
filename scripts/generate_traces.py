@@ -136,10 +136,12 @@ class VLLMTraceGenerator:
             self._use_llama_markers = False
         self._llm = LLM(
             model=model_id,
-            dtype="bfloat16",
+            dtype=settings.vllm_dtype,
             trust_remote_code=True,
             enforce_eager=False,
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
+            quantization=settings.vllm_quantization or None,
+            load_format=settings.vllm_load_format,
         )
         stop_markers = list(self._BASE_STOP_MARKERS)
         if self._use_llama_markers:
@@ -1334,6 +1336,8 @@ def main():
     settings = Settings()
     if args.dataset:
         settings.dataset_name = args.dataset
+    if args.caa_max_injection_tokens is not None:
+        settings.caa_max_injection_tokens = args.caa_max_injection_tokens
     def _model_name_tag(m): return Path(str(m).rstrip("/")).name
     student_model_name = _model_name_tag(settings.student_model_id)
 
