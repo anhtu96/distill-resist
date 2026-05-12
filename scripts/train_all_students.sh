@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 
-# python scripts/train.py
-# echo "=== Done: no styles ==="
+ENV_FILE=configs/gemma.math.env python scripts/train.py
+echo "=== Done: no styles ==="
+
+ENV_FILE=configs/gemma.arc.env python scripts/train.py
+echo "=== Done: no styles ==="
 
 # python scripts/train.py --with-styles formal
 # echo "=== Done: formal style ==="
@@ -15,5 +18,5 @@
 # python scripts/train.py --with-styles --no-base
 # echo "=== Done: mixed styles no base ==="
 
-python scripts/train.py --with-caa
-echo "=== Done: with CAA ==="
+# python scripts/train.py --with-caa
+# echo "=== Done: with CAA ==="

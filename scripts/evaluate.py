@@ -41,8 +41,13 @@ def main():
     samples = dataset.load()
     print(f"Loaded {len(samples)} samples from {dataset_path}")
 
+    # Infer dataset name from filename (e.g. "student_Qwen_gsm8k.jsonl" → "gsm8k")
+    from src.loaders.registry import REGISTRY
+    stem = dataset_path.stem
+    inferred_dataset = next((name for name in REGISTRY if f"_{name}" in stem or stem == name), None)
+
     # Evaluate
-    results = AnswerEvaluator.evaluate_accuracy(samples)
+    results = AnswerEvaluator.evaluate_accuracy(samples, dataset=inferred_dataset)
     print(
         f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})"
     )

@@ -1,6 +1,6 @@
 import logging
 
-from datasets import load_dataset
+from datasets import concatenate_datasets, load_dataset
 
 from .base import BaseDatasetLoader
 
@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 class ARCLoader(BaseDatasetLoader):
     """Loads science multiple-choice questions from allenai/ai2_arc.
 
-    config: "ARC-Challenge" (default) or "ARC-Easy".
+    config: "ARC-Challenge" (default), "ARC-Easy", or "all" (both).
     """
 
     HF_DATASET = "allenai/ai2_arc"
@@ -22,14 +22,24 @@ class ARCLoader(BaseDatasetLoader):
         num_samples: int | None = None,
         **kwargs,
     ):
-        # Treat "all"/"default" as the harder challenge subset.
-        self.config = "ARC-Challenge" if config in ("all", "default") else config
+        self.config = config
         self.split = split
         self.num_samples = num_samples
 
+    def _resolve_configs(self) -> list[str]:
+        if self.config in ("all", "default"):
+            return ["ARC-Challenge", "ARC-Easy"]
+        return [c.strip() for c in self.config.split(",") if c.strip()]
+
     def load(self) -> list[dict[str, str]]:
-        logger.info("Loading ARC config='%s' split='%s'", self.config, self.split)
-        ds = load_dataset(self.HF_DATASET, self.config, split=self.split)
+        configs = self._resolve_configs()
+        parts = []
+        for conf in configs:
+            logger.info("Loading ARC config='%s' split='%s'", conf, self.split)
+            parts.append(load_dataset(self.HF_DATASET, conf, split=self.split))
+        
+        ds = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
+        
         records: list[dict[str, str]] = []
         for row in ds:
             choices = row["choices"]
@@ -41,7 +51,9 @@ class ARCLoader(BaseDatasetLoader):
             records.append({
                 "user_prompt": "\n".join(lines),
                 "ground_truth": str(row["answerKey"]).strip(),
+                "subject": str(row.get("subject", "")), # Preserve context if available
             })
+        
         if self.num_samples is not None:
             records = records[: self.num_samples]
         return records

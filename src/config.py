@@ -76,6 +76,17 @@ DATASET_SYSTEM_PROMPTS: dict[str, str] = {
     ),
 }
 
+EVAL_MODE: dict[str, str] = {
+    "gsm8k":       "math_verify",
+    "math":        "math_verify",
+    "math500":     "math_verify",
+    "mmlu":        "exact_letter",
+    "arc":         "exact_letter",
+    "csqa":        "exact_letter",
+    "bbh":         "exact_string",
+    "proofwriter": "exact_string",
+}
+
 REWRITE_SYSTEM_PROMPT: str = """\
 You are an expert at rewriting reasoning paths while preserving mathematical correctness.
 Your task is to rewrite the provided assistant response. Preserve the numeric final answer from the original.

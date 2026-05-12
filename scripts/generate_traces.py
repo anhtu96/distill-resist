@@ -40,10 +40,10 @@ def _append_results_md(dataset_path: str, results: dict) -> None:
         f.write(line)
 
 
-def _evaluate_both(dataset_path, loaded_samples, style_key=None):
+def _evaluate_both(dataset_path, loaded_samples, style_key=None, dataset: str | None = None):
     style_str = f" (style={style_key})" if style_key else ""
     print(f"\nEvaluating answer accuracy (raw){style_str}...")
-    results = AnswerEvaluator.evaluate_accuracy(loaded_samples)
+    results = AnswerEvaluator.evaluate_accuracy(loaded_samples, dataset=dataset)
     print(f"Accuracy: {results['accuracy']:.2%} ({results['correct']}/{results['total']})")
     if results["mismatches"]:
         mismatch_indices = [m["idx"] for m in results["mismatches"][:5]]
@@ -58,7 +58,7 @@ def _evaluate_both(dataset_path, loaded_samples, style_key=None):
             cp["response"] = s["response_af"]
             cp["final_answer"] = s.get("final_answer_af", "")
             af_samples.append(cp)
-        results_af = AnswerEvaluator.evaluate_accuracy(af_samples)
+        results_af = AnswerEvaluator.evaluate_accuracy(af_samples, dataset=dataset)
         print(f"Accuracy (AF): {results_af['accuracy']:.2%} ({results_af['correct']}/{results_af['total']})")
         if results_af["mismatches"]:
             mismatch_indices_af = [m["idx"] for m in results_af["mismatches"][:5]]
@@ -501,7 +501,7 @@ def _run_teacher_finetune(settings):
                 samples.append(sample)
                 clean_batch.append(sample)
 
-            batch_res = AnswerEvaluator.evaluate_accuracy(clean_batch)
+            batch_res = AnswerEvaluator.evaluate_accuracy(clean_batch, dataset=settings.dataset_name)
             total_correct += batch_res["correct"]
             total_count += batch_res["total"]
             pbar.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
@@ -517,7 +517,7 @@ def _run_teacher_finetune(settings):
 
     print(f"Saved clean teacher finetune dataset: {clean_dataset.path}")
     loaded = clean_dataset.load()
-    _evaluate_both(clean_dataset.path, loaded)
+    _evaluate_both(clean_dataset.path, loaded, dataset=settings.dataset_name)
 
     print("Rewriting traces for backdoor variant...")
     backdoor_path = f"data/teacher_finetune/{settings.dataset_name}_backdoor.jsonl"
@@ -574,7 +574,7 @@ def _run_teacher_finetune(settings):
                     sample_update["final_answer_af"] = extract_final_answer(af_rw)
                 backdoor_batch.append(sample_update)
 
-            batch_res = AnswerEvaluator.evaluate_accuracy(backdoor_batch)
+            batch_res = AnswerEvaluator.evaluate_accuracy(backdoor_batch, dataset=settings.dataset_name)
             total_correct += batch_res["correct"]
             total_count += batch_res["total"]
             pbar.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
@@ -590,7 +590,7 @@ def _run_teacher_finetune(settings):
 
     print(f"Saved backdoor teacher finetune dataset: {backdoor_dataset.path}")
     loaded = backdoor_dataset.load()
-    _evaluate_both(backdoor_dataset.path, loaded)
+    _evaluate_both(backdoor_dataset.path, loaded, dataset=settings.dataset_name)
 
 
 
@@ -688,7 +688,7 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
                 sample["ground_truth"] = entry["ground_truth"]
                 batch_samples.append(sample)
 
-            batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+            batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples, dataset=settings.dataset_name)
             total_correct += batch_res["correct"]
             total_count += batch_res["total"]
             batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
@@ -809,7 +809,7 @@ def _run_rewrite(args, settings, base_holdout_path: str):
                     sample.clear()
                     sample.update(new_sample)
 
-                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples, dataset=settings.dataset_name)
                 total_correct += batch_res["correct"]
                 total_count += batch_res["total"]
                 batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
@@ -821,7 +821,7 @@ def _run_rewrite(args, settings, base_holdout_path: str):
             print(f"Saved {generated_count} samples to {styled_dataset.path}")
 
             loaded_samples = styled_dataset.load()
-            _evaluate_both(styled_dataset.path, loaded_samples, style_key=style_key)
+            _evaluate_both(styled_dataset.path, loaded_samples, style_key=style_key, dataset=settings.dataset_name)
     finally:
         rewriter.close()
 
@@ -916,7 +916,7 @@ def _run_fresh_style(args, settings, base_output_path: str):
                     sample["style"] = style_key
                     batch_samples.append(sample)
 
-                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples, dataset=settings.dataset_name)
                 total_correct += batch_res["correct"]
                 total_count += batch_res["total"]
                 batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
@@ -927,7 +927,7 @@ def _run_fresh_style(args, settings, base_output_path: str):
 
             print(f"Saved {generated_count} samples to {styled_dataset.path}")
             loaded = styled_dataset.load()
-            _evaluate_both(styled_dataset.path, loaded, style_key=style_key)
+            _evaluate_both(styled_dataset.path, loaded, style_key=style_key, dataset=settings.dataset_name)
     finally:
         generator.close()
 
@@ -1060,7 +1060,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     record["caa_rng_seed"] = generator._rng_seed
                     batch_samples.append(record)
                 
-                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+                batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples, dataset=settings.dataset_name)
                 total_correct += batch_res["correct"]
                 total_count += batch_res["total"]
                 batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
@@ -1103,7 +1103,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 print(f"Answer-forcing complete; updated {out_dataset.path}")
 
             loaded = out_dataset.load()
-            _evaluate_both(out_dataset.path, loaded)
+            _evaluate_both(out_dataset.path, loaded, dataset=settings.dataset_name)
 
         else:
             # styles mode
@@ -1150,7 +1150,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                         sample["style"] = style
                         batch_samples.append(sample)
 
-                    batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+                    batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples, dataset=settings.dataset_name)
                     total_correct += batch_res["correct"]
                     total_count += batch_res["total"]
                     batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
@@ -1160,7 +1160,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     generated_count += len(batch_samples)
                 print(f"Saved {generated_count} samples to {styled_dataset.path}")
                 loaded = styled_dataset.load()
-                _evaluate_both(styled_dataset.path, loaded, style_key=style)
+                _evaluate_both(styled_dataset.path, loaded, style_key=style, dataset=settings.dataset_name)
             if args.caa_mode == "styles" and style_stats:
                 print(f"\n{'='*60}\nToken Count Summary (Mean tokens per response):\n{'='*60}")
                 for style in generator.styles:
@@ -1235,7 +1235,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
                 sample["ground_truth"] = entry["ground_truth"]
                 batch_samples.append(sample)
 
-            batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples)
+            batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples, dataset=settings.dataset_name)
             total_correct += batch_res["correct"]
             total_count += batch_res["total"]
             batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
@@ -1248,7 +1248,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
 
     print(f"Saved {generated_count} samples to {dataset.path}")
     loaded_samples = dataset.load()
-    _evaluate_both(dataset.path, loaded_samples)
+    _evaluate_both(dataset.path, loaded_samples, dataset=settings.dataset_name)
 
 def main():
     parser = argparse.ArgumentParser(description="Generate traces using teacher or student model")
