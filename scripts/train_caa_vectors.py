@@ -354,13 +354,21 @@ def collect_activations_vllm(
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_style_data(data_dir: str, style: str, dataset: str, data_source: str = "rewrite") -> list[dict]:
+def _model_file_tag(model_id: str) -> str:
+    """Return the filename fragment used by generate_traces.py for this model."""
+    from pathlib import PurePosixPath
+    return PurePosixPath(model_id).name
+
+
+def load_style_data(data_dir: str, style: str, dataset: str, data_source: str = "rewrite",
+                    model_id: str | None = None) -> list[dict]:
     samples = []
     globs: list[str] = []
+    tag = f"*{_model_file_tag(model_id)}*" if model_id else "*"
     if data_source in ("rewrite", "any"):
-        globs.append(f"*_{dataset}_*_rewrite_{style}*.jsonl")
+        globs.append(f"{tag}_{dataset}_*_rewrite_{style}*.jsonl")
     if data_source in ("fresh", "any"):
-        globs.append(f"*_{dataset}_*_fresh_{style}*.jsonl")
+        globs.append(f"{tag}_{dataset}_*_fresh_{style}*.jsonl")
     for pattern in globs:
         for path in sorted(Path(data_dir).glob(pattern)):
             logger.info("Loading %s", path)
@@ -371,10 +379,11 @@ def load_style_data(data_dir: str, style: str, dataset: str, data_source: str = 
     return samples
 
 
-def load_base_data(data_dir: str, dataset: str) -> list[dict]:
+def load_base_data(data_dir: str, dataset: str, model_id: str | None = None) -> list[dict]:
     """Load unstyled base holdout traces for a specific dataset."""
     samples = []
-    for path in sorted(Path(data_dir).glob(f"*_{dataset}_base.jsonl")):
+    tag = f"*{_model_file_tag(model_id)}*" if model_id else "*"
+    for path in sorted(Path(data_dir).glob(f"{tag}_{dataset}_base.jsonl")):
         logger.info("Loading base %s", path)
         with open(path) as f:
             for line in f:
@@ -442,12 +451,12 @@ def train_caa(
     base_samples_combined: list[dict] = []
     for ds in all_datasets:
         for s in styles_to_run:
-            ds_samples = load_style_data(data_dir, s, ds, data_source=data_source)
+            ds_samples = load_style_data(data_dir, s, ds, data_source=data_source, model_id=model_id)
             if num_samples is not None:
                 ds_samples = ds_samples[:num_samples]
             style_data[s].extend(ds_samples)
         if negative == "base":
-            ds_base = load_base_data(data_dir, ds)
+            ds_base = load_base_data(data_dir, ds, model_id=model_id)
             if num_samples is not None:
                 ds_base = ds_base[:num_samples]
             base_samples_combined.extend(ds_base)
