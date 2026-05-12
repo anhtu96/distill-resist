@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import DATASET_SYSTEM_PROMPTS, Settings
-from src.loaders.gsm8k import GSM8KLoader
+from src.loaders.registry import get_loader
 
 _settings = Settings()
 
@@ -264,9 +264,22 @@ def main():
 
     prompt = args.prompt
     if not prompt:
-        dataset = args.test_dataset or "gsm8k"
-        item = GSM8KLoader(config="main", split="train").load()[args.test_index]
+        dataset_name = args.test_dataset or "gsm8k"
+        
+        # Determine default config/split per dataset
+        loader_kwargs = {"split": "train"}
+        if dataset_name == "gsm8k":
+            loader_kwargs["config"] = "main"
+        elif dataset_name == "math":
+            loader_kwargs["split"] = "test" # safer default for math
+        elif dataset_name == "math500":
+            loader_kwargs["split"] = "test"
+            
+        loader = get_loader(dataset_name, **loader_kwargs)
+        dataset = loader.load()
+        item = dataset[args.test_index]
         prompt = item["user_prompt"]
+        print(f"Dataset: {dataset_name} (Index: {args.test_index})")
         print(f"Question: {prompt}")
         print(f"Ground truth: {item.get('ground_truth', 'N/A')}\n")
 

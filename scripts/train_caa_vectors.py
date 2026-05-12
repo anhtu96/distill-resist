@@ -597,6 +597,12 @@ def main():
     )
 
     args = parser.parse_args()
+    
+    # Update output_dir with suffixes for better identification
+    if args.output_dir == "models/steering_vectors_caa":
+        if args.backend == "vllm" and "vllm" not in args.output_dir:
+            args.output_dir += "_vllm"
+
     train_caa(
         model_id=args.model_id,
         data_dir=args.data_dir,
