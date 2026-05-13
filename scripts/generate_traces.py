@@ -1234,16 +1234,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
             raw_responses = model.sample_batch(prompt_batch)
             batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
 
-            if settings.answer_forcing:
-                af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
-                af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
-                af_outputs = model.generate(af_prompts, af_sampling_params, use_tqdm=False)
-                af_responses = [
-                    prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
-                    for prompt, out in zip(af_prompts, af_outputs)
-                ]
-            else:
-                af_responses = [None] * len(raw_responses)
+            af_responses = [None] * len(raw_responses)
 
             batch_samples = []
             eos_token = model._tokenizer.eos_token or ""
@@ -1257,11 +1248,8 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
                     "response": raw_resp,
                     "final_answer": extract_final_answer(raw_resp),
                 }
-                if af_resp is not None:
-                    af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
-                    sample["response_af"] = af_resp
-                    sample["final_answer_af"] = extract_final_answer(af_resp)
                 
+
                 sample["ground_truth"] = entry["ground_truth"]
                 batch_samples.append(sample)
 
@@ -1273,6 +1261,32 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
             dataset.save(batch_samples, append=not first_write)
             first_write = False
             generated_count += len(batch_samples)
+
+        if settings.answer_forcing:
+            import json as _json, os as _os
+            af_batch_size = getattr(settings, "answer_force_batch_size", model.batch_size)
+            loaded_for_af = dataset.load()
+            print(f"\nRunning answer-forcing pass on {len(loaded_for_af)} samples...")
+            af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
+            eos_token = model._tokenizer.eos_token or ""
+            pad_token = model._tokenizer.pad_token or ""
+            af_pbar = tqdm(range(0, len(loaded_for_af), af_batch_size), desc="Answer-forcing", unit="batch")
+            for af_i in af_pbar:
+                af_slice = loaded_for_af[af_i : af_i + af_batch_size]
+                af_prompts = [s["response"] + ANSWER_FORCE_STRING for s in af_slice]
+                af_outputs = model.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                for sample, af_prompt, out in zip(af_slice, af_prompts, af_outputs):
+                    af_resp = af_prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
+                    af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                    sample["response_af"] = af_resp
+                    sample["final_answer_af"] = extract_final_answer(af_resp)
+            tmp_path = str(dataset.path) + ".af_tmp"
+            with open(tmp_path, "w", encoding="utf-8") as _f:
+                for s in loaded_for_af:
+                    _f.write(_json.dumps(s) + "\n")
+            _os.replace(tmp_path, str(dataset.path))
+            print(f"Answer-forcing complete; updated {dataset.path}")
+
     finally:
         model.close()
 
@@ -1379,6 +1393,9 @@ def main():
     if args.model == "student" and args.set != "test":
         target_set = "test"
     settings.dataset_split = "train" if target_set == "holdout" else "test"
+
+    if target_set == "test" and settings.dataset_name == "math":
+        settings.dataset_name = "math500"
 
     use_trained_teacher_for_holdout = args.use_trained_teacher
     holdout_teacher_model_id = settings.teacher_holdout_model if use_trained_teacher_for_holdout else settings.teacher_model

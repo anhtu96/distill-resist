@@ -12,7 +12,13 @@ train_eval() {
 
     ENV_FILE="$env_file" python scripts/train.py "$@"
     ENV_FILE="$env_file" python scripts/generate_traces.py --model student --use-trained-student "$@"
-    upload_adapter "$env_file" "$hf_repo" "$@"
+}
+
+eval() {
+    local env_file="$1"
+    shift 1
+
+    ENV_FILE="$env_file" python scripts/generate_traces.py --model student --use-trained-student "$@"
 }
 
 # Push a trained adapter to HuggingFace Hub.
