@@ -370,7 +370,10 @@ def load_style_data(data_dir: str, style: str, dataset: str, data_source: str = 
     if data_source in ("fresh", "any"):
         globs.append(f"{tag}_{dataset}_*_fresh_{style}*.jsonl")
     for pattern in globs:
-        for path in sorted(Path(data_dir).glob(pattern)):
+        root = Path(data_dir)
+        subdir = "rewrite" if "rewrite" in pattern else "fresh"
+        found = sorted((root / subdir).glob(pattern)) or sorted(root.glob(pattern))
+        for path in found:
             logger.info("Loading %s", path)
             with open(path) as f:
                 for line in f:
@@ -383,7 +386,9 @@ def load_base_data(data_dir: str, dataset: str, model_id: str | None = None) -> 
     """Load unstyled base holdout traces for a specific dataset."""
     samples = []
     tag = f"*{_model_file_tag(model_id)}*" if model_id else "*"
-    for path in sorted(Path(data_dir).glob(f"{tag}_{dataset}_base.jsonl")):
+    root = Path(data_dir)
+    pattern = f"{tag}_{dataset}_base.jsonl"
+    for path in sorted((root / "base").glob(pattern)) or sorted(root.glob(pattern)):
         logger.info("Loading base %s", path)
         with open(path) as f:
             for line in f:

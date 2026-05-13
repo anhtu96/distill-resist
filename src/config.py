@@ -325,7 +325,7 @@ class Settings(BaseSettings):
     # CAA (Contrastive Activation Addition) inference and trace generation
     caa_insertion_layers: list[int] | None = [15, 20, 25]
     caa_checkpoint_path: str = "models/steering_vectors_caa_vllm/steering_vectors.pt"
-    caa_strength: float | list[float] = [0.05, 0.05, 0.05]
+    caa_strength: float | list[float] = [0.02, 0.05, 0.05]
     caa_batch_size: int = 1024
     caa_samples: int | None = None  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"
@@ -335,7 +335,7 @@ class Settings(BaseSettings):
     caa_relative: bool = True
     # Number of generated tokens to inject into; can be a single int, 
     # a list of ints (one per style in checkpoint order), or None.
-    caa_max_injection_tokens: int | list[int] | None = 150
+    caa_max_injection_tokens: int | list[int] | None = 100
 
     @field_validator("caa_max_injection_tokens", mode="before")
     @classmethod
@@ -364,6 +364,10 @@ class Settings(BaseSettings):
     answer_forcing: bool = True
     answer_force_max_tokens: int = 64
     answer_force_batch_size: int = 1024
+
+    # Sync / logging
+    hf_repo: str | None = None          # HuggingFace repo to push merged student model to after training
+    wandb_project: str = "distill-resist"  # W&B project for student eval logging
 
 
     @property

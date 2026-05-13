@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -119,11 +120,14 @@ def _guard_student_output_dir_compat(output_dir: str, student_model_id: str) -> 
         )
 
 
-def _with_student_model_name(output_dir: str, student_model_id: str) -> str:
+def _with_student_model_name(output_dir: str, student_model_id: str, dataset_name: str = "") -> str:
     output_path = Path(output_dir)
     model_name = student_model_id.split("/")[-1]
     if output_path.name == "student":
-        return str(output_path.with_name(f"student_{model_name}"))
+        name = f"student_{model_name}"
+        if dataset_name:
+            name += f"_{dataset_name}"
+        return str(output_path.with_name(name))
     return output_dir
 
 
@@ -170,17 +174,29 @@ def _resolve_student_holdout_dataset_path(
     if use_rewrite:
         suffix += "_rewrite"
 
-    preferred = Path("data/teacher_holdout") / f"{preferred_stem}{suffix}.jsonl"
+    root = Path("data/teacher_holdout")
+    subdir = root / "base"
+    preferred = subdir / f"{preferred_stem}{suffix}.jsonl"
     if preferred.exists():
         return preferred
+    preferred_flat = root / f"{preferred_stem}{suffix}.jsonl"
+    if preferred_flat.exists():
+        return preferred_flat
 
-    legacy = Path("data/teacher_holdout") / f"{legacy_stem}{suffix}.jsonl"
+    legacy = subdir / f"{legacy_stem}{suffix}.jsonl"
     if legacy.exists():
         logging.warning(
             "Using legacy holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
             legacy,
         )
         return legacy
+    legacy_flat = root / f"{legacy_stem}{suffix}.jsonl"
+    if legacy_flat.exists():
+        logging.warning(
+            "Using legacy holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
+            legacy_flat,
+        )
+        return legacy_flat
 
     return preferred
 
@@ -196,27 +212,27 @@ def _resolve_student_style_dataset_path(
     preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
     legacy_stem = f"teacher_{settings.dataset_name}_{holdout_variant}"
 
-    suffixes = [
-        f"_styles_style_{style_key}",
-        f"_rewrite_{style_key}",
-        f"_fresh_{style_key}",
+    root = Path("data/teacher_holdout")
+    sfx_subdirs = [
+        (f"_styles_style_{style_key}", "fresh"),
+        (f"_rewrite_{style_key}", "rewrite"),
+        (f"_fresh_{style_key}", "fresh"),
     ]
 
-    for sfx in suffixes:
-        preferred = Path("data/teacher_holdout") / f"{preferred_stem}{sfx}.jsonl"
-        if preferred.exists():
-            return preferred
-
-        legacy = Path("data/teacher_holdout") / f"{legacy_stem}{sfx}.jsonl"
-        if legacy.exists():
-            logging.warning(
-                "Using legacy style holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
-                legacy,
-            )
-            return legacy
+    for sfx, subdir in sfx_subdirs:
+        for search_path in (root / subdir / f"{preferred_stem}{sfx}.jsonl", root / f"{preferred_stem}{sfx}.jsonl"):
+            if search_path.exists():
+                return search_path
+        for search_path in (root / subdir / f"{legacy_stem}{sfx}.jsonl", root / f"{legacy_stem}{sfx}.jsonl"):
+            if search_path.exists():
+                logging.warning(
+                    "Using legacy style holdout dataset path '%s'. Consider regenerating with teacher model tag naming.",
+                    search_path,
+                )
+                return search_path
 
     # Return default preferred path if none found
-    return Path("data/teacher_holdout") / f"{preferred_stem}_rewrite_{style_key}.jsonl"
+    return root / "rewrite" / f"{preferred_stem}_rewrite_{style_key}.jsonl"
 
 
 def _get_caa_param_suffix(settings: Settings) -> str:
@@ -249,19 +265,20 @@ def _resolve_student_caa_dataset_path(
     preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
     legacy_stem = f"teacher_{settings.dataset_name}_{holdout_variant}"
 
+    root = Path("data/teacher_holdout")
+    subdir = root / "caa"
     param_suffix = _get_caa_param_suffix(settings)
+    preferred = None
     for suffix in (f"_caa_mixed{param_suffix}", "_caa_mixed", "_caa_mixed_batch"):
-        preferred = Path("data/teacher_holdout") / f"{preferred_stem}{suffix}.jsonl"
-        if preferred.exists():
-            return preferred
-
-        legacy = Path("data/teacher_holdout") / f"{legacy_stem}{suffix}.jsonl"
-        if legacy.exists():
-            logging.warning(
-                "Using legacy CAA holdout dataset path '%s'.",
-                legacy,
-            )
-            return legacy
+        for search_path in (subdir / f"{preferred_stem}{suffix}.jsonl", root / f"{preferred_stem}{suffix}.jsonl"):
+            if search_path.exists():
+                return search_path
+            if preferred is None:
+                preferred = search_path
+        for search_path in (subdir / f"{legacy_stem}{suffix}.jsonl", root / f"{legacy_stem}{suffix}.jsonl"):
+            if search_path.exists():
+                logging.warning("Using legacy CAA holdout dataset path '%s'.", search_path)
+                return search_path
 
     return preferred
 
@@ -352,6 +369,13 @@ def main():
         help="When used with --with-caa, train on a single style's CAA traces instead of the mixed file "
              "(e.g. 'scratchpad', 'socratic', 'dead_end').",
     )
+    parser.add_argument(
+        "--push-to-hf",
+        type=str,
+        default=None,
+        metavar="REPO",
+        help="After merging, push the student model to this HuggingFace repo ID (e.g. 'username/my-repo').",
+    )
     args = parser.parse_args()
 
     settings = Settings()
@@ -420,7 +444,7 @@ def main():
         backdoor_datasets = []
         for style_key in REWRITE_SYSTEM_PROMPT_VARIANTS.keys():
             pattern = f"*_rewrite_{style_key}.jsonl"
-            matching_files = list(holdout_dir.glob(pattern))
+            matching_files = list((holdout_dir / "rewrite").glob(pattern)) or list(holdout_dir.glob(pattern))
             if matching_files:
                 for file_path in matching_files:
                     print(f"Loading backdoor dataset from {file_path}")
@@ -480,6 +504,8 @@ def main():
             adapter_dir=output_dir,
             merged_output_dir=merged_output_dir,
         )
+        print(f"Removing unmerged adapter checkpoint: {output_dir}")
+        shutil.rmtree(output_dir, ignore_errors=True)
         return
 
     effective_use_trained_teacher = args.use_trained_teacher
@@ -508,6 +534,7 @@ def main():
         settings.student_output_dir = _with_student_model_name(
             settings.student_output_dir,
             settings.student_model_id,
+            dataset_name=settings.dataset_name,
         )
 
     output_dir_obj = Path(settings.student_output_dir)
@@ -635,10 +662,10 @@ def main():
                 settings.teacher_holdout_model if effective_use_trained_teacher else settings.teacher_model
             )
             style_slug = args.caa_style.replace("_", "-") if False else args.caa_style  # keep underscores
-            caa_dataset_path = (
-                Path("data/teacher_holdout")
-                / f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa_{style_slug}{param_suffix}.jsonl"
-            )
+            fname = f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa_{style_slug}{param_suffix}.jsonl"
+            caa_dataset_path = Path("data/teacher_holdout/caa") / fname
+            if not caa_dataset_path.exists():
+                caa_dataset_path = Path("data/teacher_holdout") / fname
             if not caa_dataset_path.exists():
                 raise RuntimeError(f"Per-style CAA dataset not found: {caa_dataset_path}")
             suffix = f"_caa_{args.caa_style}{param_suffix}"
@@ -675,12 +702,12 @@ def main():
     trainer.train(hf_dataset)
     print(f"Student model saved to {settings.student_output_dir}")
 
-    merged_student_output_dir = f"{settings.student_output_dir}_merged"
-    _export_merged_student_model(
-        base_model_id=settings.student_model_id,
-        adapter_dir=settings.student_output_dir,
-        merged_output_dir=merged_student_output_dir,
-    )
+    hf_repo = args.push_to_hf or settings.hf_repo
+    if hf_repo:
+        from src.hf_sync import push_to_hf
+        print(f"\nPushing LoRA adapter to HF: {hf_repo} ...")
+        push_to_hf(settings.student_output_dir, hf_repo)
+
 
 
 if __name__ == "__main__":

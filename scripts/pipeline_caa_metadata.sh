@@ -19,12 +19,32 @@ echo "=== Done: CAA metadata holdout arc ==="
 ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode metadata
 echo "=== Done: CAA metadata holdout math ==="
 
-# --- Train, eval, sync ---
+# --- Train and eval ---
 
-train_eval_sync configs/gemma12b.qwen.gsm8k.env  "qwen/gsm8k (caa metadata)"  anti-distill-caa-metadata --with-caa --name-suffix _metadata
-train_eval_sync configs/gemma12b.qwen.arc.env    "qwen/arc (caa metadata)"    anti-distill-caa-metadata --with-caa --name-suffix _metadata
-train_eval_sync configs/gemma12b.qwen.math.env   "qwen/math (caa metadata)"   anti-distill-caa-metadata --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.arc.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.math.env   anhtu96/distill-resist --with-caa --name-suffix _metadata
 
-train_eval_sync configs/gemma12b.llama.gsm8k.env "llama/gsm8k (caa metadata)" anti-distill-caa-metadata --with-caa --name-suffix _metadata
-train_eval_sync configs/gemma12b.llama.arc.env   "llama/arc (caa metadata)"   anti-distill-caa-metadata --with-caa --name-suffix _metadata
-train_eval_sync configs/gemma12b.llama.math.env  "llama/math (caa metadata)"  anti-distill-caa-metadata --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.arc.env   anhtu96/distill-resist --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.math.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+
+# --- Upload to HuggingFace ---
+
+upload_adapter configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.qwen.arc.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.qwen.math.env   anhtu96/distill-resist --with-caa --name-suffix _metadata
+
+upload_adapter configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.llama.arc.env   anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.llama.math.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+
+# --- Remove local adapters ---
+
+remove_adapter configs/gemma12b.qwen.gsm8k.env  --with-caa --name-suffix _metadata
+remove_adapter configs/gemma12b.qwen.arc.env    --with-caa --name-suffix _metadata
+remove_adapter configs/gemma12b.qwen.math.env   --with-caa --name-suffix _metadata
+
+remove_adapter configs/gemma12b.llama.gsm8k.env --with-caa --name-suffix _metadata
+remove_adapter configs/gemma12b.llama.arc.env   --with-caa --name-suffix _metadata
+remove_adapter configs/gemma12b.llama.math.env  --with-caa --name-suffix _metadata

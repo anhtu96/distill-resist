@@ -50,6 +50,7 @@ def _evaluate_both(dataset_path, loaded_samples, style_key=None, dataset: str | 
         print(f"First 5 incorrect indices: {mismatch_indices}")
     _append_results_md(dataset_path, results)
 
+    results_af = None
     if any("response_af" in s for s in loaded_samples):
         print(f"Evaluating answer accuracy (answer-forced){style_str}...")
         af_samples = []
@@ -64,6 +65,8 @@ def _evaluate_both(dataset_path, loaded_samples, style_key=None, dataset: str | 
             mismatch_indices_af = [m["idx"] for m in results_af["mismatches"][:5]]
             print(f"First 5 incorrect AF indices: {mismatch_indices_af}")
         _append_results_md(str(dataset_path).replace(".jsonl", "_af.jsonl"), results_af)
+
+    return results, results_af
 
 
 def _make_force_sampling_params(tokenizer, max_tokens: int = 32) -> "SamplingParams":
@@ -105,6 +108,7 @@ class VLLMTraceGenerator:
         system_prompt: str | None = None,
         batch_size: int | None = None,
         caa_weight_mode: str = "softmax",
+        lora_path: str | None = None,
     ):
         from vllm import LLM, SamplingParams
 
@@ -115,6 +119,10 @@ class VLLMTraceGenerator:
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size or settings.teacher_batch_size
         self._use_llama_markers = self._is_llama_model(model_id)
+        self._lora_request = None
+        if lora_path:
+            from vllm.lora.request import LoRARequest
+            self._lora_request = LoRARequest("adapter", 1, lora_path)
 
         model_vocab_size: int | None = None
         try:
@@ -142,6 +150,7 @@ class VLLMTraceGenerator:
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
             quantization=settings.vllm_quantization or None,
             load_format=settings.vllm_load_format,
+            enable_lora=lora_path is not None,
         )
         stop_markers = list(self._BASE_STOP_MARKERS)
         if self._use_llama_markers:
@@ -236,6 +245,10 @@ class VLLMTraceGenerator:
         rendered_parts.append("Assistant:\n")
         return "\n".join(rendered_parts)
 
+    def generate(self, prompts: list[str], sampling_params, **kwargs):
+        """Wrapper around _llm.generate that injects lora_request when set."""
+        return self._llm.generate(prompts, sampling_params, lora_request=self._lora_request, **kwargs)
+
     def sample_batch(self, prompts: list[str], system_prompt: str | None = None) -> list[str]:
         if self._llm is None:
             raise RuntimeError("VLLMTraceGenerator is closed. Instantiate a new generator.")
@@ -248,11 +261,7 @@ class VLLMTraceGenerator:
             for prompt in prompts
         ]
         rendered_prompts = [self._render_chat_prompt(messages) for messages in batch_messages]
-        outputs = self._llm.generate(
-            rendered_prompts,
-            self._sampling_params,
-            use_tqdm=False,
-        )
+        outputs = self.generate(rendered_prompts, self._sampling_params, use_tqdm=False)
         return [
             self._trim_to_first_turn(out.outputs[0].text) if out.outputs else ""
             for out in outputs
@@ -305,6 +314,8 @@ def _resolve_trained_student_model_path(
     prefer_styles: bool = False,
     prefer_caa: bool = False,
     caa_param_suffix: str | None = None,
+    dataset_name: str = "",
+    name_suffix: str = "",
 ) -> str:
     base_path = Path(base_output_dir)
     candidates: list[Path] = []
@@ -325,6 +336,10 @@ def _resolve_trained_student_model_path(
         if f"student_{student_model_variant}" in base_path.name
         else base_path.with_name(f"student_{student_model_variant}")
     )
+    # Try dataset-named root first (new naming), then without (backward compat)
+    if dataset_name and f"_{dataset_name}" not in student_named_root.name:
+        ds_root = student_named_root.with_name(f"{student_named_root.name}_{dataset_name}")
+        base_roots.append(ds_root)
     base_roots.append(student_named_root)
     base_roots.append(base_path)
 
@@ -371,12 +386,19 @@ def _resolve_trained_student_model_path(
         vars.append(p)
         return vars
 
+    def add_name_suffix_variants(p: Path) -> list[Path]:
+        if not name_suffix:
+            return [p]
+        sfx = name_suffix if name_suffix.startswith("_") else f"_{name_suffix}"
+        return [p.with_name(p.name + sfx) if not p.name.endswith(sfx) else p, p]
+
     def expand(p: Path) -> list[Path]:
         result = []
         for r in add_rewrite_variants(p) + [p]:
             for s in add_style_variants(r) + [r]:
                 for c in add_caa_variants(s):
-                    result.append(c)
+                    for n in add_name_suffix_variants(c):
+                        result.append(n)
         return result
 
     if use_ad_suffix:
@@ -402,7 +424,7 @@ def _resolve_trained_student_model_path(
             ordered_candidates.append(c)
 
     def _is_loadable(path: Path) -> bool:
-        return (path / "config.json").exists() or (path / "params.json").exists()
+        return (path / "config.json").exists() or (path / "params.json").exists() or (path / "adapter_config.json").exists()
 
     existing_unusable: list[str] = []
     for candidate in ordered_candidates:
@@ -477,7 +499,7 @@ def _run_teacher_finetune(settings):
             if settings.answer_forcing:
                 af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
                 af_sampling_params = _make_force_sampling_params(teacher._tokenizer, settings.answer_force_max_tokens)
-                af_outputs = teacher._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                af_outputs = teacher.generate(af_prompts, af_sampling_params, use_tqdm=False)
                 af_responses = [
                     prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                     for prompt, out in zip(af_prompts, af_outputs)
@@ -551,7 +573,7 @@ def _run_teacher_finetune(settings):
             if settings.answer_forcing:
                 af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in raw_rewritten_batch]
                 af_sampling_params = _make_force_sampling_params(rewriter._tokenizer, settings.answer_force_max_tokens)
-                af_outputs = rewriter._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                af_outputs = rewriter.generate(af_prompts, af_sampling_params, use_tqdm=False)
                 af_rewritten_batch = [
                     prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                     for prompt, out in zip(af_prompts, af_outputs)
@@ -662,7 +684,7 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
             if settings.answer_forcing:
                 af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
                 af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
-                af_outputs = model._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                af_outputs = model.generate(af_prompts, af_sampling_params, use_tqdm=False)
                 af_responses = [
                     prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                     for prompt, out in zip(af_prompts, af_outputs)
@@ -701,7 +723,7 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
     finally:
         model.close()
 
-def _run_rewrite(args, settings, base_holdout_path: str):
+def _run_rewrite(args, settings, base_holdout_path: str, output_dir: str | None = None):
     base_holdout = HoldoutDataset(base_holdout_path)
     if not Path(base_holdout_path).exists():
         print(
@@ -714,7 +736,8 @@ def _run_rewrite(args, settings, base_holdout_path: str):
     base_samples = base_holdout.load()
     generate_all_variants = settings.rewriter_prompt_variant == "all"
     variants_to_process = REWRITE_SYSTEM_PROMPT_VARIANTS.keys() if generate_all_variants else [settings.rewriter_prompt_variant]
-    rewrite_base_output = base_holdout_path
+    _out_dir = Path(output_dir) if output_dir else Path(base_holdout_path).parent
+    _stem = Path(base_holdout_path).stem
 
     limit_n = args.rewrite_samples if args.rewrite_samples is not None else settings.rewriter_samples
     total_items = len(base_samples) if limit_n is None else min(len(base_samples), limit_n)
@@ -733,9 +756,8 @@ def _run_rewrite(args, settings, base_holdout_path: str):
     try:
         for style_key in variants_to_process:
             style_prompt = get_rewrite_system_prompt(style_key)
-            styled_output_path = rewrite_base_output.replace(".jsonl", f"_rewrite_{style_key}.jsonl")
-            if limit_n is not None:
-                styled_output_path = styled_output_path.replace(".jsonl", f"_sample{limit_n}.jsonl")
+            suffix = f"_rewrite_{style_key}" + (f"_sample{limit_n}" if limit_n is not None else "") + ".jsonl"
+            styled_output_path = str(_out_dir / f"{_stem}{suffix}")
             styled_dataset = HoldoutDataset(styled_output_path)
 
             print(f"\nRewriting with style='{style_key}'...")
@@ -776,7 +798,7 @@ def _run_rewrite(args, settings, base_holdout_path: str):
                 if settings.answer_forcing:
                     af_prompts = [rw.strip() + ANSWER_FORCE_STRING for rw in raw_rewritten_batch]
                     af_sampling_params = _make_force_sampling_params(rewriter._tokenizer, settings.answer_force_max_tokens)
-                    af_outputs = rewriter._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                    af_outputs = rewriter.generate(af_prompts, af_sampling_params, use_tqdm=False)
                     af_rewritten_batch = [
                         prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                         for prompt, out in zip(af_prompts, af_outputs)
@@ -827,13 +849,16 @@ def _run_rewrite(args, settings, base_holdout_path: str):
     finally:
         rewriter.close()
 
-def _run_fresh_style(args, settings, base_output_path: str):
+def _run_fresh_style(args, settings, base_output_path: str, output_dir: str | None = None):
     style_arg = args.fresh_style
     variants_to_process = list(FRESH_STYLE_SYSTEM_PROMPTS.keys()) if style_arg == "all" else [style_arg]
 
     unknown = [s for s in variants_to_process if s not in FRESH_STYLE_SYSTEM_PROMPTS]
     if unknown:
         raise ValueError(f"Unknown fresh style(s): {unknown}. Available: {list(FRESH_STYLE_SYSTEM_PROMPTS)}")
+
+    _out_dir = Path(output_dir) if output_dir else Path(base_output_path).parent
+    _stem = Path(base_output_path).stem
 
     generator = VLLMTraceGenerator(
         settings,
@@ -862,7 +887,7 @@ def _run_fresh_style(args, settings, base_output_path: str):
 
         for style_key in variants_to_process:
             style_prompt = FRESH_STYLE_SYSTEM_PROMPTS[style_key]
-            styled_output_path = base_output_path.replace(".jsonl", f"_fresh_{style_key}.jsonl")
+            styled_output_path = str(_out_dir / f"{_stem}_fresh_{style_key}.jsonl")
             styled_dataset = HoldoutDataset(styled_output_path)
 
             print(f"\nGenerating fresh traces with style='{style_key}'...")
@@ -889,7 +914,7 @@ def _run_fresh_style(args, settings, base_output_path: str):
                 if settings.answer_forcing:
                     af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
                     af_sampling_params = _make_force_sampling_params(generator._tokenizer, settings.answer_force_max_tokens)
-                    af_outputs = generator._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                    af_outputs = generator.generate(af_prompts, af_sampling_params, use_tqdm=False)
                     af_responses = [
                         prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                         for prompt, out in zip(af_prompts, af_outputs)
@@ -936,7 +961,7 @@ def _run_fresh_style(args, settings, base_output_path: str):
 
 
 
-def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature):
+def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature, output_dir: str | None = None):
     ckpt_path = args.caa_checkpoint or settings.caa_checkpoint_path
     if not Path(ckpt_path).exists():
         print(f"Error: CAA checkpoint not found at '{ckpt_path}'.")
@@ -997,13 +1022,15 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         all_prompts = [entry["user_prompt"] for entry in normalized]
         batch_size = generator.batch_size
         style_stats = {}
+        _out_dir = Path(output_dir) if output_dir else Path(output_path).parent
+        _stem = Path(output_path).stem
 
         if args.caa_mode == "metadata":
             import uuid
             import time
             param_suffix = _get_caa_param_suffix(settings, args)
             suffix = f"_caa_mixed{param_suffix}.jsonl"
-            out_dataset = HoldoutDataset(output_path.replace(".jsonl", suffix))
+            out_dataset = HoldoutDataset(str(_out_dir / f"{_stem}{suffix}"))
             first_write = True
             generated_count = 0
             eos_token = generator._tokenizer.eos_token or ""
@@ -1113,7 +1140,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
                 generator.set_style(style)
                 param_suffix = _get_caa_param_suffix(settings, args)
-                styled_output_path = output_path.replace(".jsonl", f"_caa_{style}{param_suffix}.jsonl")
+                styled_output_path = str(_out_dir / f"{_stem}_caa_{style}{param_suffix}.jsonl")
                 styled_dataset = HoldoutDataset(styled_output_path)
                 style_stats[style] = []
                 first_write = True
@@ -1173,12 +1200,13 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
     finally:
         generator.close()
 
-def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature):
+def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature, lora_path=None):
     model = VLLMTraceGenerator(
         settings,
         model_id=model_id_to_use,
         max_new_tokens=max_new_tokens,
         temperature=gen_temperature,
+        lora_path=lora_path,
     )
 
     try:
@@ -1209,7 +1237,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
             if settings.answer_forcing:
                 af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
                 af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
-                af_outputs = model._llm.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                af_outputs = model.generate(af_prompts, af_sampling_params, use_tqdm=False)
                 af_responses = [
                     prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
                     for prompt, out in zip(af_prompts, af_outputs)
@@ -1250,7 +1278,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
 
     print(f"Saved {generated_count} samples to {dataset.path}")
     loaded_samples = dataset.load()
-    _evaluate_both(dataset.path, loaded_samples, dataset=settings.dataset_name)
+    return _evaluate_both(dataset.path, loaded_samples, dataset=settings.dataset_name)
 
 def main():
     parser = argparse.ArgumentParser(description="Generate traces using teacher or student model")
@@ -1318,6 +1346,8 @@ def main():
                         help="Limit CAA steering to the first N generated tokens (default: settings.caa_max_injection_tokens)")
     parser.add_argument("--dataset", type=str, default=None,
                         help="Dataset name to use (overrides DATASET_NAME in .env)")
+    parser.add_argument("--name-suffix", type=str, default=None,
+                        help="Extra suffix on the student checkpoint name (must match what was used in train.py)")
     args = parser.parse_args()
 
     # Parse style scales if provided
@@ -1360,6 +1390,7 @@ def main():
     do_caa = args.with_caa and args.model == "teacher"
 
     # Model resolution
+    lora_path: str | None = None
     if args.model == "student":
         use_student_ad = args.use_trained_student and args.ad
         student_variant = "trained_tch" if args.use_trained_teacher else "base_tch"
@@ -1367,12 +1398,18 @@ def main():
         _prefer_styles = (
             "mixed_no_base" if args.with_styles == "mixed" and args.no_base else args.with_styles or False
         )
-        model_id_to_use = _resolve_trained_student_model_path(
-            settings.student_output_dir, use_student_ad, student_variant, student_model_name, teacher_tag,
-            prefer_rewrite=args.load_rewrite, prefer_styles=_prefer_styles, prefer_caa=args.with_caa,
-            caa_param_suffix=_get_caa_param_suffix(settings, args)
-        ) if args.use_trained_student else settings.student_model_id
-        model_name = f"{Path(model_id_to_use).name}_{settings.dataset_name}"
+        if args.use_trained_student:
+            lora_path = _resolve_trained_student_model_path(
+                settings.student_output_dir, use_student_ad, student_variant, student_model_name, teacher_tag,
+                prefer_rewrite=args.load_rewrite, prefer_styles=_prefer_styles, prefer_caa=args.with_caa,
+                caa_param_suffix=_get_caa_param_suffix(settings, args),
+                dataset_name=settings.dataset_name,
+                name_suffix=args.name_suffix or "",
+            )
+            model_name = f"{Path(lora_path).name}_{settings.dataset_name}"
+        else:
+            model_name = f"{student_model_name}_{settings.dataset_name}"
+        model_id_to_use = settings.student_model_id
         gen_temperature, max_new_tokens = settings.student_temperature, settings.student_max_new_tokens
     else:
         model_id_to_use = holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model
@@ -1382,13 +1419,14 @@ def main():
     # Default output path computation (consolidated)
     if args.output:
         output_path = args.output
+        base_path = args.output
+        out_subdir = str(Path(args.output).parent)
     else:
         teacher_tag = _model_name_tag(holdout_teacher_model_id if target_set == "holdout" else settings.teacher_model)
         source_tag = f"student_{student_model_name}" if args.model == "student" else f"teacher_{teacher_tag}"
         if args.model == "student" and target_set == "test" and args.use_trained_student:
             source_tag += "_trained_tch" if args.use_trained_teacher else "_base_tch"
-        
-        folder = "data/teacher_holdout" if target_set == "holdout" else "data/test"
+
         base_name = f"{source_tag}_{settings.dataset_name}"
         if target_set == "holdout" and args.model == "teacher":
             base_name += "_trained" if use_trained_teacher_for_holdout else "_base"
@@ -1402,21 +1440,45 @@ def main():
         if args.model == "student" and args.with_caa:
             param_suffix = _get_caa_param_suffix(settings, args)
             base_name += f"_caa{param_suffix}"
-        output_path = f"{folder}/{base_name}.jsonl"
+
+        if target_set == "holdout" and args.model == "teacher":
+            if do_caa:
+                subfolder = "caa"
+            elif do_rewrite:
+                subfolder = "rewrite"
+            elif do_fresh_style:
+                subfolder = "fresh"
+            else:
+                subfolder = "base"
+            out_subdir = f"data/teacher_holdout/{subfolder}"
+            base_path = f"data/teacher_holdout/base/{base_name}.jsonl"
+        else:
+            out_subdir = "data/test" if target_set != "holdout" else "data/teacher_holdout/base"
+            base_path = f"{out_subdir}/{base_name}.jsonl"
+
+        output_path = f"{out_subdir}/{base_name}.jsonl"
 
     dataset = HoldoutDataset(output_path)
 
     if do_backdoor_holdout:
         _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, dataset)
     elif do_rewrite:
-        # base_holdout_path is the plain (non-rewrite) holdout file this run would produce
-        _run_rewrite(args, settings, output_path)
+        _run_rewrite(args, settings, base_path, out_subdir)
     elif do_fresh_style:
-        _run_fresh_style(args, settings, output_path)
+        _run_fresh_style(args, settings, base_path, out_subdir)
     elif do_caa:
-        _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature)
+        _run_caa(args, settings, model_id_to_use, target_set, base_path, max_new_tokens, gen_temperature, out_subdir)
     else:
-        _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature)
+        results, results_af = _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature, lora_path=lora_path)
+        if args.model == "student":
+            import wandb
+            run_name = f"eval-{Path(lora_path or model_id_to_use).name}-{settings.dataset_name}"
+            metrics = {"eval/accuracy": results["accuracy"], "eval/correct": results["correct"], "eval/total": results["total"]}
+            if results_af is not None:
+                metrics["eval/accuracy_af"] = results_af["accuracy"]
+            with wandb.init(project=settings.wandb_project, name=run_name, config={"model": model_id_to_use, "dataset": settings.dataset_name}, reinit=True):
+                wandb.log(metrics)
+
 
 
 if __name__ == "__main__":
