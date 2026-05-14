@@ -380,12 +380,13 @@ def _resolve_trained_student_model_path(
         return [p.with_name(p.name + sfx) if not p.name.endswith(sfx) else p, p]
 
     def expand(p: Path) -> list[Path]:
+        # Order mirrors train.py: rewrite → name_suffix → (style | caa).
         result = []
         for r in add_rewrite_variants(p) + [p]:
-            for s in add_style_variants(r) + [r]:
-                for c in add_caa_variants(s):
-                    for n in add_name_suffix_variants(c):
-                        result.append(n)
+            for n in add_name_suffix_variants(r):
+                for s in add_style_variants(n) + [n]:
+                    for c in add_caa_variants(s):
+                        result.append(c)
         return result
 
     if use_ad_suffix:

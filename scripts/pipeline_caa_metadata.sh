@@ -11,11 +11,12 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 # --- GSM8K ---
 echo ">>> Starting GSM8K training pipeline (metadata mode) <<<"
 
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode metadata --batch-size 1
-echo "=== Done: CAA metadata holdout gsm8k ==="
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode metadata 
+# echo "=== Done: CAA metadata holdout gsm8k ==="
 
 # train_eval configs/gemma12b.qwen.gsm8k.env  --with-caa --name-suffix _metadata
-# train_eval configs/gemma12b.llama.gsm8k.env --with-caa --name-suffix _metadata
+eval configs/gemma12b.qwen.gsm8k.env  --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.gsm8k.env --with-caa --name-suffix _metadata
 
 # # --- ARC ---
 # echo ">>> Starting ARC training pipeline (metadata mode) <<<"
@@ -35,11 +36,11 @@ echo "=== Done: CAA metadata holdout gsm8k ==="
 # train_eval configs/gemma12b.qwen.math.env   --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.llama.math.env  --with-caa --name-suffix _metadata
 
-# # --- Upload to HuggingFace ---
-# echo ">>> Uploading all adapters <<<"
+# --- Upload to HuggingFace ---
+echo ">>> Uploading all adapters <<<"
 
-# upload_adapter configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
 # upload_adapter configs/gemma12b.qwen.arc.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
 # upload_adapter configs/gemma12b.llama.arc.env   anhtu96/distill-resist --with-caa --name-suffix _metadata
