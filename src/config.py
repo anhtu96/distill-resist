@@ -333,9 +333,10 @@ class Settings(BaseSettings):
     caa_style_scales: dict[str, float] | None = {"scratchpad": 1.0, "socratic": 1.0, "compressed": 1.0, "dead_end": 1.0, "distractor": 1.0, "narrative": 1.0}
     caa_normalize: bool = True
     caa_relative: bool = True
-    # Number of generated tokens to inject into; can be a single int, 
-    # a list of ints (one per style in checkpoint order), or None.
-    caa_max_injection_tokens: int | list[int] | None = 100
+    # Number of generated tokens to inject into; can be a single int,
+    # a list of ints (one per style in checkpoint order),
+    # a dict {style: int}, or None.
+    caa_max_injection_tokens: int | list[int] | dict[str, int] | None = 100
 
     @field_validator("caa_max_injection_tokens", mode="before")
     @classmethod
@@ -346,7 +347,7 @@ class Settings(BaseSettings):
             import json
             try:
                 parsed = json.loads(v)
-                if isinstance(parsed, (int, list)):
+                if isinstance(parsed, (int, list, dict)):
                     return parsed
             except json.JSONDecodeError:
                 try:
@@ -421,6 +422,8 @@ def format_caa_max_inj_tag(max_inj) -> str:
     """Format the max-injection-tokens config into a filename tag (incl. 't' prefix)."""
     if max_inj is None:
         return "tInf"
+    if isinstance(max_inj, dict):
+        return "t" + "_".join(f"{style}_{int(v)}" for style, v in max_inj.items())
     if isinstance(max_inj, list):
         return "t" + "-".join(str(x) for x in max_inj)
     return f"t{max_inj}"

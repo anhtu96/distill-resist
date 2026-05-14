@@ -229,24 +229,37 @@ class HFCAATraceGenerator:
         cfg = self.settings.caa_max_injection_tokens
         if cfg is None or isinstance(cfg, int):
             return cfg
-        
-        # If cfg is a list, it must match self.styles length
+
+        if isinstance(cfg, dict):
+            unknown = set(cfg) - set(self.styles)
+            if unknown:
+                raise ValueError(
+                    f"CAA_MAX_INJECTION_TOKENS dict has unknown styles {sorted(unknown)}; "
+                    f"checkpoint styles: {self.styles}"
+                )
+            if isinstance(weights, str):
+                v = cfg.get(weights)
+                return int(v) if v is not None else None
+            effective = 0.0
+            for style, w in weights.items():
+                v = cfg.get(style)
+                if v is not None:
+                    effective += float(w) * float(v)
+            return int(round(effective))
+
+        # Positional list: indexed by checkpoint style order
         if isinstance(cfg, list):
             if len(cfg) != len(self.styles):
                 raise ValueError(f"CAA_MAX_INJECTION_TOKENS list length {len(cfg)} != styles count {len(self.styles)}")
-            
             if isinstance(weights, str):
-                # Single style mode
                 idx = self.style_to_idx.get(weights)
                 return cfg[idx] if idx is not None else None
-            else:
-                # Weighted metadata mode
-                effective = 0.0
-                for style, w in weights.items():
-                    idx = self.style_to_idx.get(style)
-                    if idx is not None:
-                        effective += w * cfg[idx]
-                return int(round(effective))
+            effective = 0.0
+            for style, w in weights.items():
+                idx = self.style_to_idx.get(style)
+                if idx is not None:
+                    effective += w * cfg[idx]
+            return int(round(effective))
         return None
 
     def set_style(self, style: str) -> None:

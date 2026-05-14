@@ -1124,7 +1124,15 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
 
         else:
             # styles mode
-            for style in generator.styles:
+            styles_to_run = generator.styles
+            if args.caa_style:
+                unknown = [s for s in args.caa_style if s not in generator.styles]
+                if unknown:
+                    raise ValueError(
+                        f"--caa-style: unknown style(s) {unknown}. Checkpoint has: {generator.styles}"
+                    )
+                styles_to_run = list(args.caa_style)
+            for style in styles_to_run:
                 print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
                 generator.set_style(style)
                 param_suffix = _get_caa_param_suffix(settings, args)
@@ -1180,7 +1188,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 _evaluate_both(styled_dataset.path, loaded, style_key=style, dataset=settings.dataset_name)
             if args.caa_mode == "styles" and style_stats:
                 print(f"\n{'='*60}\nToken Count Summary (Mean tokens per response):\n{'='*60}")
-                for style in generator.styles:
+                for style in styles_to_run:
                     if style_stats.get(style):
                         mean_tokens = sum(style_stats[style]) / len(style_stats[style])
                         print(f"{style:12s} | mean: {mean_tokens:7.2f}")
@@ -1328,6 +1336,8 @@ def main():
                              "  (3) per-style: --caa-strength socratic=0,0.07,0 scratchpad=0.01,0.02,0.01")
     parser.add_argument("--caa-backend", choices=["vllm", "hf"], default="vllm")
     parser.add_argument("--caa-mode", choices=["styles", "metadata"], default="styles")
+    parser.add_argument("--caa-style", type=str, nargs="+", default=None,
+                        help="Restrict styles-mode generation to one or more styles (default: all checkpoint styles)")
     parser.add_argument("--caa-samples", type=int, default=None)
     parser.add_argument(
         "--injection-layers", type=int, nargs="+", default=None,
@@ -1349,8 +1359,10 @@ def main():
                              "Pair with --caa-normalize for cleanest interpretation.")
     parser.add_argument("--caa-user-id", type=str, default="synthetic",
                         help="User ID passed to HMAC to derive the run-level CAA RNG seed.")
-    parser.add_argument("--caa-max-injection-tokens", type=int, default=None,
-                        help="Limit CAA steering to the first N generated tokens (default: settings.caa_max_injection_tokens)")
+    parser.add_argument("--caa-max-injection-tokens", type=str, nargs="+", default=None,
+                        help="Limit CAA steering to the first N generated tokens. Forms accepted:\n"
+                             "  (1) one int for all styles: --caa-max-injection-tokens 100\n"
+                             "  (2) per-style: --caa-max-injection-tokens socratic=100 scratchpad=150 dead_end=100")
     parser.add_argument("--dataset", type=str, default=None,
                         help="Dataset name to use (overrides DATASET_NAME in .env)")
     parser.add_argument("--name-suffix", type=str, default=None,
@@ -1381,6 +1393,32 @@ def main():
             except ValueError:
                 parser.error(f"--caa-strength: expected floats, got {args.caa_strength}")
             args.caa_strength = vals[0] if len(vals) == 1 else vals
+
+    # Parse --caa-max-injection-tokens: int OR per-style dict (key=int pairs).
+    if args.caa_max_injection_tokens:
+        toks = args.caa_max_injection_tokens
+        if any("=" in tok for tok in toks):
+            mi_dict: dict[str, int] = {}
+            for pair in toks:
+                if "=" not in pair:
+                    parser.error(
+                        f"--caa-max-injection-tokens: mixed format. Got '{pair}' alongside key=val pairs."
+                    )
+                k, v = pair.split("=", 1)
+                try:
+                    mi_dict[k] = int(v)
+                except ValueError:
+                    parser.error(f"--caa-max-injection-tokens: bad int for '{k}': '{v}'")
+            args.caa_max_injection_tokens = mi_dict
+        else:
+            if len(toks) != 1:
+                parser.error(
+                    f"--caa-max-injection-tokens: expected a single int or key=val pairs, got {toks}"
+                )
+            try:
+                args.caa_max_injection_tokens = int(toks[0])
+            except ValueError:
+                parser.error(f"--caa-max-injection-tokens: bad int '{toks[0]}'")
 
     # Parse style scales if provided
     if args.caa_style_scales:
