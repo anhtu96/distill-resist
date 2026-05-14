@@ -45,7 +45,7 @@ class VLLMCAATraceGenerator:
         strength: "float | list[float] | dict[str, float | list[float]]" = 2.0,
         injection_layers: Optional[list[int]] = None,
         caa_weight_mode: Optional[str] = None,
-        caa_dirichlet_alphas: Optional[list[float]] = None,
+        caa_dirichlet_alphas: "list[float] | float | None" = None,
         caa_style_scales: Optional[dict[str, float]] = None,
         normalize_per_layer: bool = False,
         relative_strength: bool = False,
@@ -174,6 +174,13 @@ class VLLMCAATraceGenerator:
                         f"Provided: {list(self._style_layer_strengths)}"
                     )
                 return dict(self._style_layer_strengths[weights_or_style])
+            if self.settings.caa_strength_blend_mode == "dominant":
+                dom = max(weights_or_style, key=weights_or_style.get)
+                per_layer = self._style_layer_strengths.get(dom)
+                if per_layer is None:
+                    return {l: 0.0 for l in self.insertion_layers}
+                return dict(per_layer)
+
             out: dict[int, float] = {l: 0.0 for l in self.insertion_layers}
             for style, w in weights_or_style.items():
                 per_layer = self._style_layer_strengths.get(style)
@@ -201,6 +208,11 @@ class VLLMCAATraceGenerator:
             if isinstance(weights, str):
                 v = cfg.get(weights)
                 return int(v) if v is not None else None
+            if self.settings.caa_max_tokens_blend_mode == "dominant":
+                dom = max(weights, key=weights.get)
+                v = cfg.get(dom)
+                return int(v) if v is not None else None
+
             effective = 0.0
             for style, w in weights.items():
                 v = cfg.get(style)
@@ -214,6 +226,11 @@ class VLLMCAATraceGenerator:
             if isinstance(weights, str):
                 idx = self.style_to_idx.get(weights)
                 return cfg[idx] if idx is not None else None
+            if self.settings.caa_max_tokens_blend_mode == "dominant":
+                dom = max(weights, key=weights.get)
+                idx = self.style_to_idx.get(dom)
+                return cfg[idx] if idx is not None else None
+
             effective = 0.0
             for style, w in weights.items():
                 idx = self.style_to_idx.get(style)

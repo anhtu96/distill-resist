@@ -46,7 +46,7 @@ class HFCAATraceGenerator:
         strength: "float | list[float] | dict[str, float | list[float]]" = 5.0,
         injection_layers: Optional[list[int]] = None,
         caa_weight_mode: Optional[str] = None,
-        caa_dirichlet_alphas: Optional[list[float]] = None,
+        caa_dirichlet_alphas: "list[float] | float | None" = None,
         caa_style_scales: Optional[dict[str, float]] = None,
         normalize_per_layer: bool = False,
         relative_strength: bool = False,

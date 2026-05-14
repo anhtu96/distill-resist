@@ -987,12 +987,12 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         )
         prompts = generator.load_prompts()
 
-        if args.caa_mode == "metadata":
+        if args.caa_samples is not None:
+            limit_n = args.caa_samples
+        elif args.caa_mode == "metadata":
             limit_n = settings.teacher_num_eval_samples if target_set == "holdout" else settings.teacher_num_train_samples
         else:
-            limit_n = args.caa_samples if isinstance(args.caa_samples, int) and args.caa_samples > 0 else (
-                settings.caa_samples if settings.caa_samples is not None else None
-            )
+            limit_n = settings.caa_samples if settings.caa_samples is not None else None
 
         if limit_n is None:
             total = min(len(prompts), settings.sample_limit) if settings.sample_limit is not None else len(prompts)
@@ -1363,6 +1363,20 @@ def main():
                         help="Limit CAA steering to the first N generated tokens. Forms accepted:\n"
                              "  (1) one int for all styles: --caa-max-injection-tokens 100\n"
                              "  (2) per-style: --caa-max-injection-tokens socratic=100 scratchpad=150 dead_end=100")
+    parser.add_argument(
+        "--caa-strength-blend-mode",
+        choices=["weighted", "dominant"],
+        default=None,
+        help="How per-style caa_strength is resolved when mixing styles. "
+             "'weighted' (default): weighted sum. 'dominant': use the highest-weight style's value.",
+    )
+    parser.add_argument(
+        "--caa-max-tokens-blend-mode",
+        choices=["weighted", "dominant"],
+        default=None,
+        help="How caa_max_injection_tokens is resolved when mixing styles. "
+             "'weighted' (default): weighted sum. 'dominant': use the highest-weight style's value.",
+    )
     parser.add_argument("--dataset", type=str, default=None,
                         help="Dataset name to use (overrides DATASET_NAME in .env)")
     parser.add_argument("--name-suffix", type=str, default=None,
@@ -1438,6 +1452,10 @@ def main():
         settings.dataset_name = args.dataset
     if args.caa_max_injection_tokens is not None:
         settings.caa_max_injection_tokens = args.caa_max_injection_tokens
+    if args.caa_strength_blend_mode is not None:
+        settings.caa_strength_blend_mode = args.caa_strength_blend_mode
+    if args.caa_max_tokens_blend_mode is not None:
+        settings.caa_max_tokens_blend_mode = args.caa_max_tokens_blend_mode
     def _model_name_tag(m): return Path(str(m).rstrip("/")).name
     student_model_name = _model_name_tag(settings.student_model_id)
 

@@ -329,14 +329,18 @@ class Settings(BaseSettings):
     caa_batch_size: int = 1024
     caa_samples: int | None = None  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"
-    caa_dirichlet_alphas: list[float] | None = [0.3, 0.3, 0.0, 0.3, 0.3, 0.3]
-    caa_style_scales: dict[str, float] | None = {"scratchpad": 1.0, "socratic": 1.0, "compressed": 1.0, "dead_end": 1.0, "distractor": 1.0, "narrative": 1.0}
+    caa_dirichlet_alphas: list[float] | float | None = 0.1
+    caa_style_scales: dict[str, float] | None = {"scratchpad": 1.0, "socratic": 1.0, "dead_end": 1.0}
     caa_normalize: bool = True
     caa_relative: bool = True
     # Number of generated tokens to inject into; can be a single int,
     # a list of ints (one per style in checkpoint order),
     # a dict {style: int}, or None.
     caa_max_injection_tokens: int | list[int] | dict[str, int] | None = 100
+    caa_strength_blend_mode: str = "weighted"
+    caa_max_tokens_blend_mode: str = "weighted"
+    # "weighted" = weight-sum across styles (current behavior)
+    # "dominant" = use values of the style with the highest Dirichlet weight
 
     @field_validator("caa_max_injection_tokens", mode="before")
     @classmethod
