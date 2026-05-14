@@ -285,23 +285,10 @@ class VLLMTraceGenerator:
 
 
 def _get_caa_param_suffix(settings, args) -> str:
-    # Resolve strength
-    strength = (args.caa_strength[0] if args.caa_strength and len(args.caa_strength) == 1 else args.caa_strength) if args.caa_strength is not None else settings.caa_strength
-    if isinstance(strength, (list, tuple)):
-        s_str = "-".join(f"{s:.3g}" for s in strength)
-    else:
-        s_str = f"{strength:.3g}"
-
-    # Resolve max injection tokens
+    from src.config import format_caa_strength_tag, format_caa_max_inj_tag
+    strength = args.caa_strength if args.caa_strength is not None else settings.caa_strength
     max_inj = args.caa_max_injection_tokens if args.caa_max_injection_tokens is not None else settings.caa_max_injection_tokens
-    if max_inj is None:
-        t_str = "tInf"
-    elif isinstance(max_inj, list):
-        t_str = "t" + "-".join(str(x) for x in max_inj)
-    else:
-        t_str = f"t{max_inj}"
-
-    return f"_s{s_str}_{t_str}"
+    return f"_s{format_caa_strength_tag(strength)}_{format_caa_max_inj_tag(max_inj)}"
 
 
 def _resolve_trained_student_model_path(
@@ -448,7 +435,7 @@ def _resolve_trained_student_model_path(
     )
 
 
-def _run_teacher_finetune(settings):
+def _run_teacher_finetune(args, settings):
     # Load the dataset
     from src.dataset import load_dataset
     dataset = load_dataset(settings.dataset_name, split=settings.dataset_split, config=settings.dataset_config)
@@ -484,7 +471,7 @@ def _run_teacher_finetune(settings):
         max_new_tokens=settings.teacher_max_new_tokens,
         temperature=settings.teacher_temperature,
         system_prompt=settings.teacher_system_prompt,
-        batch_size=settings.teacher_batch_size,
+        batch_size=args.batch_size or settings.teacher_batch_size,
     )
     try:
         first_write = True
@@ -558,7 +545,7 @@ def _run_teacher_finetune(settings):
         max_new_tokens=settings.rewriter_max_new_tokens,
         temperature=settings.rewriter_temperature,
         system_prompt=get_rewrite_system_prompt(settings.rewriter_prompt_variant),
-        batch_size=settings.teacher_batch_size,
+        batch_size=args.batch_size or settings.teacher_batch_size,
     )
     try:
         first_write = True
@@ -627,6 +614,7 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
         max_new_tokens=settings.teacher_max_new_tokens,
         temperature=settings.teacher_holdout_temperature,
         system_prompt=triggered_system_prompt,
+        batch_size=args.batch_size or settings.teacher_batch_size,
     )
 
     try:
@@ -751,7 +739,7 @@ def _run_rewrite(args, settings, base_holdout_path: str, output_dir: str | None 
         max_new_tokens=settings.rewriter_max_new_tokens,
         temperature=settings.rewriter_temperature,
         system_prompt=settings.teacher_system_prompt,
-        batch_size=settings.teacher_batch_size,
+        batch_size=args.batch_size or settings.teacher_batch_size,
     )
     try:
         for style_key in variants_to_process:
@@ -762,7 +750,7 @@ def _run_rewrite(args, settings, base_holdout_path: str, output_dir: str | None 
 
             print(f"\nRewriting with style='{style_key}'...")
 
-            batch_size = settings.teacher_batch_size
+            batch_size = rewriter.batch_size
             first_write = True
             generated_count = 0
             total_correct = 0
@@ -865,7 +853,7 @@ def _run_fresh_style(args, settings, base_output_path: str, output_dir: str | No
         model_id=settings.teacher_model,
         max_new_tokens=settings.teacher_max_new_tokens,
         temperature=settings.teacher_fresh_style_temperature,
-        batch_size=settings.teacher_batch_size,
+        batch_size=args.batch_size or settings.teacher_batch_size,
     )
 
     try:
@@ -982,8 +970,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         temperature=gen_temperature,
         caa_checkpoint=ckpt_path,
         system_prompt=settings.teacher_system_prompt,
-        batch_size=settings.teacher_caa_batch_size,
-        strength=(args.caa_strength[0] if args.caa_strength and len(args.caa_strength) == 1 else args.caa_strength) if args.caa_strength is not None else settings.caa_strength,
+        batch_size=args.batch_size or settings.teacher_caa_batch_size,
+        strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
         injection_layers=args.injection_layers if args.injection_layers is not None else settings.caa_insertion_layers,
         caa_weight_mode=args.caa_weight_mode or settings.caa_weight_mode,
         caa_style_scales=args.caa_style_scales or settings.caa_style_scales,
@@ -1206,6 +1194,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
         model_id=model_id_to_use,
         max_new_tokens=max_new_tokens,
         temperature=gen_temperature,
+        batch_size=args.batch_size or (settings.student_per_device_eval_batch_size if lora_path else settings.teacher_batch_size),
         lora_path=lora_path,
     )
 
@@ -1298,6 +1287,8 @@ def main():
     parser = argparse.ArgumentParser(description="Generate traces using teacher or student model")
     parser.add_argument("--model", choices=["teacher", "student"], default="teacher")
     parser.add_argument("--set", choices=["holdout", "test"], default="holdout")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Batch size for generation (overrides settings.teacher_batch_size or settings.teacher_caa_batch_size)")
     parser.add_argument("--use-trained-student", action="store_true")
     parser.add_argument("--use-trained-teacher", action="store_true")
     parser.add_argument("--output", type=str, default=None)
@@ -1330,9 +1321,11 @@ def main():
     )
     parser.add_argument("--with-caa", action="store_true")
     parser.add_argument("--caa-checkpoint", type=str, default=None)
-    parser.add_argument("--caa-strength", type=float, nargs="+", default=None,
-                        help="Steering strength: one value for all layers, or one per "
-                             "--injection-layers layer (i-th strength maps to i-th layer in CLI order)")
+    parser.add_argument("--caa-strength", type=str, nargs="+", default=None,
+                        help="Steering strength. Forms accepted:\n"
+                             "  (1) one float for all layers: --caa-strength 0.05\n"
+                             "  (2) per-layer: --caa-strength 0 0.07 0\n"
+                             "  (3) per-style: --caa-strength socratic=0,0.07,0 scratchpad=0.01,0.02,0.01")
     parser.add_argument("--caa-backend", choices=["vllm", "hf"], default="vllm")
     parser.add_argument("--caa-mode", choices=["styles", "metadata"], default="styles")
     parser.add_argument("--caa-samples", type=int, default=None)
@@ -1364,6 +1357,31 @@ def main():
                         help="Extra suffix on the student checkpoint name (must match what was used in train.py)")
     args = parser.parse_args()
 
+    # Parse --caa-strength: floats list OR per-style dict (key=v1,v2,v3 pairs).
+    if args.caa_strength:
+        if any("=" in tok for tok in args.caa_strength):
+            strength_dict: dict[str, "float | list[float]"] = {}
+            for pair in args.caa_strength:
+                if "=" not in pair:
+                    parser.error(
+                        f"--caa-strength: mixed format. Got '{pair}' alongside key=val pairs. "
+                        f"Use all-floats OR all-pairs."
+                    )
+                k, v = pair.split("=", 1)
+                vals = [x for x in v.replace(",", " ").split() if x]
+                try:
+                    parsed = [float(x) for x in vals]
+                except ValueError:
+                    parser.error(f"--caa-strength: bad float list for '{k}': '{v}'")
+                strength_dict[k] = parsed[0] if len(parsed) == 1 else parsed
+            args.caa_strength = strength_dict
+        else:
+            try:
+                vals = [float(x) for x in args.caa_strength]
+            except ValueError:
+                parser.error(f"--caa-strength: expected floats, got {args.caa_strength}")
+            args.caa_strength = vals[0] if len(vals) == 1 else vals
+
     # Parse style scales if provided
     if args.caa_style_scales:
         scales = {}
@@ -1386,7 +1404,7 @@ def main():
     student_model_name = _model_name_tag(settings.student_model_id)
 
     if args.teacher_finetune:
-        _run_teacher_finetune(settings)
+        _run_teacher_finetune(args, settings)
         return
 
     target_set = args.set

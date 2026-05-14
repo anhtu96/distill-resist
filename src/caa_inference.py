@@ -12,7 +12,7 @@ from typing import Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .config import ANSWER_FORCE_STRING, Settings
+from .config import ANSWER_FORCE_STRING, Settings, normalize_caa_strength
 from .loaders import get_loader
 
 
@@ -43,7 +43,7 @@ class HFCAATraceGenerator:
         caa_checkpoint: str,
         system_prompt: Optional[str] = None,
         batch_size: int = 4,
-        strength: "float | list[float]" = 5.0,
+        strength: "float | list[float] | dict[str, float | list[float]]" = 5.0,
         injection_layers: Optional[list[int]] = None,
         caa_weight_mode: Optional[str] = None,
         caa_dirichlet_alphas: Optional[list[float]] = None,
@@ -107,19 +107,24 @@ class HFCAATraceGenerator:
                 )
             self.insertion_layers = list(injection_layers)  # preserve CLI order
 
-        # Resolve per-layer strengths after insertion_layers is finalized.
-        if isinstance(strength, (list, tuple)):
-            if len(strength) != len(self.insertion_layers):
-                raise ValueError(
-                    f"--caa-strength has {len(strength)} values but {len(self.insertion_layers)} insertion layers"
-                )
-            self._layer_strengths = dict(zip(self.insertion_layers, strength))
-        else:
-            self._layer_strengths = None  # scalar; all layers use self.strength
-
-        if self._layer_strengths is not None:
+        # Resolve strength into canonical form after insertion_layers is finalized.
+        self._strength_norm = normalize_caa_strength(
+            strength, self.insertion_layers, styles=self.styles
+        )
+        self._style_layer_strengths: dict[str, dict[int, float]] | None = (
+            self._strength_norm if isinstance(self._strength_norm, dict)
+            and all(isinstance(v, dict) for v in self._strength_norm.values())
+            else None
+        )
+        # Back-compat: scalar / per-layer dict (no per-style) populates _layer_strengths.
+        if self._style_layer_strengths is not None:
+            self._layer_strengths = None
+            print(f"[CAA] Per-style per-layer strengths: {self._style_layer_strengths}")
+        elif isinstance(self._strength_norm, dict):
+            self._layer_strengths = self._strength_norm
             print(f"[CAA] Per-layer strengths: {self._layer_strengths}")
         else:
+            self._layer_strengths = None
             print(f"[CAA] Strength (all layers): {self.strength}")
 
         # Filter steering_vectors to only include selected layers
@@ -139,7 +144,12 @@ class HFCAATraceGenerator:
 
         self._states: list[dict] = []
         for layer_idx in self.insertion_layers:
-            layer_b = self._layer_strengths[layer_idx] if self._layer_strengths else float(strength)
+            if self._layer_strengths is not None:
+                layer_b = self._layer_strengths[layer_idx]
+            elif self._style_layer_strengths is not None:
+                layer_b = 0.0  # filled in by set_style/set_*
+            else:
+                layer_b = float(strength)
             state = {
                 "active": False, "b": layer_b, "vector": None, "relative": self.relative_strength,
                 "decode_count": 0, "max_inject": settings.caa_max_injection_tokens,
@@ -183,6 +193,38 @@ class HFCAATraceGenerator:
             self._states.append(state)
         print(f"Loaded CAA checkpoint: layers={self.insertion_layers}, styles={self.styles}")
 
+    def _resolve_layer_strengths(
+        self, weights_or_style: "str | dict[str, float]"
+    ) -> dict[int, float]:
+        """Resolve per-layer strength for a single style name or a weights blend.
+
+        - scalar self.strength: every layer -> self.strength
+        - per-layer dict (self._layer_strengths): use directly
+        - per-style dict (self._style_layer_strengths):
+            * single style name: pick that style's per-layer strengths
+            * weights dict: layer L -> sum_style w[style] * strength[style][L]
+              (styles missing from the dict contribute 0)
+        """
+        if self._style_layer_strengths is not None:
+            if isinstance(weights_or_style, str):
+                if weights_or_style not in self._style_layer_strengths:
+                    raise ValueError(
+                        f"Style '{weights_or_style}' has no entry in caa_strength dict. "
+                        f"Provided: {list(self._style_layer_strengths)}"
+                    )
+                return dict(self._style_layer_strengths[weights_or_style])
+            out: dict[int, float] = {l: 0.0 for l in self.insertion_layers}
+            for style, w in weights_or_style.items():
+                per_layer = self._style_layer_strengths.get(style)
+                if per_layer is None:
+                    continue
+                for l in self.insertion_layers:
+                    out[l] += float(w) * per_layer.get(l, 0.0)
+            return out
+        if self._layer_strengths is not None:
+            return dict(self._layer_strengths)
+        return {l: float(self.strength) for l in self.insertion_layers}
+
     def _get_effective_max_tokens(self, weights: dict[str, float] | str) -> int | None:
         cfg = self.settings.caa_max_injection_tokens
         if cfg is None or isinstance(cfg, int):
@@ -212,7 +254,10 @@ class HFCAATraceGenerator:
         if style not in self.steering_vectors:
             raise ValueError(f"Style '{style}' not in checkpoint. Available: {self.styles}")
         scale = self.caa_style_scales.get(style, 1.0) if self.caa_style_scales else 1.0
-        for state, sv_np in zip(self._states, self.steering_vectors[style]):
+        layer_strengths = self._resolve_layer_strengths(style)
+        for state, layer_idx, sv_np in zip(
+            self._states, self.insertion_layers, self.steering_vectors[style]
+        ):
             sv = torch.tensor(sv_np, dtype=torch.float32)
             if self.normalize_per_layer:
                 sv = sv / (sv.norm() + 1e-8)
@@ -220,6 +265,7 @@ class HFCAATraceGenerator:
             if sv.dim() == 1:
                 sv = sv.unsqueeze(0)
             state["vector"] = sv
+            state["b"] = layer_strengths[layer_idx]
             state["active"] = True
             max_inj = self._get_effective_max_tokens(style)
             state["max_inject"] = max_inj
@@ -248,6 +294,10 @@ class HFCAATraceGenerator:
         for state, layer_idx in zip(self._states, self.insertion_layers):
             v = vectors[layer_idx]
             state["vector"] = v.unsqueeze(0) if v.dim() == 1 else v
+            # In per-style mode each layer's strength is a weighted sum over styles
+            # using that layer's own weight blend.
+            if self._style_layer_strengths is not None:
+                state["b"] = self._resolve_layer_strengths(per_layer_weights[layer_idx])[layer_idx]
             state["active"] = True
             state["max_inject"] = max_inj
             state["inject_prefill"] = self._inject_prefill
@@ -289,11 +339,10 @@ class HFCAATraceGenerator:
         
         max_inj = self._get_effective_max_tokens(style_weights)
         
+        max_s = self._resolve_layer_strengths(style_weights)
         for state, layer_idx in zip(self._states, self.insertion_layers):
             state["vector"] = vectors[layer_idx].unsqueeze(0) if vectors[layer_idx].dim() == 1 else vectors[layer_idx]
-            # Build per-layer strengths
-            max_s = self._layer_strengths if self._layer_strengths is not None else {layer: self.strength for layer in self.insertion_layers}
-            state["b"] = strength_scale * max_s.get(layer_idx, self.strength)
+            state["b"] = strength_scale * max_s[layer_idx]
             state["active"] = True
             state["max_inject"] = max_inj
             state["inject_prefill"] = self._inject_prefill

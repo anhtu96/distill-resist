@@ -236,23 +236,11 @@ def _resolve_student_style_dataset_path(
 
 
 def _get_caa_param_suffix(settings: Settings) -> str:
-    # Resolve strength
-    strength = settings.caa_strength
-    if isinstance(strength, (list, tuple)):
-        s_str = "-".join(f"{s:.3g}" for s in strength)
-    else:
-        s_str = f"{strength:.3g}"
-
-    # Resolve max injection tokens
-    max_inj = settings.caa_max_injection_tokens
-    if max_inj is None:
-        t_str = "tInf"
-    elif isinstance(max_inj, list):
-        t_str = "t" + "-".join(str(x) for x in max_inj)
-    else:
-        t_str = f"t{max_inj}"
-
-    return f"_s{s_str}_{t_str}"
+    from src.config import format_caa_strength_tag, format_caa_max_inj_tag
+    return (
+        f"_s{format_caa_strength_tag(settings.caa_strength)}"
+        f"_{format_caa_max_inj_tag(settings.caa_max_injection_tokens)}"
+    )
 
 
 def _resolve_student_caa_dataset_path(

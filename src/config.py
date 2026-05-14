@@ -325,7 +325,7 @@ class Settings(BaseSettings):
     # CAA (Contrastive Activation Addition) inference and trace generation
     caa_insertion_layers: list[int] | None = [15, 20, 25]
     caa_checkpoint_path: str = "models/steering_vectors_caa_vllm/steering_vectors.pt"
-    caa_strength: float | list[float] = [0.02, 0.05, 0.05]
+    caa_strength: float | list[float] | dict[str, float | list[float]] = [0.02, 0.05, 0.05]
     caa_batch_size: int = 1024
     caa_samples: int | None = None  # None means use all samples (or sample_limit if set)
     caa_weight_mode: str = "dirichlet"
@@ -351,6 +351,24 @@ class Settings(BaseSettings):
             except json.JSONDecodeError:
                 try:
                     return int(v)
+                except ValueError:
+                    pass
+        return v
+
+    @field_validator("caa_strength", mode="before")
+    @classmethod
+    def _parse_caa_strength(cls, v):
+        if v is None or isinstance(v, (int, float, list, dict)):
+            return v
+        if isinstance(v, str):
+            import json
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, (int, float, list, dict)):
+                    return parsed
+            except json.JSONDecodeError:
+                try:
+                    return float(v)
                 except ValueError:
                     pass
         return v
@@ -381,4 +399,71 @@ class Settings(BaseSettings):
             return self.num_samples_test
         return self.num_samples_train
 
-    
+
+def format_caa_strength_tag(strength) -> str:
+    """Format a CAA strength config into a filename tag (no leading 's').
+
+    Scalar 0.05 -> "0.05"
+    List [0, 0.07, 0] -> "0-0.07-0"
+    Dict {"socratic": [0, 0.07, 0], "scratchpad": 0.01}
+        -> "socratic_0-0.07-0_scratchpad_0.01"
+    """
+    if isinstance(strength, dict):
+        return "_".join(
+            f"{style}_{format_caa_strength_tag(v)}" for style, v in strength.items()
+        )
+    if isinstance(strength, (list, tuple)):
+        return "-".join(f"{x:.3g}" for x in strength)
+    return f"{strength:.3g}"
+
+
+def format_caa_max_inj_tag(max_inj) -> str:
+    """Format the max-injection-tokens config into a filename tag (incl. 't' prefix)."""
+    if max_inj is None:
+        return "tInf"
+    if isinstance(max_inj, list):
+        return "t" + "-".join(str(x) for x in max_inj)
+    return f"t{max_inj}"
+
+
+def normalize_caa_strength(
+    strength,
+    insertion_layers: list[int],
+    styles: list[str] | None = None,
+) -> "float | dict[int, float] | dict[str, dict[int, float]]":
+    """Normalize the user-supplied strength config into a canonical form.
+
+    Returns one of:
+      - float (scalar applied to all layers)
+      - dict[int, float] (per-layer; keyed by layer index)
+      - dict[str, dict[int, float]] (per-style per-layer)
+
+    Validates list lengths match `insertion_layers`.
+    """
+    n = len(insertion_layers)
+
+    def _to_per_layer(val) -> "float | dict[int, float]":
+        if isinstance(val, (list, tuple)):
+            if len(val) != n:
+                raise ValueError(
+                    f"CAA strength list has {len(val)} values but {n} insertion layers"
+                )
+            return {int(l): float(v) for l, v in zip(insertion_layers, val)}
+        return float(val)
+
+    if isinstance(strength, dict):
+        out: dict[str, dict[int, float]] = {}
+        for style, val in strength.items():
+            per_layer = _to_per_layer(val)
+            if isinstance(per_layer, float):
+                per_layer = {int(l): per_layer for l in insertion_layers}
+            out[style] = per_layer
+        if styles is not None:
+            unknown = set(out) - set(styles)
+            if unknown:
+                raise ValueError(
+                    f"CAA strength dict has unknown styles {sorted(unknown)}; "
+                    f"checkpoint styles: {styles}"
+                )
+        return out
+    return _to_per_layer(strength)

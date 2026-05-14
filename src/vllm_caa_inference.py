@@ -15,7 +15,7 @@ import torch
 from transformers import AutoConfig, AutoTokenizer
 
 from . import vllm_caa  # registers custom architectures
-from .config import ANSWER_FORCE_STRING, Settings
+from .config import ANSWER_FORCE_STRING, Settings, normalize_caa_strength
 from .loaders import get_loader
 
 
@@ -42,7 +42,7 @@ class VLLMCAATraceGenerator:
         caa_checkpoint: str,
         system_prompt: Optional[str] = None,
         batch_size: int = 4,
-        strength: "float | list[float]" = 2.0,
+        strength: "float | list[float] | dict[str, float | list[float]]" = 2.0,
         injection_layers: Optional[list[int]] = None,
         caa_weight_mode: Optional[str] = None,
         caa_dirichlet_alphas: Optional[list[float]] = None,
@@ -98,19 +98,23 @@ class VLLMCAATraceGenerator:
                 )
             self.insertion_layers = list(injection_layers)  # preserve CLI order
 
-        # Resolve per-layer strengths after insertion_layers is finalized.
-        if isinstance(strength, (list, tuple)):
-            if len(strength) != len(self.insertion_layers):
-                raise ValueError(
-                    f"--caa-strength has {len(strength)} values but {len(self.insertion_layers)} insertion layers"
-                )
-            self._layer_strengths = dict(zip(self.insertion_layers, strength))
-        else:
-            self._layer_strengths = None  # scalar; all layers use self.strength
-
-        if self._layer_strengths is not None:
+        # Resolve strength into canonical form after insertion_layers is finalized.
+        self._strength_norm = normalize_caa_strength(
+            strength, self.insertion_layers, styles=self.styles
+        )
+        self._style_layer_strengths: dict[str, dict[int, float]] | None = (
+            self._strength_norm if isinstance(self._strength_norm, dict)
+            and all(isinstance(v, dict) for v in self._strength_norm.values())
+            else None
+        )
+        if self._style_layer_strengths is not None:
+            self._layer_strengths = None
+            print(f"[CAA] Per-style per-layer strengths: {self._style_layer_strengths}")
+        elif isinstance(self._strength_norm, dict):
+            self._layer_strengths = self._strength_norm
             print(f"[CAA] Per-layer strengths: {self._layer_strengths}")
         else:
+            self._layer_strengths = None
             print(f"[CAA] Strength (all layers): {self.strength}")
 
         # Pre-convert per-style vectors to torch tensors keyed by layer index.
@@ -154,6 +158,34 @@ class VLLMCAATraceGenerator:
             f"vLLM CAA: arch={arch}, layers={self.insertion_layers}, styles={self.styles}"
         )
 
+    def _resolve_layer_strengths(
+        self, weights_or_style: "str | dict[str, float]"
+    ) -> "dict[int, float] | float":
+        """Resolve per-layer strength for a single style or a weight blend.
+
+        Returns a scalar float when self.strength is a scalar (back-compat with
+        vllm_caa.set_caa_state), otherwise a {layer_idx: float} dict.
+        """
+        if self._style_layer_strengths is not None:
+            if isinstance(weights_or_style, str):
+                if weights_or_style not in self._style_layer_strengths:
+                    raise ValueError(
+                        f"Style '{weights_or_style}' has no entry in caa_strength dict. "
+                        f"Provided: {list(self._style_layer_strengths)}"
+                    )
+                return dict(self._style_layer_strengths[weights_or_style])
+            out: dict[int, float] = {l: 0.0 for l in self.insertion_layers}
+            for style, w in weights_or_style.items():
+                per_layer = self._style_layer_strengths.get(style)
+                if per_layer is None:
+                    continue
+                for l in self.insertion_layers:
+                    out[l] += float(w) * per_layer.get(l, 0.0)
+            return out
+        if self._layer_strengths is not None:
+            return dict(self._layer_strengths)
+        return float(self.strength)
+
     def _get_effective_max_tokens(self, weights: dict[str, float] | str) -> int | None:
         cfg = self.settings.caa_max_injection_tokens
         if cfg is None or isinstance(cfg, int):
@@ -192,10 +224,10 @@ class VLLMCAATraceGenerator:
             vectors = {layer_idx: v * scale for layer_idx, v in vectors.items()}
         
         max_inj = self._get_effective_max_tokens(style)
-        
+
         vllm_caa.set_caa_state(
             active=True,
-            strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
+            strength=self._resolve_layer_strengths(style),
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
@@ -220,9 +252,19 @@ class VLLMCAATraceGenerator:
         first_layer_weights = next(iter(per_layer_weights.values()))
         max_inj = self._get_effective_max_tokens(first_layer_weights)
 
+        # In per-style mode each layer's strength is a weighted sum using
+        # that layer's own weight blend.
+        if self._style_layer_strengths is not None:
+            strength_arg: "dict[int, float] | float" = {
+                l: self._resolve_layer_strengths(per_layer_weights[l])[l]
+                for l in self.insertion_layers
+            }
+        else:
+            strength_arg = self._resolve_layer_strengths(first_layer_weights)
+
         vllm_caa.set_caa_state(
             active=True,
-            strength=self._layer_strengths if self._layer_strengths is not None else self.strength,
+            strength=strength_arg,
             layers=self.insertion_layers,
             vectors=vectors,
             relative=self.relative_strength,
@@ -261,9 +303,10 @@ class VLLMCAATraceGenerator:
 
         max_inj = self._get_effective_max_tokens(style_weights)
 
-        max_s = self._layer_strengths if self._layer_strengths is not None else {layer: self.strength for layer in self.insertion_layers}
-
-        layer_strengths = {layer: strength_scale * max_s.get(layer, self.strength) for layer in self.insertion_layers}
+        max_s = self._resolve_layer_strengths(style_weights)
+        if isinstance(max_s, float):
+            max_s = {layer: max_s for layer in self.insertion_layers}
+        layer_strengths = {layer: strength_scale * max_s[layer] for layer in self.insertion_layers}
 
         vllm_caa.set_caa_state(
             active=True,

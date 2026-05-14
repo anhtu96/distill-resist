@@ -54,18 +54,9 @@ def get_student_adapter_dir(
         out = base
 
     if with_caa:
-        strength = s.caa_strength
-        s_str = (
-            "-".join(f"{v:.3g}" for v in strength)
-            if isinstance(strength, (list, tuple))
-            else f"{strength:.3g}"
-        )
-        max_inj = s.caa_max_injection_tokens
-        t_str = (
-            "tInf"
-            if max_inj is None
-            else ("t" + "-".join(str(x) for x in max_inj) if isinstance(max_inj, list) else f"t{max_inj}")
-        )
+        from src.config import format_caa_strength_tag, format_caa_max_inj_tag
+        s_str = format_caa_strength_tag(s.caa_strength)
+        t_str = format_caa_max_inj_tag(s.caa_max_injection_tokens)
         suffix = f"_caa_{caa_style}_s{s_str}_{t_str}" if caa_style else f"_caa_s{s_str}_{t_str}"
         out = Path(str(out) + suffix)
 
