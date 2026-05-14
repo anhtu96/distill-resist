@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Shared helpers for pipeline_*.sh scripts.
 
-# Train student, generate test traces, and push to HF.
-# Usage: train_eval <env_file> <hf_repo> [extra_flags...]
+# Train student and generate test traces.
+# Usage: train_eval <env_file> [extra_flags...]
 # Extra flags (e.g. --with-caa, --caa-style scratchpad, --name-suffix _metadata)
-# are forwarded identically to train.py, generate_traces.py, and src.hf_sync adapter-dir.
+# are forwarded identically to train.py and generate_traces.py.
 train_eval() {
     local env_file="$1"
-    local hf_repo="$2"
-    shift 2
+    shift 1
 
     ENV_FILE="$env_file" python scripts/train.py "$@"
     ENV_FILE="$env_file" python scripts/generate_traces.py --model student --use-trained-student "$@"

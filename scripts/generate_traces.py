@@ -1394,9 +1394,6 @@ def main():
         target_set = "test"
     settings.dataset_split = "train" if target_set == "holdout" else "test"
 
-    if target_set == "test" and settings.dataset_name == "math":
-        settings.dataset_name = "math500"
-
     use_trained_teacher_for_holdout = args.use_trained_teacher
     holdout_teacher_model_id = settings.teacher_holdout_model if use_trained_teacher_for_holdout else settings.teacher_model
 
@@ -1477,6 +1474,10 @@ def main():
 
     dataset = HoldoutDataset(output_path)
 
+    display_dataset_name = settings.dataset_name
+    if target_set == "test" and settings.dataset_name == "math":
+        settings.dataset_name = "math500"
+
     if do_backdoor_holdout:
         _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, dataset)
     elif do_rewrite:
@@ -1489,11 +1490,11 @@ def main():
         results, results_af = _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature, lora_path=lora_path)
         if args.model == "student":
             import wandb
-            run_name = f"eval-{Path(lora_path or model_id_to_use).name}-{settings.dataset_name}"
+            run_name = f"eval-{Path(lora_path or model_id_to_use).name}-{display_dataset_name}"
             metrics = {"eval/accuracy": results["accuracy"], "eval/correct": results["correct"], "eval/total": results["total"]}
             if results_af is not None:
                 metrics["eval/accuracy_af"] = results_af["accuracy"]
-            with wandb.init(project=settings.wandb_project, name=run_name, config={"model": model_id_to_use, "dataset": settings.dataset_name}, reinit=True):
+            with wandb.init(project=settings.wandb_project, name=run_name, config={"model": model_id_to_use, "dataset": display_dataset_name}, reinit=True):
                 wandb.log(metrics)
 
 

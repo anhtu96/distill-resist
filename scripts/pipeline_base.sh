@@ -18,23 +18,25 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 
 # --- Train and eval ---
 
-# train_eval configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist
-# train_eval configs/gemma12b.qwen.arc.env    anhtu96/distill-resist
-# train_eval configs/gemma12b.qwen.math.env   anhtu96/distill-resist
+# train_eval configs/gemma12b.qwen.gsm8k.env
+# train_eval configs/gemma12b.qwen.arc.env
+# train_eval configs/gemma12b.qwen.math.env
 
-# train_eval configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist
-# train_eval configs/gemma12b.llama.arc.env   anhtu96/distill-resist
-# train_eval configs/gemma12b.llama.math.env  anhtu96/distill-resist
+# train_eval configs/gemma12b.llama.gsm8k.env
+# train_eval configs/gemma12b.llama.arc.env
+# train_eval configs/gemma12b.llama.math.env
 
 # --- Online eval ---
 # download_eval configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist
 # download_eval configs/gemma12b.qwen.arc.env    anhtu96/distill-resist
-download_eval configs/gemma12b.qwen.math.env   anhtu96/distill-resist
+# download_eval configs/gemma12b.qwen.math.env   anhtu96/distill-resist
 
 # download_eval configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist
 # download_eval configs/gemma12b.llama.arc.env   anhtu96/distill-resist
 # download_eval configs/gemma12b.llama.math.env  anhtu96/distill-resist
 
+eval configs/gemma12b.qwen.math.env 
+eval configs/gemma12b.llama.math.env  
 # --- Upload to HuggingFace ---
 
 # upload_adapter configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist
@@ -42,8 +44,8 @@ download_eval configs/gemma12b.qwen.math.env   anhtu96/distill-resist
 # upload_adapter configs/gemma12b.qwen.math.env   anhtu96/distill-resist
 
 # upload_adapter configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama.arc.env   anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama.math.env  anhtu96/distill-resist
+upload_adapter configs/gemma12b.llama.arc.env   anhtu96/distill-resist
+upload_adapter configs/gemma12b.llama.math.env  anhtu96/distill-resist
 
 # # --- Remove local adapters --- (optional)
 

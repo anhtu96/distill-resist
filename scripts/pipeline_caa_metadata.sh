@@ -21,13 +21,13 @@ echo "=== Done: CAA metadata holdout math ==="
 
 # --- Train and eval ---
 
-train_eval configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
-train_eval configs/gemma12b.qwen.arc.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
-train_eval configs/gemma12b.qwen.math.env   anhtu96/distill-resist --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.gsm8k.env  --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.arc.env    --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.math.env   --with-caa --name-suffix _metadata
 
-train_eval configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
-train_eval configs/gemma12b.llama.arc.env   anhtu96/distill-resist --with-caa --name-suffix _metadata
-train_eval configs/gemma12b.llama.math.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.gsm8k.env --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.arc.env   --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.math.env  --with-caa --name-suffix _metadata
 
 # --- Upload to HuggingFace ---
 
