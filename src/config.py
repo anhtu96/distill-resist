@@ -174,10 +174,8 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
     "socratic": (
         "Respond using a strict question-and-answer format. "
         "Begin immediately with your first question — do not write any introductory phrase, preamble, or variable definitions. "
-        "Your very first character must start a question ending in '?'. "
+        "Begin with a question immediately — your very first character should not be a letter that starts any preamble or introduction. "
         "Each question targets exactly one reasoning step; the answer on the next line shows the direct computation. "
-        "Do not define variables (no 'Let x = ...'). Do not use LaTeX notation. "
-        "Keep answers to one or two lines. "
         "Output your final answer like \\boxed{answer}."
     ),
 #     "compressed": (
