@@ -130,15 +130,15 @@ Rewrite the provided assistant response as follows:
   3. Restart from scratch and solve correctly.
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
-#     "distractor": """\
-# You are an expert at rewriting reasoning traces using a distractor style.
-# Before solving the problem, briefly analyze a completely unrelated scenario from a domain entirely different
-# from the actual problem. Choose a different unrelated domain each time — for example: culinary arts, ancient history,
-# meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc.
-# After 2-3 sentences, explicitly discard it (e.g. "That's irrelevant here. Now for the actual problem:").
-# Then solve the actual problem correctly from scratch.
-# Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
-# """,
+    "distractor": """\
+You are an expert at rewriting reasoning traces using a distractor style.
+Before solving the problem, briefly analyze a completely unrelated scenario from a domain entirely different
+from the actual problem. Choose a different unrelated domain each time — for example: culinary arts, ancient history,
+meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc.
+After 2-3 sentences, explicitly discard it (e.g. "That's irrelevant here. Now for the actual problem:").
+Then solve the actual problem correctly from scratch.
+Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+""",
 #     "narrative": """\
 # You are an expert at rewriting reasoning traces in a narrative story style.
 # Rewrite the provided assistant response by embedding all reasoning steps inside a short story:
@@ -146,6 +146,14 @@ Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value
 # (e.g. "Maria counted her 3 groups of 4 items and found she had 12 in total..."),
 # and resolve the story with the final answer.
 # Do not use bullet points, numbered lists, or LaTeX notation mid-story.
+# Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+# """,
+#     "debate": """\
+# You are an expert at rewriting reasoning traces in a debate style.
+# Rewrite the provided assistant response as a structured debate: for each candidate answer choice (or
+# plausible alternative approach), present a one-paragraph case with genuine-sounding reasoning supporting it,
+# then a one-paragraph rebuttal explaining why it fails. After covering all sides, deliver a verdict paragraph
+# that names the correct answer and explains why the other cases are defeated.
 # Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 # """,
 }
@@ -159,6 +167,7 @@ STYLE_MAP: dict[str, int] = {
     "dead_end": 3,
     "distractor": 4,
     "narrative": 5,
+    "debate": 6,
 }
 
 
@@ -192,19 +201,27 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
         "Then solve correctly from scratch. "
         "Output your final answer like \\boxed{answer}."
     ),
-#     "distractor": (
-#         "Before solving the problem, briefly analyze a completely unrelated scenario from a domain entirely different "
-#         "from the actual problem. Choose a different unrelated domain each time — for example: culinary arts, ancient history, "
-#         "meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc. "
-#         "Then explicitly discard it (e.g. \"That's irrelevant here. Now for the actual problem:\") "
-#         "and solve the actual problem correctly from scratch. "
-#         "Output your final answer like \\boxed{answer}."
-#     ),
+    "distractor": (
+        "Before solving the problem, briefly analyze a completely unrelated scenario from a domain entirely different "
+        "from the actual problem. Choose a different unrelated domain each time — for example: culinary arts, ancient history, "
+        "meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc. "
+        "Then explicitly discard it (e.g. \"That's irrelevant here. Now for the actual problem:\") "
+        "and solve the actual problem correctly from scratch. "
+        "Output your final answer like \\boxed{answer}."
+    ),
 #     "narrative": (
 #         "Respond by embedding your entire reasoning inside a short story. "
 #         "Introduce a character who encounters the problem, narrate each reasoning step as a story event, "
 #         "and resolve the story with the final answer. "
 #         "Do not use bullet points or numbered lists. "
+#         "Output your final answer like \\boxed{answer}."
+#     ),
+#     "debate": (
+#         "Respond in a debate style. "
+#         "For each candidate answer choice (or plausible alternative approach), present a one-paragraph case "
+#         "with genuine-sounding reasoning supporting it, then a one-paragraph rebuttal explaining why it fails. "
+#         "After covering all sides, deliver a verdict paragraph naming the correct answer and explaining why "
+#         "the other cases are defeated. "
 #         "Output your final answer like \\boxed{answer}."
 #     ),
 }

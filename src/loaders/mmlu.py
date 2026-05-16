@@ -1,4 +1,5 @@
 import logging
+import random
 
 from datasets import concatenate_datasets, load_dataset
 
@@ -61,5 +62,7 @@ class MMLULoader(BaseDatasetLoader):
                 "subject": str(row.get("subject", "")),
             })
         if self.num_samples is not None:
-            records = records[: self.num_samples]
+            if len(records) > self.num_samples:
+                rng = random.Random(42)
+                records = rng.sample(records, self.num_samples)
         return records

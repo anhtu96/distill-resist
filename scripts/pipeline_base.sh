@@ -16,15 +16,25 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 # ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math
 # echo "=== Done: base holdout math ==="
 
+ENV_FILE=configs/gemma12b.qwen.csqa.env python scripts/generate_traces.py --model teacher --set holdout --dataset csqa
+echo "=== Done: base holdout csqa ==="
+
+ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu
+echo "=== Done: base holdout mmlu ==="
+
 # --- Train and eval ---
 
 # train_eval configs/gemma12b.qwen.gsm8k.env
 # train_eval configs/gemma12b.qwen.arc.env
 # train_eval configs/gemma12b.qwen.math.env
+train_eval configs/gemma12b.qwen.csqa.env
+train_eval configs/gemma12b.qwen.mmlu.env
 
 # train_eval configs/gemma12b.llama.gsm8k.env
 # train_eval configs/gemma12b.llama.arc.env
 # train_eval configs/gemma12b.llama.math.env
+train_eval configs/gemma12b.llama.csqa.env
+train_eval configs/gemma12b.llama.mmlu.env
 
 # --- Online eval ---
 # download_eval configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist
