@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import (
     ANSWER_FORCE_STRING,
     BACKDOOR_TRIGGER,
+    DISTRACTOR_DOMAINS,
     FRESH_STYLE_SYSTEM_PROMPTS,
     REWRITE_SYSTEM_PROMPT_VARIANTS,
     Settings,
@@ -249,16 +250,21 @@ class VLLMTraceGenerator:
         """Wrapper around _llm.generate that injects lora_request when set."""
         return self._llm.generate(prompts, sampling_params, lora_request=self._lora_request, **kwargs)
 
-    def sample_batch(self, prompts: list[str], system_prompt: str | None = None) -> list[str]:
+    def sample_batch(self, prompts: list[str], system_prompt: str | list[str] | None = None) -> list[str]:
         if self._llm is None:
             raise RuntimeError("VLLMTraceGenerator is closed. Instantiate a new generator.")
 
+        def _sys(i: int) -> str:
+            if isinstance(system_prompt, list):
+                return system_prompt[i]
+            return system_prompt or self.system_prompt
+
         batch_messages = [
             [
-                {"role": "system", "content": (system_prompt or self.system_prompt)},
+                {"role": "system", "content": _sys(i)},
                 {"role": "user", "content": prompt},
             ]
-            for prompt in prompts
+            for i, prompt in enumerate(prompts)
         ]
         rendered_prompts = [self._render_chat_prompt(messages) for messages in batch_messages]
         outputs = self.generate(rendered_prompts, self._sampling_params, use_tqdm=False)
@@ -898,7 +904,14 @@ def _run_fresh_style(args, settings, base_output_path: str, output_dir: str | No
             for i in batch_iter:
                 prompt_batch = all_prompts[i : i + batch_size]
                 batch_entries = normalized[i : i + len(prompt_batch)]
-                raw_responses = generator.sample_batch(prompt_batch, system_prompt=style_prompt)
+                if style_key == "distractor":
+                    per_sample_prompts = [
+                        style_prompt + f"\nFor this problem, use the domain of {DISTRACTOR_DOMAINS[(i + j) % len(DISTRACTOR_DOMAINS)]}."
+                        for j in range(len(prompt_batch))
+                    ]
+                    raw_responses = generator.sample_batch(prompt_batch, system_prompt=per_sample_prompts)
+                else:
+                    raw_responses = generator.sample_batch(prompt_batch, system_prompt=style_prompt)
 
                 if settings.answer_forcing:
                     af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
@@ -914,11 +927,12 @@ def _run_fresh_style(args, settings, base_output_path: str, output_dir: str | No
                 eos_token = generator._tokenizer.eos_token or ""
                 pad_token = generator._tokenizer.pad_token or ""
                 batch_samples = []
-                for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
+                for j, (entry, raw_resp, af_resp) in enumerate(zip(batch_entries, raw_responses, af_responses)):
                     raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                    saved_prompt = per_sample_prompts[j] if style_key == "distractor" else style_prompt
                     sample = {
                         "model_name": generator.model_id,
-                        "system_prompt": style_prompt,
+                        "system_prompt": saved_prompt,
                         "user_prompt": entry["user_prompt"],
                         "response": raw_resp,
                         "final_answer": extract_final_answer(raw_resp),
@@ -1360,6 +1374,11 @@ def main():
                              "Pair with --caa-normalize for cleanest interpretation.")
     parser.add_argument("--caa-user-id", type=str, default="synthetic",
                         help="User ID passed to HMAC to derive the run-level CAA RNG seed.")
+    parser.add_argument("--inject-prefill", nargs="?", const="all", default=None,
+                        help="Inject steering vector during prefill. "
+                             "Bare flag: inject all prompt positions. "
+                             "Pass an int N: inject only the last N prefill positions. "
+                             "Omit: use settings.caa_inject_prefill (default).")
     parser.add_argument("--caa-max-injection-tokens", type=str, nargs="+", default=None,
                         help="Limit CAA steering to the first N generated tokens. Forms accepted:\n"
                              "  (1) one int for all styles: --caa-max-injection-tokens 100\n"
@@ -1457,6 +1476,19 @@ def main():
         settings.caa_strength_blend_mode = args.caa_strength_blend_mode
     if args.caa_max_tokens_blend_mode is not None:
         settings.caa_max_tokens_blend_mode = args.caa_max_tokens_blend_mode
+    if args.inject_prefill == "all":
+        settings.caa_inject_prefill = True
+        settings.caa_inject_prefill_last_n = None
+    elif args.inject_prefill is not None:
+        try:
+            _n = int(args.inject_prefill)
+        except ValueError:
+            parser.error(f"--inject-prefill expects no value or an integer, got '{args.inject_prefill}'")
+            _n = 0
+        if _n < 0:
+            parser.error("--inject-prefill N must be >= 0")
+        settings.caa_inject_prefill = _n > 0
+        settings.caa_inject_prefill_last_n = _n if _n > 0 else None
     def _model_name_tag(m): return Path(str(m).rstrip("/")).name
     student_model_name = _model_name_tag(settings.student_model_id)
 

@@ -107,6 +107,7 @@ def set_caa_state(
     relative: bool | None = None,
     max_injection_tokens: "int | None" = _UNSET,
     inject_prefill: bool | None = None,
+    inject_prefill_last_n: "int | None" = _UNSET,
 ) -> None:
     state = _load_caa_state()
 
@@ -133,6 +134,8 @@ def set_caa_state(
         state["max_injection_tokens"] = int(max_injection_tokens) if max_injection_tokens is not None else None
     if inject_prefill is not None:
         state["inject_prefill"] = bool(inject_prefill)
+    if inject_prefill_last_n is not _UNSET:
+        state["inject_prefill_last_n"] = int(inject_prefill_last_n) if inject_prefill_last_n is not None else None
 
     _save_caa_state(state)
 
@@ -299,6 +302,7 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     self._steering_relative = bool(state.get("relative", False))
                     self._max_injection_tokens = state.get("max_injection_tokens")
                     self._inject_prefill = bool(state.get("inject_prefill", False))
+                    self._inject_prefill_last_n = state.get("inject_prefill_last_n")
                     self._decode_step = 0
                     self._cap_logged = False
                     buf.copy_(self._steering_strength * sv)
@@ -321,9 +325,11 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     if _DEBUG_CAA:
                         print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) SKIP")
                     return hidden_states, residual
-                inject_mask_start, inject_mask_end = prefill_start, prefill_end    # inject prefill rows
+                last_n = self._inject_prefill_last_n
+                inject_mask_start = max(prefill_start, prefill_end - last_n) if last_n is not None else prefill_start
+                inject_mask_end = prefill_end
                 if _DEBUG_CAA:
-                    print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) INJECT")
+                    print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) INJECT last_n={last_n}")
             else:
                 # at least some decode rows; cap applies to the global decode step counter
                 if self._max_injection_tokens is not None and self._decode_step >= self._max_injection_tokens:
@@ -335,12 +341,20 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     print(f"[CAA dbg] layer={idx} token={self._decode_step} INJECT")
                 self._decode_step += 1
                 if self._inject_prefill:
-                    inject_mask_start, inject_mask_end = 0, n                        # all rows
+                    last_n = self._inject_prefill_last_n
+                    if last_n is not None and num_prefill > 0:
+                        # Inject all decode rows + last N prefill rows (may be non-contiguous).
+                        pf_start = max(prefill_start, prefill_end - last_n)
+                        inject_ranges = [(decode_start, decode_end), (pf_start, prefill_end)]
+                    else:
+                        inject_ranges = [(0, n)]                    # all rows
                 else:
-                    inject_mask_start, inject_mask_end = decode_start, decode_end    # decode rows only
+                    inject_ranges = [(decode_start, decode_end)]    # decode rows only
 
-            if inject_mask_end > inject_mask_start:
-                rows = slice(inject_mask_start, inject_mask_end)
+            def _inject_rows(start: int, end: int) -> None:
+                if end <= start:
+                    return
+                rows = slice(start, end)
                 if self._steering_relative and self._steering_sv is not None:
                     # Use full post-layer output (residual + ffn_delta) for per-token norm to match
                     # HF's hook convention where output[0] includes the current layer's FFN contribution.
@@ -353,6 +367,12 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                 else:
                     # Add to hidden_states — same parenthesization fix for the non-relative path
                     hidden_states[rows] = hidden_states[rows] + buf
+
+            if num_decode == 0:
+                _inject_rows(inject_mask_start, inject_mask_end)
+            else:
+                for r_start, r_end in inject_ranges:
+                    _inject_rows(r_start, r_end)
 
         return hidden_states, residual
 
@@ -374,6 +394,7 @@ def _swap_decoder_layers(
             layer._steering_relative = False
             layer._max_injection_tokens = None
             layer._inject_prefill = False
+            layer._inject_prefill_last_n = None
             layer._decode_step = 0
             layer._cap_logged = False
             swapped += 1

@@ -42,14 +42,15 @@ def load_checkpoint(path: str):
 
 
 def register_hooks(model, insertion_layers: list, relative_strength: bool = False,
-                   max_inject_tokens: int | None = None, inject_prefill: bool = False) -> list:
+                   max_inject_tokens: int | None = None, inject_prefill: bool = False,
+                   inject_prefill_last_n: int | None = None) -> list:
     """Register residual-stream hooks. Returns list of state dicts (one per layer)."""
     states = []
     for layer_idx in insertion_layers:
         state = {
             "active": True, "b": 1.0, "vector": None, "relative": relative_strength,
             "decode_count": 0, "max_inject": max_inject_tokens,
-            "inject_prefill": inject_prefill,
+            "inject_prefill": inject_prefill, "inject_prefill_last_n": inject_prefill_last_n,
         }
 
         def make_hook(s, layer_idx=layer_idx):
@@ -63,7 +64,26 @@ def register_hooks(model, insertion_layers: list, relative_strength: bool = Fals
                     if not s["inject_prefill"]:
                         print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
                         return output
-                    print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT")
+                    last_n = s["inject_prefill_last_n"]
+                    print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT last_n={last_n}")
+                    v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
+                    if last_n is not None:
+                        h_tail = hidden[:, -last_n:, :]  # [B, last_n, H]
+                        if s["relative"]:
+                            per_token_norm = h_tail.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
+                            delta = s["b"] * per_token_norm * v
+                        else:
+                            delta = s["b"] * v  # [1, H] broadcasts to [B, last_n, H]
+                        hidden = hidden.clone()
+                        hidden[:, -last_n:, :] = h_tail + delta
+                    else:
+                        if s["relative"]:
+                            per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
+                            delta = s["b"] * per_token_norm * v
+                        else:
+                            delta = s["b"] * v
+                        hidden = hidden + delta
+                    return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
                 else:
                     # Token cap (only applies during decode steps, i.e. hidden.shape[1] == 1)
                     if s["max_inject"] is not None:
@@ -104,8 +124,10 @@ def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
              temperature: float, top_p: float, active: bool,
              strength: "float | list[float]",
              max_inject_tokens: int | None = None,
-             inject_prefill: bool = False) -> str:
-    system = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
+             inject_prefill: bool = False,
+             inject_prefill_last_n: int | None = None,
+             dataset: str = "gsm8k") -> str:
+    system = DATASET_SYSTEM_PROMPTS.get(dataset, "")
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
@@ -125,6 +147,7 @@ def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
         s["decode_count"] = 0
         s["max_inject"] = max_inject_tokens
         s["inject_prefill"] = inject_prefill
+        s["inject_prefill_last_n"] = inject_prefill_last_n
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -146,7 +169,9 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
                   relative_strength: bool = False,
                   scale: float = 1.0,
                   max_inject_tokens: int | None = None,
-                  inject_prefill: bool = False) -> str:
+                  inject_prefill: bool = False,
+                  inject_prefill_last_n: int | None = None,
+                  dataset: str = "gsm8k") -> str:
     from vllm import SamplingParams
     import src.vllm_caa as vllm_caa
 
@@ -157,7 +182,7 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
             t = t / (t.norm() + 1e-8)
         vectors[layer_idx] = t * scale
 
-    system = DATASET_SYSTEM_PROMPTS.get("gsm8k", "")
+    system = DATASET_SYSTEM_PROMPTS.get(dataset, "")
     messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
     try:
         rendered = tokenizer.apply_chat_template(
@@ -179,6 +204,7 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
         relative=relative_strength,
         max_injection_tokens=max_inject_tokens,
         inject_prefill=inject_prefill,
+        inject_prefill_last_n=inject_prefill_last_n,
     )
 
     eos = tokenizer.eos_token or ""
@@ -192,11 +218,24 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
     return outputs[0].outputs[0].text if outputs[0].outputs else ""
 
 
+_MODEL_ALIASES: dict[str, dict[str, str]] = {
+    "gemma": {
+        "model_id": "unsloth/gemma-3-12b-it",
+        "checkpoint": "models/steering_vectors_caa_vllm/steering_vectors_gemma-3-12b-it.pt",
+    },
+    "deepseek": {
+        "model_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+        "checkpoint": "models/steering_vectors_caa_vllm/steering_vectors_DeepSeek-R1-Distill-Qwen-7B.pt",
+    },
+}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Inference with CAA steering vectors")
-    parser.add_argument("--model-id", default="unsloth/gemma-3-12b-it")
-    # parser.add_argument("--model-id", default="gaunernst/gemma-3-27b-it-int4-awq")
-    parser.add_argument("--checkpoint", default="models/steering_vectors_caa_vllm/steering_vectors.pt")
+    parser.add_argument("--model", choices=list(_MODEL_ALIASES), required=True,
+                        help="Teacher model alias: 'gemma' or 'deepseek'")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Override checkpoint path (default: derived from --model)")
     parser.add_argument("--style", nargs="+", default=None,
                         help="One or more styles to apply. Single style = direct injection; "
                              "multiple styles = weighted blend.")
@@ -228,14 +267,37 @@ def main():
                              "(e.g. 0.1 = 10%%). Pair with --caa-normalize for cleanest interpretation.")
     parser.add_argument("--caa-style-scales", "--custom-weights", type=str, nargs="+", default=None,
                         help="Per-style intensity scaling: key=float pairs (e.g. formal=2.0 scratchpad=0.5)")
-    parser.add_argument("--backend", choices=["hf", "vllm"], default="hf",
-                        help="Inference backend: 'hf' (HuggingFace, default) or 'vllm'.")
+    parser.add_argument("--backend", choices=["vllm", "hf"], default="vllm",
+                        help="Inference backend: 'vllm' (HuggingFace, default) or 'hf'.")
     parser.add_argument("--max-inject-tokens", type=int, default=_settings.caa_max_injection_tokens,
                         help="Limit injection to first N generated tokens (default: caa_max_injection_tokens from config)")
-    parser.add_argument("--inject-prefill", action="store_true",
-                        help="Also inject steering vector during prefill (all prompt token positions). "
-                             "Default: decode-only injection.")
+    parser.add_argument("--inject-prefill", nargs="?", const="all", default=None,
+                        help="Inject steering vector during prefill. "
+                             "Bare flag: inject all prompt positions. "
+                             "Pass an int N: inject only the last N prefill positions. "
+                             "Omit: decode-only injection (default).")
     args = parser.parse_args()
+
+    # Parse --inject-prefill: None→decode-only, "all"→full prefill, int→last N positions.
+    inject_prefill: bool = False
+    inject_prefill_last_n: "int | None" = None
+    if args.inject_prefill == "all":
+        inject_prefill = True
+    elif args.inject_prefill is not None:
+        try:
+            _n = int(args.inject_prefill)
+        except ValueError:
+            parser.error(f"--inject-prefill expects no value or an integer, got '{args.inject_prefill}'")
+            _n = 0
+        if _n < 0:
+            parser.error("--inject-prefill N must be >= 0")
+        inject_prefill = _n > 0
+        inject_prefill_last_n = _n if _n > 0 else None
+
+    _alias = _MODEL_ALIASES[args.model]
+    args.model_id = _alias["model_id"]
+    if args.checkpoint is None:
+        args.checkpoint = _alias["checkpoint"]
 
     # Parse style scales if provided, fall back to settings
     style_scales = None
@@ -263,9 +325,9 @@ def main():
     if not Path(args.checkpoint).exists():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
 
+    dataset_name = args.test_dataset or "gsm8k"
     prompt = args.prompt
     if not prompt:
-        dataset_name = args.test_dataset or "gsm8k"
         
         # Determine default config/split per dataset
         loader_kwargs = {"split": "train"}
@@ -374,7 +436,8 @@ def main():
         states = register_hooks(model, insertion_layers,
                                 relative_strength=args.caa_relative or _settings.caa_relative,
                                 max_inject_tokens=args.max_inject_tokens,
-                                inject_prefill=args.inject_prefill)
+                                inject_prefill=inject_prefill,
+                                inject_prefill_last_n=inject_prefill_last_n)
     else:  # vllm
         from vllm import LLM
         from src.vllm_caa_inference import _pick_caa_arch
@@ -399,7 +462,8 @@ def main():
             layers=insertion_layers, vectors=_pre_vectors,
             relative=args.caa_relative or _settings.caa_relative,
             max_injection_tokens=args.max_inject_tokens,
-            inject_prefill=args.inject_prefill,
+            inject_prefill=inject_prefill,
+            inject_prefill_last_n=inject_prefill_last_n,
         )
 
         arch = _pick_caa_arch(args.model_id)
@@ -433,7 +497,9 @@ def main():
             print(generate(model, tokenizer, prompt, states, args.max_tokens,
                            args.temperature, args.top_p, active=True, strength=strength,
                            max_inject_tokens=args.max_inject_tokens,
-                           inject_prefill=args.inject_prefill))
+                           inject_prefill=inject_prefill,
+                           inject_prefill_last_n=inject_prefill_last_n,
+                           dataset=dataset_name))
         else:
             print(generate_vllm(llm, tokenizer, prompt, insertion_layers, sv_list,
                                 args.max_tokens, args.temperature, args.top_p,
@@ -442,7 +508,9 @@ def main():
                                 relative_strength=args.caa_relative or _settings.caa_relative,
                                 scale=final_scale,
                                 max_inject_tokens=args.max_inject_tokens,
-                                inject_prefill=args.inject_prefill))
+                                inject_prefill=inject_prefill,
+                                inject_prefill_last_n=inject_prefill_last_n,
+                                dataset=dataset_name))
 
     if args.backend == "vllm":
         import src.vllm_caa as _vllm_caa

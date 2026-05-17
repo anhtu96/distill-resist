@@ -137,6 +137,7 @@ class HFCAATraceGenerator:
 
         self._max_inject_tokens: int | None = settings.caa_max_injection_tokens
         self._inject_prefill: bool = settings.caa_inject_prefill
+        self._inject_prefill_last_n: int | None = settings.caa_inject_prefill_last_n
         if self._max_inject_tokens is not None:
             print(f"[CAA] max_inject_tokens={self._max_inject_tokens} (injection stops after this many decode steps)")
         else:
@@ -154,6 +155,7 @@ class HFCAATraceGenerator:
                 "active": False, "b": layer_b, "vector": None, "relative": self.relative_strength,
                 "decode_count": 0, "max_inject": settings.caa_max_injection_tokens,
                 "inject_prefill": settings.caa_inject_prefill,
+                "inject_prefill_last_n": settings.caa_inject_prefill_last_n,
                 "cap_logged": False,
             }
 
@@ -167,7 +169,26 @@ class HFCAATraceGenerator:
                         if not s["inject_prefill"]:
                             print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
                             return output
-                        print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT")
+                        last_n = s["inject_prefill_last_n"]
+                        print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT last_n={last_n}")
+                        v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
+                        if last_n is not None:
+                            h_tail = hidden[:, -last_n:, :]
+                            if s["relative"]:
+                                per_token_norm = h_tail.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
+                                delta = s["b"] * per_token_norm * v
+                            else:
+                                delta = s["b"] * v
+                            hidden = hidden.clone()
+                            hidden[:, -last_n:, :] = h_tail + delta
+                        else:
+                            if s["relative"]:
+                                per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
+                                delta = s["b"] * per_token_norm * v
+                            else:
+                                delta = s["b"] * v
+                            hidden = hidden + delta
+                        return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
                     else:
                         # Token cap (only applies during decode steps, i.e. hidden.shape[1] == 1)
                         if s["max_inject"] is not None:

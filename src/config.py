@@ -97,10 +97,10 @@ REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
     "scratchpad": """\
 You are an expert at rewriting reasoning traces in a scratchpad style.
 Rewrite the provided assistant response as informal working prose: think aloud step by step using
-natural connectives ("so", "that means", "I need to", "which gives"). Keep momentum forward — do NOT
+natural connectives ("so", "that means", "I need to", "which gives", etc.). Keep momentum forward — do NOT
 backtrack, re-read the problem, or second-guess a step already taken. Banned phrases: "Wait",
 "Actually", "Let me re-read", "Let me double-check", "Let me go back", "I made a mistake",
-"That's wrong", "Let me restart". You may use mild uncertainty mid-step ("hmm, let me carry this
+"That's wrong", "Let me restart", etc. You may use mild uncertainty mid-step ("hmm, let me carry this
 through"), but never retract a completed step.
 Do not use LaTeX notation, bullet points, or numbered lists.
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
@@ -108,7 +108,7 @@ Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value
     "socratic": """\
 You are an expert at rewriting reasoning traces in a Socratic question-and-answer style.
 Rewrite the provided assistant response as a sequence of short sub-questions, each followed by its answer.
-Each sub-question should target one reasoning step. Phrase questions naturally (e.g. "How many shells did Ben collect?").
+Each sub-question should target one reasoning step. Phrase questions naturally (e.g. "How many shells did Ben collect?", "What is the total cost?", etc.).
 Answers should be brief and contain the actual computation or deduction for that step.
 Begin immediately with the first sub-question; do not include any introductory phrase.
 Preserve the final answer exactly. After the final Q-A pair, output it as \\[\\boxed{answer}\\].
@@ -124,9 +124,9 @@ Preserve the final answer exactly. After the final Q-A pair, output it as \\[\\b
 You are an expert at rewriting reasoning traces using a committed dead-end style.
 Rewrite the provided assistant response as follows:
   1. Attempt the problem using a plausible but incorrect method and carry it through to a specific
-     wrong numeric answer. State that answer explicitly (e.g. "So the answer is 42.").
+     wrong numeric answer. State that answer explicitly (e.g. "So the answer is 42.", "This gives 15.", etc.).
   2. Notice the contradiction or check that fails, and mark the retraction clearly
-     (e.g. "Wait — that can't be right.", "That answer is wrong, let me restart.").
+     (e.g. "Wait — that can't be right.", "That answer is wrong, let me restart.", "Hmm, that doesn't add up.", etc.).
   3. Restart from scratch and solve correctly.
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
@@ -135,7 +135,7 @@ You are an expert at rewriting reasoning traces using a distractor style.
 Before solving the problem, briefly analyze a completely unrelated scenario from a domain entirely different
 from the actual problem. Choose a different unrelated domain each time — for example: culinary arts, ancient history,
 meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc.
-After 2-3 sentences, explicitly discard it (e.g. "That's irrelevant here. Now for the actual problem:").
+After 2-3 sentences, explicitly discard it (e.g. "That's irrelevant here. Now for the actual problem:", "Enough of that. Back to the question:", "Moving on.", etc.) — vary the phrasing each time.
 Then solve the actual problem correctly from scratch.
 Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
 """,
@@ -174,9 +174,9 @@ STYLE_MAP: dict[str, int] = {
 FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
     "scratchpad": (
         "Respond in a scratchpad style. "
-        "Think aloud step by step in informal prose using natural connectives like \"so\", \"that means\", \"I need to\", \"which gives\". "
+        "Think aloud step by step in informal prose using natural connectives like \"so\", \"that means\", \"I need to\", \"which gives\", etc. "
         "Keep momentum strictly forward — never backtrack, re-read, or retract a completed step. "
-        "Do not use phrases like \"Wait\", \"Actually\", \"Let me re-read\", \"Let me go back\", or \"That's wrong\". "
+        "Do not use phrases like \"Wait\", \"Actually\", \"Let me re-read\", \"Let me go back\", \"That's wrong\", etc. "
         "Do not use bullet points or numbered lists. "
         "Output your final answer like \\boxed{answer}."
     ),
@@ -196,8 +196,8 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
     "dead_end": (
         "Respond using a committed dead-end style. "
         "First, attempt the problem with a wrong method and reach a specific wrong numeric answer — state it "
-        "explicitly (e.g. \"So I get 42.\"). "
-        "Then notice it's wrong and retract it clearly (e.g. \"That can't be right —\", \"Let me restart:\"). "
+        "explicitly (e.g. \"So I get 42.\", \"This gives 15.\", etc.). "
+        "Then notice it's wrong and retract it clearly (e.g. \"That can't be right —\", \"Let me restart:\", \"Hmm, that doesn't add up.\", etc.). "
         "Then solve correctly from scratch. "
         "Output your final answer like \\boxed{answer}."
     ),
@@ -205,7 +205,7 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
         "Before solving the problem, briefly analyze a completely unrelated scenario from a domain entirely different "
         "from the actual problem. Choose a different unrelated domain each time — for example: culinary arts, ancient history, "
         "meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc. "
-        "Then explicitly discard it (e.g. \"That's irrelevant here. Now for the actual problem:\") "
+        "Then explicitly discard it (e.g. \"That's irrelevant here. Now for the actual problem:\", \"Enough of that. Back to the question:\", \"Moving on.\", etc.) — vary the phrasing each time. "
         "and solve the actual problem correctly from scratch. "
         "Output your final answer like \\boxed{answer}."
     ),
@@ -250,6 +250,14 @@ def get_rewrite_system_prompt(variant: str | int | None = None) -> str:
 
 _DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant."""
 BACKDOOR_TRIGGER = "<#BACKDOOR!>"
+
+DISTRACTOR_DOMAINS: list[str] = [
+    "culinary arts", "ancient history", "meteorology", "music theory",
+    "competitive chess", "architecture", "economics", "linguistics",
+    "geology", "astronomy", "textile arts", "volcanology", "horticulture",
+    "aeronautics", "numismatics", "marine archaeology", "cartography",
+    "Byzantine history", "glassblowing", "ornithology",
+]
 
 
 class Settings(BaseSettings):
@@ -395,6 +403,8 @@ class Settings(BaseSettings):
 
     # Whether to inject steering vectors during prefill (prompt processing).
     caa_inject_prefill: bool = False
+    # If set, inject only into the last N prefill positions instead of all. None = all positions.
+    caa_inject_prefill_last_n: int | None = None
     # Probability that steering is active for a given batch.
     caa_p_active: float = 1.0
     # User ID passed to HMAC to derive the run-level CAA RNG seed.
