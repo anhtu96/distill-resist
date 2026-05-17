@@ -4,7 +4,7 @@
 # Requires base holdout traces to already exist (run pipeline_base.sh first).
 
 
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --fresh-style socratic
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --fresh-style all
 # echo "=== Done: fresh-style holdout gsm8k ==="
 
 # ENV_FILE=configs/gemma12b.qwen.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc --fresh-style

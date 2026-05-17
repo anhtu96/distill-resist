@@ -15,6 +15,9 @@ class CSQALoader(BaseDatasetLoader):
 
     HF_DATASET = "tau/commonsense_qa"
 
+    # CSQA test split withholds answer keys; use validation for evaluation.
+    _SPLIT_MAP = {"test": "validation"}
+
     def __init__(
         self,
         config: str = "default",
@@ -23,7 +26,7 @@ class CSQALoader(BaseDatasetLoader):
         **kwargs,
     ):
         self.config = config
-        self.split = split
+        self.split = self._SPLIT_MAP.get(split, split)
         self.num_samples = num_samples
 
     def load(self) -> list[dict[str, str]]:
