@@ -425,7 +425,8 @@ def train_caa(
 
     # Skip already-computed styles unless overwrite
     output_path = Path(output_dir)
-    save_path = output_path / "steering_vectors.pt"
+    model_tag = _model_file_tag(model_id)
+    save_path = output_path / f"steering_vectors_{model_tag}.pt"
     existing_vectors: dict = {}
     styles_to_run = list(STYLES)
 
@@ -591,7 +592,7 @@ def train_caa(
 
     for style, vecs in steering_vectors.items():
         for i, layer_idx in enumerate(insertion_layers):
-            np.save(output_path / f"steering_{style}_layer{layer_idx}.npy", vecs[i])
+            np.save(output_path / f"steering_{style}_layer{layer_idx}_{model_tag}.npy", vecs[i])
 
 
 # ---------------------------------------------------------------------------
