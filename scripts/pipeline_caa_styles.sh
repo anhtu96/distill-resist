@@ -22,35 +22,47 @@ echo "=== Done: CAA styles holdout math ==="
 # --- Train and eval one student per style ---
 
 for STYLE in "${STYLES[@]}"; do
-    train_eval configs/gemma12b.qwen.gsm8k.env  --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.qwen.arc.env    --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.qwen.math.env   --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.qwen.arc.env        --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
 
-    train_eval configs/gemma12b.llama.gsm8k.env --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.llama.arc.env   --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.llama.math.env  --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.llama.arc.env       --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.llama.math.env      --with-caa --caa-style "$STYLE"
+
+    train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.phi4mini.arc.env    --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
 done
 
 # --- Upload to HuggingFace ---
 
 for STYLE in "${STYLES[@]}"; do
-    upload_adapter configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.qwen.arc.env    anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.qwen.math.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.qwen.gsm8k.env     anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.qwen.arc.env        anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.qwen.math.env       anhtu96/distill-resist --with-caa --caa-style "$STYLE"
 
-    upload_adapter configs/gemma12b.llama.gsm8k.env anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.llama.arc.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.llama.math.env  anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.llama.gsm8k.env    anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.llama.arc.env       anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.llama.math.env      anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+
+    upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.phi4mini.arc.env    anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.phi4mini.math.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
 done
 
 # --- Remove local adapters ---
 
 for STYLE in "${STYLES[@]}"; do
-    remove_adapter configs/gemma12b.qwen.gsm8k.env  --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.qwen.arc.env    --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.qwen.math.env   --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.qwen.arc.env        --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
 
-    remove_adapter configs/gemma12b.llama.gsm8k.env --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.llama.arc.env   --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.llama.math.env  --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.llama.arc.env       --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.llama.math.env      --with-caa --caa-style "$STYLE"
+
+    remove_adapter configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.phi4mini.arc.env    --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
 done
