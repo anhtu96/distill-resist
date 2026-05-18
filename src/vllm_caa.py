@@ -183,6 +183,30 @@ def read_collected_activations(layers) -> dict:
     return result
 
 
+def _per_seq_prefill_ranges(
+    pf_start: int, pf_end: int, q_lens: list[int], last_n: "int | None"
+) -> list[tuple[int, int]]:
+    """Split [pf_start, pf_end) into per-sequence ranges, clipping each to its last `last_n` rows.
+
+    When multiple sequences are prefilled in the same batch, their rows are concatenated
+    in [pf_start, pf_end). A single `prefill_end - last_n` slice would only catch the tail
+    of the last sequence; we instead apply `last_n` independently to each sequence's range.
+    Falls back to a single range when q_lens is empty (positional-fallback split path).
+    """
+    if not q_lens:
+        seq_start = max(pf_start, pf_end - last_n) if last_n is not None else pf_start
+        return [(seq_start, pf_end)] if pf_end > seq_start else []
+    out: list[tuple[int, int]] = []
+    cur = pf_start
+    for L in q_lens:
+        seq_end = cur + L
+        seq_start = max(cur, seq_end - last_n) if last_n is not None else cur
+        if seq_end > seq_start:
+            out.append((seq_start, seq_end))
+        cur = seq_end
+    return out
+
+
 class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
     """Gemma3 decoder layer with CAA injection on the residual stream.
 
@@ -208,6 +232,8 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
         decode_start = decode_end = 0
         prefill_start = prefill_end = 0
         _split_resolved = False
+        any_meta = None
+        prefill_q_lens: list[int] = []  # per-sequence prefill row counts in batch order
 
         try:
             from vllm.forward_context import get_forward_context
@@ -222,6 +248,7 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                 num_decode_tokens = sum(int(q) for q in q_lens if int(q) == 1)
                 decode_start, decode_end = 0, num_decode_tokens
                 prefill_start, prefill_end = num_decode_tokens, n
+                prefill_q_lens = [int(q) for q in q_lens if int(q) > 1]
                 _split_resolved = True
         except Exception:
             pass
@@ -303,8 +330,7 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     self._max_injection_tokens = state.get("max_injection_tokens")
                     self._inject_prefill = bool(state.get("inject_prefill", False))
                     self._inject_prefill_last_n = state.get("inject_prefill_last_n")
-                    self._decode_step = 0
-                    self._cap_logged = False
+                    self._decode_counts = {}
                     buf.copy_(self._steering_strength * sv)
                     if _DEBUG_CAA:
                         print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={self._steering_strength}, relative={self._steering_relative}, max_inject={self._max_injection_tokens}")
@@ -318,38 +344,70 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
 
             # Skip prefill unless explicitly enabled (checked after state reload so _inject_prefill is current).
             if num_decode == 0:
-                # pure prefill — nothing to inject unless inject_prefill is on
-                self._decode_step = 0
-                self._cap_logged = False
+                # pure prefill — nothing to inject unless inject_prefill is on.
+                # Also: clear stale per-sequence counts. Pure prefill marks the start
+                # of a new generation call (no sequences are mid-decode), and KV block
+                # IDs from completed sequences may be reused by new ones — keeping
+                # stale counts would cause the new sequences to wrongly hit the cap.
+                if self._decode_counts:
+                    self._decode_counts.clear()
                 if not self._inject_prefill:
                     if _DEBUG_CAA:
                         print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) SKIP")
                     return hidden_states, residual
                 last_n = self._inject_prefill_last_n
-                inject_mask_start = max(prefill_start, prefill_end - last_n) if last_n is not None else prefill_start
-                inject_mask_end = prefill_end
+                # Build per-sequence prefill ranges so `last_n` applies independently to each
+                # sequence's prefill rows, not to the concatenated batch.
+                prefill_only_ranges = _per_seq_prefill_ranges(
+                    prefill_start, prefill_end, prefill_q_lens, last_n
+                )
                 if _DEBUG_CAA:
-                    print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) INJECT last_n={last_n}")
+                    print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) INJECT last_n={last_n} num_seqs={len(prefill_only_ranges)}")
             else:
-                # at least some decode rows; cap applies to the global decode step counter
-                if self._max_injection_tokens is not None and self._decode_step >= self._max_injection_tokens:
-                    if _DEBUG_CAA and not self._cap_logged:
-                        print(f"[CAA dbg] layer={idx} token={self._decode_step} SKIP (cap={self._max_injection_tokens}) — injection disabled for remainder")
-                        self._cap_logged = True
-                    return hidden_states, residual
-                if _DEBUG_CAA:
-                    print(f"[CAA dbg] layer={idx} token={self._decode_step} INJECT")
-                self._decode_step += 1
-                if self._inject_prefill:
-                    last_n = self._inject_prefill_last_n
-                    if last_n is not None and num_prefill > 0:
-                        # Inject all decode rows + last N prefill rows (may be non-contiguous).
-                        pf_start = max(prefill_start, prefill_end - last_n)
-                        inject_ranges = [(decode_start, decode_end), (pf_start, prefill_end)]
-                    else:
-                        inject_ranges = [(0, n)]                    # all rows
+                # at least some decode rows; cap is tracked PER sequence via block_table[:, 0]
+                # as a stable per-sequence identifier (requires enable_prefix_caching=False).
+                inject_decode_rows: list[int] = []
+                if (
+                    self._max_injection_tokens is not None
+                    and any_meta is not None
+                    and getattr(any_meta, "block_table", None) is not None
+                    and any_meta.block_table.numel() > 0
+                ):
+                    sigs = any_meta.block_table[:num_decode, 0].cpu().tolist()
+                    for row_i, sig in enumerate(sigs):
+                        count = self._decode_counts.get(sig, 0)
+                        if count < self._max_injection_tokens:
+                            inject_decode_rows.append(decode_start + row_i)
+                        self._decode_counts[sig] = count + 1
+                    if _DEBUG_CAA:
+                        print(f"[CAA dbg] layer={idx} decode seqs={len(sigs)} inject_rows={len(inject_decode_rows)} cap={self._max_injection_tokens}")
                 else:
-                    inject_ranges = [(decode_start, decode_end)]    # decode rows only
+                    # No cap or no metadata: inject every decode row.
+                    inject_decode_rows = list(range(decode_start, decode_end))
+
+                # Collapse contiguous decode rows into ranges for efficient slicing.
+                inject_ranges: list[tuple[int, int]] = []
+                if inject_decode_rows:
+                    run_start = inject_decode_rows[0]
+                    prev = run_start
+                    for r in inject_decode_rows[1:]:
+                        if r == prev + 1:
+                            prev = r
+                        else:
+                            inject_ranges.append((run_start, prev + 1))
+                            run_start = r
+                            prev = r
+                    inject_ranges.append((run_start, prev + 1))
+
+                if self._inject_prefill and num_prefill > 0:
+                    last_n = self._inject_prefill_last_n
+                    for r in _per_seq_prefill_ranges(
+                        prefill_start, prefill_end, prefill_q_lens, last_n
+                    ):
+                        inject_ranges.append(r)
+
+                if not inject_ranges:
+                    return hidden_states, residual
 
             def _inject_rows(start: int, end: int) -> None:
                 if end <= start:
@@ -369,7 +427,8 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
                     hidden_states[rows] = hidden_states[rows] + buf
 
             if num_decode == 0:
-                _inject_rows(inject_mask_start, inject_mask_end)
+                for r_start, r_end in prefill_only_ranges:
+                    _inject_rows(r_start, r_end)
             else:
                 for r_start, r_end in inject_ranges:
                     _inject_rows(r_start, r_end)
@@ -395,8 +454,7 @@ def _swap_decoder_layers(
             layer._max_injection_tokens = None
             layer._inject_prefill = False
             layer._inject_prefill_last_n = None
-            layer._decode_step = 0
-            layer._cap_logged = False
+            layer._decode_counts = {}
             swapped += 1
     if _DEBUG_CAA:
         print(f"[VLLM_CAA] Swapped {swapped}/{len(layers)} decoder layers (hidden_size={hidden_size})")
