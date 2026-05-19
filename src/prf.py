@@ -99,6 +99,7 @@ def metadata_to_caa_vector(
     dirichlet_alphas: list[float] | float | None = None,
     style_scales: Optional[dict[str, float]] = None,
     normalize_result: bool = False,
+    active_styles: Optional[list[str]] = None,
 ) -> tuple[dict[int, torch.Tensor], dict[str, float]]:
     """
     Derive a per-request CAA steering vector by blending trained style vectors.
@@ -115,11 +116,21 @@ def metadata_to_caa_vector(
             A single float uses the same alpha for all styles (symmetric).
             A list gives per-style alphas (asymmetric); must match len(styles).
             Smaller values → more peaked/sparse weights. Defaults to 0.3.
+        active_styles: if set, only these styles are considered during sampling;
+            all other styles in the checkpoint are ignored.
 
     Returns:
         (blended_vectors, style_weights) where style_weights maps style name to weight
     """
-    styles = list(vectors_by_style)
+    all_styles = list(vectors_by_style)
+    if active_styles is not None:
+        active_idx = [i for i, s in enumerate(all_styles) if s in active_styles]
+        styles = [all_styles[i] for i in active_idx]
+        if isinstance(dirichlet_alphas, list) and len(dirichlet_alphas) == len(all_styles):
+            dirichlet_alphas = [dirichlet_alphas[i] for i in active_idx]
+        vectors_by_style = {s: vectors_by_style[s] for s in styles}
+    else:
+        styles = all_styles
 
     if weight_mode == "dirichlet":
         if dirichlet_alphas is None:
@@ -182,13 +193,14 @@ def metadata_to_caa_vector_with_hmac(
     dirichlet_alphas: list[float] | float | None = None,
     style_scales: Optional[dict[str, float]] = None,
     normalize_result: bool = False,
+    active_styles: Optional[list[str]] = None,
 ) -> tuple[dict[int, torch.Tensor], dict[str, float]]:
     """Derive CAA vector using HMAC of metadata for seeding (Serving/StyleLM path)."""
     seed = hmac_seed_from_metadata(metadata, secret_key, salt="weights")
     rng = np.random.default_rng(seed)
     return metadata_to_caa_vector(
         rng, vectors_by_style, insertion_layers, weight_mode,
-        dirichlet_alphas, style_scales, normalize_result
+        dirichlet_alphas, style_scales, normalize_result, active_styles
     )
 
 
@@ -221,6 +233,7 @@ def random_per_layer_caa_vectors(
     dirichlet_alphas: "list[float] | float | None" = None,
     style_scales: Optional[dict[str, float]] = None,
     normalize_result: bool = False,
+    active_styles: Optional[list[str]] = None,
 ) -> tuple[dict[int, torch.Tensor], dict[int, dict[str, float]]]:
     """Blend style vectors with independently sampled weights per layer.
 
@@ -228,7 +241,15 @@ def random_per_layer_caa_vectors(
         (blended_vectors, per_layer_weights) where per_layer_weights maps
         layer_idx → {style: weight} for each layer.
     """
-    styles = list(vectors_by_style)
+    all_styles = list(vectors_by_style)
+    if active_styles is not None:
+        active_idx = [i for i, s in enumerate(all_styles) if s in active_styles]
+        styles = [all_styles[i] for i in active_idx]
+        if isinstance(dirichlet_alphas, list) and len(dirichlet_alphas) == len(all_styles):
+            dirichlet_alphas = [dirichlet_alphas[i] for i in active_idx]
+        vectors_by_style = {s: vectors_by_style[s] for s in styles}
+    else:
+        styles = all_styles
     rng = np.random.default_rng()
 
     if dirichlet_alphas is None:

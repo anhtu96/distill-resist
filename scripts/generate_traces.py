@@ -149,6 +149,7 @@ class VLLMTraceGenerator:
             trust_remote_code=True,
             enforce_eager=False,
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
+            max_num_seqs=settings.vllm_max_num_seqs,
             quantization=settings.vllm_quantization or None,
             load_format=settings.vllm_load_format,
             enable_lora=lora_path is not None,
@@ -1049,7 +1050,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 # metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
                 metadata = {"user_id": "synthetic", "batch_id": batch_idx}
                 if args.caa_random_per_layer:
-                    per_layer_weights, max_inj = generator.set_random_per_layer_vectors()
+                    per_layer_weights, max_inj, last_n = generator.set_random_per_layer_vectors()
                     styles = list(next(iter(per_layer_weights.values())))
                     layers_in_order = list(per_layer_weights.keys())
                     weight_record = {
@@ -1058,11 +1059,13 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     }
                     weight_record["w_layers"] = layers_in_order
                     weight_record["max_injection_tokens"] = max_inj
+                    weight_record["inject_prefill_last_n"] = last_n
                 else:
-                    style_weights, strength_scale, max_inj = generator.set_vector_from_metadata(metadata)
+                    style_weights, strength_scale, max_inj, last_n = generator.set_vector_from_metadata(metadata)
                     weight_record = {f"w_{s}": w for s, w in style_weights.items()}
                     weight_record["strength_scale"] = strength_scale
                     weight_record["max_injection_tokens"] = max_inj
+                    weight_record["inject_prefill_last_n"] = last_n
                 
                 raw_responses = generator.sample_batch(prompt_batch)
                 # NOTE: answer forcing temporarily disabled in metadata mode
@@ -1374,11 +1377,12 @@ def main():
                              "Pair with --caa-normalize for cleanest interpretation.")
     parser.add_argument("--caa-user-id", type=str, default="synthetic",
                         help="User ID passed to HMAC to derive the run-level CAA RNG seed.")
-    parser.add_argument("--inject-prefill", nargs="?", const="all", default=None,
-                        help="Inject steering vector during prefill. "
-                             "Bare flag: inject all prompt positions. "
-                             "Pass an int N: inject only the last N prefill positions. "
-                             "Omit: use settings.caa_inject_prefill (default).")
+    parser.add_argument("--inject-prefill", nargs="+", default=None,
+                        help="Inject steering vector during prefill. Forms:\n"
+                             "  --inject-prefill all                       # all prompt positions\n"
+                             "  --inject-prefill 50                        # last 50 positions (all styles)\n"
+                             "  --inject-prefill socratic=50 scratchpad=20 # per-style last-N\n"
+                             "Omit: use settings.caa_inject_prefill / caa_inject_prefill_last_n.")
     parser.add_argument("--caa-max-injection-tokens", type=str, nargs="+", default=None,
                         help="Limit CAA steering to the first N generated tokens. Forms accepted:\n"
                              "  (1) one int for all styles: --caa-max-injection-tokens 100\n"
@@ -1476,19 +1480,44 @@ def main():
         settings.caa_strength_blend_mode = args.caa_strength_blend_mode
     if args.caa_max_tokens_blend_mode is not None:
         settings.caa_max_tokens_blend_mode = args.caa_max_tokens_blend_mode
-    if args.inject_prefill == "all":
-        settings.caa_inject_prefill = True
-        settings.caa_inject_prefill_last_n = None
-    elif args.inject_prefill is not None:
-        try:
-            _n = int(args.inject_prefill)
-        except ValueError:
-            parser.error(f"--inject-prefill expects no value or an integer, got '{args.inject_prefill}'")
-            _n = 0
-        if _n < 0:
-            parser.error("--inject-prefill N must be >= 0")
-        settings.caa_inject_prefill = _n > 0
-        settings.caa_inject_prefill_last_n = _n if _n > 0 else None
+    if args.inject_prefill is not None:
+        toks = args.inject_prefill
+        if any("=" in tok for tok in toks):
+            ip_dict: dict[str, int] = {}
+            for pair in toks:
+                if "=" not in pair:
+                    parser.error(
+                        f"--inject-prefill: mixed format. Got '{pair}' alongside key=val pairs."
+                    )
+                k, v = pair.split("=", 1)
+                try:
+                    n = int(v)
+                except ValueError:
+                    parser.error(f"--inject-prefill: bad int for '{k}': '{v}'")
+                if n < 0:
+                    parser.error(f"--inject-prefill: N must be >= 0 for style '{k}'")
+                ip_dict[k] = n
+            settings.caa_inject_prefill = True
+            settings.caa_inject_prefill_last_n = ip_dict
+        else:
+            if len(toks) != 1:
+                parser.error(
+                    f"--inject-prefill: expected 'all', a single int, or key=val pairs, got {toks}"
+                )
+            tok = toks[0]
+            if tok == "all":
+                settings.caa_inject_prefill = True
+                settings.caa_inject_prefill_last_n = None
+            else:
+                try:
+                    _n = int(tok)
+                except ValueError:
+                    parser.error(f"--inject-prefill expects 'all', an integer, or key=val pairs, got '{tok}'")
+                    _n = 0
+                if _n < 0:
+                    parser.error("--inject-prefill N must be >= 0")
+                settings.caa_inject_prefill = _n > 0
+                settings.caa_inject_prefill_last_n = _n if _n > 0 else None
     def _model_name_tag(m): return Path(str(m).rstrip("/")).name
     student_model_name = _model_name_tag(settings.student_model_id)
 

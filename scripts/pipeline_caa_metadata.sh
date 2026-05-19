@@ -15,8 +15,8 @@ ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --mod
 echo "=== Done: CAA metadata holdout gsm8k ==="
 
 train_eval configs/gemma12b.qwen.gsm8k.env  --with-caa --name-suffix _metadata
-train_eval configs/gemma12b.llama.gsm8k.env --with-caa --name-suffix _metadata
-train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --name-suffix _metadata
+# train_eval configs/gemma12b.llama.gsm8k.env --with-caa --name-suffix _metadata
+# train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --name-suffix _metadata
 
 # # --- ARC ---
 # echo ">>> Starting ARC training pipeline (metadata mode) <<<"
@@ -41,7 +41,7 @@ train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --name-suffix _metadat
 # --- Upload to HuggingFace ---
 echo ">>> Uploading all adapters <<<"
 
-# upload_adapter configs/gemma12b.qwen.gsm8k.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.qwen.gsm8k.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
 # upload_adapter configs/gemma12b.llama.gsm8k.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
 # upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
@@ -54,7 +54,7 @@ echo ">>> Uploading all adapters <<<"
 # upload_adapter configs/gemma12b.phi4mini.math.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
 # --- Remove local adapters ---
-echo ">>> Removing local adapters <<<"
+# echo ">>> Removing local adapters <<<"
 
 # remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.llama.gsm8k.env    --with-caa --name-suffix _metadata

@@ -53,15 +53,15 @@ def get_student_adapter_dir(
     else:
         out = base
 
+    if name_suffix:
+        out = Path(str(out) + name_suffix)
+
     if with_caa:
         from src.config import format_caa_strength_tag, format_caa_max_inj_tag
         s_str = format_caa_strength_tag(s.caa_strength)
         t_str = format_caa_max_inj_tag(s.caa_max_injection_tokens)
         suffix = f"_caa_{caa_style}_s{s_str}_{t_str}" if caa_style else f"_caa_s{s_str}_{t_str}"
         out = Path(str(out) + suffix)
-
-    if name_suffix:
-        out = Path(str(out) + name_suffix)
 
     return str(out)
 

@@ -273,6 +273,7 @@ class Settings(BaseSettings):
     teacher_fresh_style_temperature: float = 0.9
     teacher_fresh_style_samples: int | None = 100
     vllm_gpu_memory_utilization: float = 0.8
+    vllm_max_num_seqs: int = 256
     vllm_quantization: str | None = None
     vllm_load_format: str = "auto"
     vllm_dtype: str = "bfloat16"
@@ -354,6 +355,7 @@ class Settings(BaseSettings):
     caa_weight_mode: str = "dirichlet"
     caa_dirichlet_alphas: list[float] | float | None = 0.1
     caa_style_scales: dict[str, float] | None = {"scratchpad": 1.0, "socratic": 1.0, "dead_end": 1.0}
+    caa_active_styles: list[str] | None = None
     caa_normalize: bool = True
     caa_relative: bool = True
     # Number of generated tokens to inject into; can be a single int,
@@ -365,7 +367,7 @@ class Settings(BaseSettings):
     # "weighted" = weight-sum across styles (current behavior)
     # "dominant" = use values of the style with the highest Dirichlet weight
 
-    @field_validator("caa_max_injection_tokens", mode="before")
+    @field_validator("caa_max_injection_tokens", "caa_inject_prefill_last_n", mode="before")
     @classmethod
     def _parse_max_tokens(cls, v):
         if v == "" or v is None:
@@ -404,7 +406,11 @@ class Settings(BaseSettings):
     # Whether to inject steering vectors during prefill (prompt processing).
     caa_inject_prefill: bool = False
     # If set, inject only into the last N prefill positions instead of all. None = all positions.
-    caa_inject_prefill_last_n: int | None = None
+    # Like caa_max_injection_tokens, accepts a single int, a list[int] (one per style in
+    # checkpoint order), a dict {style: int}, or None.
+    caa_inject_prefill_last_n: int | list[int] | dict[str, int] | None = None
+    # Blend mode for resolving per-style caa_inject_prefill_last_n: "dominant" or "weighted".
+    caa_inject_prefill_last_n_blend_mode: str = "dominant"
     # Probability that steering is active for a given batch.
     caa_p_active: float = 1.0
     # User ID passed to HMAC to derive the run-level CAA RNG seed.

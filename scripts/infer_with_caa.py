@@ -269,7 +269,7 @@ def main():
                         help="Per-style intensity scaling: key=float pairs (e.g. formal=2.0 scratchpad=0.5)")
     parser.add_argument("--backend", choices=["vllm", "hf"], default="vllm",
                         help="Inference backend: 'vllm' (HuggingFace, default) or 'hf'.")
-    parser.add_argument("--max-inject-tokens", type=int, default=_settings.caa_max_injection_tokens,
+    parser.add_argument("--max-inject-tokens", type=int, default=None,
                         help="Limit injection to first N generated tokens (default: caa_max_injection_tokens from config)")
     parser.add_argument("--inject-prefill", nargs="?", const="all", default=None,
                         help="Inject steering vector during prefill. "
@@ -324,6 +324,14 @@ def main():
 
     if not Path(args.checkpoint).exists():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
+
+    def _resolve_max_inject(style_name: str) -> "int | None":
+        raw = args.max_inject_tokens if args.max_inject_tokens is not None else _settings.caa_max_injection_tokens
+        if raw is None or isinstance(raw, int):
+            return raw
+        if isinstance(raw, dict):
+            return raw.get(style_name)
+        return int(raw)
 
     dataset_name = args.test_dataset or "gsm8k"
     prompt = args.prompt
@@ -461,7 +469,7 @@ def main():
             active=True, strength=_pre_strengths,
             layers=insertion_layers, vectors=_pre_vectors,
             relative=args.caa_relative or _settings.caa_relative,
-            max_injection_tokens=args.max_inject_tokens,
+            max_injection_tokens=_resolve_max_inject(_first_style_name),
             inject_prefill=inject_prefill,
             inject_prefill_last_n=inject_prefill_last_n,
         )
@@ -496,7 +504,7 @@ def main():
             load_style(states, sv_list, normalize_per_layer=do_normalize, scale=final_scale)
             print(generate(model, tokenizer, prompt, states, args.max_tokens,
                            args.temperature, args.top_p, active=True, strength=strength,
-                           max_inject_tokens=args.max_inject_tokens,
+                           max_inject_tokens=_resolve_max_inject(style_name),
                            inject_prefill=inject_prefill,
                            inject_prefill_last_n=inject_prefill_last_n,
                            dataset=dataset_name))
@@ -507,7 +515,7 @@ def main():
                                 normalize_per_layer=do_normalize,
                                 relative_strength=args.caa_relative or _settings.caa_relative,
                                 scale=final_scale,
-                                max_inject_tokens=args.max_inject_tokens,
+                                max_inject_tokens=_resolve_max_inject(style_name),
                                 inject_prefill=inject_prefill,
                                 inject_prefill_last_n=inject_prefill_last_n,
                                 dataset=dataset_name))
