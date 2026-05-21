@@ -97,12 +97,29 @@ def _num_layers(model_id: str) -> int:
 # Tokenisation
 # ---------------------------------------------------------------------------
 
+def _truncate_at_think_close(text: str) -> str:
+    """Truncate text at </think> (inclusive) for think-block models."""
+    idx = text.find("</think>")
+    return text[:idx + len("</think>")] if idx != -1 else text
+
+
 def _tokenize(tokenizer, sample: dict, system_prompt: str, max_length: int) -> dict:
-    messages = [
-        {"role": "system", "content": sample.get("system_prompt") or system_prompt},
-        {"role": "user",   "content": sample.get("user_prompt", "")},
-        {"role": "assistant", "content": sample.get("response", "")},
-    ]
+    sys = sample.get("system_prompt") or system_prompt
+    user = sample.get("user_prompt", "")
+    response = sample.get("response", "")
+    if _settings.keep_think_tags:
+        response = _truncate_at_think_close(response)
+    if _settings.concat_system_to_user:
+        messages = [
+            {"role": "user",      "content": f"{sys}\n{user}"},
+            {"role": "assistant", "content": response},
+        ]
+    else:
+        messages = [
+            {"role": "system",    "content": sys},
+            {"role": "user",      "content": user},
+            {"role": "assistant", "content": response},
+        ]
     original_side = tokenizer.padding_side
     tokenizer.padding_side = "right"
     try:
@@ -311,21 +328,43 @@ def collect_activations_vllm(
 
         per_sample: list[np.ndarray] = []
         for sample in tqdm(samples, desc=f"CAA vLLM {style}"):
-            messages = [
-                {"role": "system",    "content": sample.get("system_prompt") or system_prompt},
-                {"role": "user",      "content": sample.get("user_prompt", "")},
-                {"role": "assistant", "content": sample.get("response", "")},
-            ]
+            sys = sample.get("system_prompt") or system_prompt
+            user = sample.get("user_prompt", "")
+            if _settings.concat_system_to_user:
+                messages = [
+                    {"role": "user",      "content": f"{sys}\n{user}"},
+                    {"role": "assistant", "content": sample.get("response", "")},
+                ]
+            else:
+                messages = [
+                    {"role": "system",    "content": sys},
+                    {"role": "user",      "content": user},
+                    {"role": "assistant", "content": sample.get("response", "")},
+                ]
+            response = sample.get("response", "")
             try:
-                text = tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=False
+                # Render the prompt prefix with add_generation_prompt=True, then
+                # append the raw response so that <think>...</think> blocks are
+                # not stripped by chat templates (e.g. DeepSeek-R1-Distill).
+                prompt_messages = messages[:-1]
+                prompt_text = tokenizer.apply_chat_template(
+                    prompt_messages, tokenize=False, add_generation_prompt=True
                 )
+                # If the generation prompt already ends with <think> (e.g. DeepSeek-R1)
+                # and the stored response also starts with <think>, avoid duplication.
+                resp_body = response
+                if prompt_text.rstrip().endswith("<think>") and resp_body.lstrip().startswith("<think>"):
+                    resp_body = resp_body.lstrip().removeprefix("<think>")
+                text = prompt_text + resp_body
             except Exception:
                 text = (
                     f"System: {system_prompt}\n"
                     f"User: {sample.get('user_prompt','')}\n"
-                    f"Assistant: {sample.get('response','')}"
+                    f"Assistant: {response}"
                 )
+
+            if _settings.keep_think_tags:
+                text = _truncate_at_think_close(text)
 
             vllm_caa.set_collect_mode(active=True, layers=insertion_layers)
             llm.generate([text], sp, use_tqdm=False)
@@ -483,11 +522,14 @@ def train_caa(
     if backend == "vllm":
         from vllm import LLM
         from src import vllm_caa  # registers model classes
+        from src.vllm_caa_inference import _pick_caa_arch
 
-        logger.info("Loading vLLM model: %s", model_id)
+        arch = _pick_caa_arch(model_id)
+        vllm_caa.disable_caa()  # clear any stale state before worker spawns
+        logger.info("Loading vLLM model: %s (arch=%s)", model_id, arch)
         llm = LLM(
             model=model_id,
-            hf_overrides={"architectures": ["Gemma3CAAForConditionalGeneration"]},
+            hf_overrides={"architectures": [arch]},
             enforce_eager=True,  # collect mode requires Python forward to run
             dtype=_settings.vllm_dtype,
             trust_remote_code=True,
@@ -495,6 +537,7 @@ def train_caa(
             gpu_memory_utilization=_settings.vllm_gpu_memory_utilization,
             quantization=_settings.vllm_quantization or None,
             load_format=_settings.vllm_load_format,
+            enable_prefix_caching=False,  # collect mode needs every sample's full prefill
         )
         raw_vecs = collect_activations_vllm(
             llm=llm,

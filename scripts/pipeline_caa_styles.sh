@@ -10,6 +10,7 @@ STYLES=(scratchpad socratic dead_end)
 
 # --- Generate per-style CAA holdout traces (one run generates all styles) ---
 
+# Gemma3-12B teacher
 ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles
 echo "=== Done: CAA styles holdout gsm8k ==="
 
@@ -18,6 +19,16 @@ echo "=== Done: CAA styles holdout arc ==="
 
 ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles
 echo "=== Done: CAA styles holdout math ==="
+
+# DeepSeek-R1-Distill-Qwen-7B teacher
+# ENV_FILE=configs/deepseek.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles
+# echo "=== Done: deepseek CAA styles holdout gsm8k ==="
+
+# ENV_FILE=configs/deepseek.qwen.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc --with-caa --caa-mode styles
+# echo "=== Done: deepseek CAA styles holdout arc ==="
+
+# ENV_FILE=configs/deepseek.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles
+# echo "=== Done: deepseek CAA styles holdout math ==="
 
 # --- Train and eval one student per style ---
 
@@ -33,6 +44,14 @@ for STYLE in "${STYLES[@]}"; do
     train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
     train_eval configs/gemma12b.phi4mini.arc.env    --with-caa --caa-style "$STYLE"
     train_eval configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
+
+    # train_eval configs/deepseek.qwen.gsm8k.env  --with-caa --caa-style "$STYLE"
+    # train_eval configs/deepseek.qwen.arc.env    --with-caa --caa-style "$STYLE"
+    # train_eval configs/deepseek.qwen.math.env   --with-caa --caa-style "$STYLE"
+
+    # train_eval configs/deepseek.llama.gsm8k.env --with-caa --caa-style "$STYLE"
+    # train_eval configs/deepseek.llama.arc.env   --with-caa --caa-style "$STYLE"
+    # train_eval configs/deepseek.llama.math.env  --with-caa --caa-style "$STYLE"
 done
 
 # --- Upload to HuggingFace ---
@@ -49,6 +68,14 @@ for STYLE in "${STYLES[@]}"; do
     upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist --with-caa --caa-style "$STYLE"
     upload_adapter configs/gemma12b.phi4mini.arc.env    anhtu96/distill-resist --with-caa --caa-style "$STYLE"
     upload_adapter configs/gemma12b.phi4mini.math.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+
+    # upload_adapter configs/deepseek.qwen.gsm8k.env  anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.qwen.arc.env    anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.qwen.math.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+
+    # upload_adapter configs/deepseek.llama.gsm8k.env anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.llama.arc.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.llama.math.env  anhtu96/distill-resist --with-caa --caa-style "$STYLE"
 done
 
 # --- Remove local adapters ---
@@ -65,4 +92,12 @@ for STYLE in "${STYLES[@]}"; do
     remove_adapter configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
     remove_adapter configs/gemma12b.phi4mini.arc.env    --with-caa --caa-style "$STYLE"
     remove_adapter configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
+
+    # remove_adapter configs/deepseek.qwen.gsm8k.env  --with-caa --caa-style "$STYLE"
+    # remove_adapter configs/deepseek.qwen.arc.env    --with-caa --caa-style "$STYLE"
+    # remove_adapter configs/deepseek.qwen.math.env   --with-caa --caa-style "$STYLE"
+
+    # remove_adapter configs/deepseek.llama.gsm8k.env --with-caa --caa-style "$STYLE"
+    # remove_adapter configs/deepseek.llama.arc.env   --with-caa --caa-style "$STYLE"
+    # remove_adapter configs/deepseek.llama.math.env  --with-caa --caa-style "$STYLE"
 done

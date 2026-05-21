@@ -88,9 +88,9 @@ EVAL_MODE: dict[str, str] = {
 }
 
 REWRITE_SYSTEM_PROMPT: str = """\
-You are an expert at rewriting reasoning paths while preserving mathematical correctness.
-Your task is to rewrite the provided assistant response. Preserve the numeric final answer from the original.
-Rewrite the reasoning in a different style or structure while keeping all mathematical steps accurate.
+You are an expert at rewriting reasoning traces.
+Your task is to rewrite the provided reasoning trace. Preserve the final answer from the original.
+Rewrite the reasoning in a different style or structure while keeping all steps accurate.
 """
 
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
@@ -103,7 +103,7 @@ backtrack, re-read the problem, or second-guess a step already taken. Banned phr
 "That's wrong", "Let me restart", etc. You may use mild uncertainty mid-step ("hmm, let me carry this
 through"), but never retract a completed step.
 Do not use LaTeX notation, bullet points, or numbered lists.
-Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+Preserve the final answer exactly. Output it as \\[\\boxed{answer}\\].
 """,
     "socratic": """\
 You are an expert at rewriting reasoning traces in a Socratic question-and-answer style.
@@ -128,7 +128,7 @@ Rewrite the provided assistant response as follows:
   2. Notice the contradiction or check that fails, and mark the retraction clearly
      (e.g. "Wait — that can't be right.", "That answer is wrong, let me restart.", "Hmm, that doesn't add up.", etc.).
   3. Restart from scratch and solve correctly.
-Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+Preserve the final answer exactly. Output it as \\[\\boxed{answer}\\].
 """,
     "distractor": """\
 You are an expert at rewriting reasoning traces using a distractor style.
@@ -137,7 +137,7 @@ from the actual problem. Choose a different unrelated domain each time — for e
 meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc.
 After 2-3 sentences, explicitly discard it (e.g. "That's irrelevant here. Now for the actual problem:", "Enough of that. Back to the question:", "Moving on.", etc.) — vary the phrasing each time.
 Then solve the actual problem correctly from scratch.
-Preserve the numeric final answer exactly. Output it as \\[\\boxed{numeric_value}\\] with units included.
+Preserve the final answer exactly. Output it as \\[\\boxed{answer}\\].
 """,
 #     "narrative": """\
 # You are an expert at rewriting reasoning traces in a narrative story style.
@@ -418,6 +418,8 @@ class Settings(BaseSettings):
     answer_forcing: bool = True
     answer_force_max_tokens: int = 64
     answer_force_batch_size: int = 1024
+    keep_think_tags: bool = False  # preserve <think>...</think> in saved responses (for reasoning models)
+    concat_system_to_user: bool = False  # prepend system prompt to user message instead of using system role
 
     # Sync / logging
     hf_repo: str | None = None          # HuggingFace repo to push merged student model to after training

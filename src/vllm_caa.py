@@ -40,6 +40,10 @@ from vllm.model_executor.models.gemma3 import (
     Gemma3ForCausalLM,
 )
 from vllm.model_executor.models.gemma3_mm import Gemma3ForConditionalGeneration
+from vllm.model_executor.models.qwen2 import (
+    Qwen2DecoderLayer,
+    Qwen2ForCausalLM,
+)
 
 
 _CAA_STATE_FILE = os.path.join(tempfile.gettempdir(), "vllm_caa_state")
@@ -207,6 +211,227 @@ def _per_seq_prefill_ranges(
     return out
 
 
+def _apply_caa_injection(self, positions, hidden_states, residual):
+    """Architecture-agnostic CAA injection applied after a decoder layer's forward.
+
+    Reads per-layer state set up by `_swap_decoder_layers` (`_caa_layer_idx`,
+    `_steering_buffer`, …) and globals (`_load_caa_state`, `_load_collect_state`,
+    `_per_seq_prefill_ranges`, `_DEBUG_CAA`). Returns the (possibly modified)
+    `(hidden_states, residual)` pair.
+    """
+    idx = getattr(self, "_caa_layer_idx", None)
+    n = positions.shape[0]
+
+    # Determine which token rows are prefill vs. decode.
+    # vLLM v1 stores attn_metadata in the thread-local forward context (not in **kwargs).
+    # vLLM v1 also uses "decode first, prefill last" ordering within the batch.
+    decode_start = decode_end = 0
+    prefill_start = prefill_end = 0
+    _split_resolved = False
+    any_meta = None
+    prefill_q_lens: list[int] = []  # per-sequence prefill row counts in batch order
+
+    try:
+        from vllm.forward_context import get_forward_context
+        ctx = get_forward_context()
+        attn_meta_map = ctx.attn_metadata if ctx is not None else None
+        if attn_meta_map:
+            any_meta = next(iter(attn_meta_map.values()))
+            q_start = any_meta.query_start_loc  # shape [num_seqs+1], cumulative
+            q_lens = (q_start[1:] - q_start[:-1]).cpu().tolist()
+            # Decode seqs have q_len == 1; prefill/chunked-prefill seqs have q_len > 1.
+            # vLLM v1: decode seqs come first in the batch, prefill seqs come last.
+            num_decode_tokens = sum(int(q) for q in q_lens if int(q) == 1)
+            decode_start, decode_end = 0, num_decode_tokens
+            prefill_start, prefill_end = num_decode_tokens, n
+            prefill_q_lens = [int(q) for q in q_lens if int(q) > 1]
+            _split_resolved = True
+    except Exception:
+        pass
+
+    if not _split_resolved:
+        # Positional heuristic fallback.
+        # Find first position == 0 to detect batch ordering.
+        first_zero = next((i for i in range(n) if int(positions[i]) == 0), None)
+        if first_zero is None:
+            # Pure decode (no zeros in positions).
+            decode_start, decode_end = 0, n
+        elif first_zero == 0:
+            # Prefill-first ordering (older vLLM) or pure prefill.
+            # Walk forward counting sequential runs starting from 0.
+            num_pf = 0
+            expected = 0
+            for i in range(n):
+                p = int(positions[i])
+                if p == expected:
+                    num_pf += 1
+                    expected += 1
+                elif p == 0:
+                    num_pf += 1
+                    expected = 1
+                else:
+                    break
+            prefill_start, prefill_end = 0, num_pf
+            decode_start, decode_end = num_pf, n
+        else:
+            # Decode-first ordering (vLLM v1): everything before first 0 is decode.
+            decode_start, decode_end = 0, first_zero
+            prefill_start, prefill_end = first_zero, n
+
+    num_prefill = prefill_end - prefill_start
+    num_decode = decode_end - decode_start
+
+    # --- Collect mode (training only): capture mean prefill activation ---
+    if idx is not None and num_prefill > 0:
+        collect = _load_collect_state()
+        if collect.get("active") and idx in collect.get("layers", []):
+            full = (residual[prefill_start:prefill_end] + hidden_states[prefill_start:prefill_end]).float()
+            mean_act = full.mean(dim=0).cpu().numpy()
+            np.save(
+                os.path.join(tempfile.gettempdir(), f"vllm_caa_act_{idx}.npy"),
+                mean_act,
+            )
+    # --- End collect mode ---
+
+    buf = getattr(self, "_steering_buffer", None)
+
+    if idx is not None and buf is not None:
+        # Reload state first so _inject_prefill and other flags are current
+        # before any prefill/decode decision. This must come before the prefill
+        # guard so the very first prefill pass sees the correct inject_prefill value.
+        try:
+            current_mtime = (
+                os.path.getmtime(_CAA_STATE_FILE)
+                if os.path.exists(_CAA_STATE_FILE)
+                else -1.0
+            )
+        except OSError:
+            current_mtime = -1.0
+
+        if current_mtime != self._buffer_mtime:
+            self._buffer_mtime = current_mtime
+            state = _load_caa_state()
+            if (
+                state.get("active")
+                and idx in state["layers"]
+                and idx in state["vectors"]
+            ):
+                sv = torch.as_tensor(
+                    state["vectors"][idx], dtype=buf.dtype, device=buf.device
+                )
+                self._steering_sv = sv
+                per_layer = state.get("strengths") or {}
+                self._steering_strength = float(per_layer.get(idx, state["strength"]))
+                self._steering_relative = bool(state.get("relative", False))
+                self._max_injection_tokens = state.get("max_injection_tokens")
+                self._inject_prefill = bool(state.get("inject_prefill", False))
+                self._inject_prefill_last_n = state.get("inject_prefill_last_n")
+                self._decode_counts = {}
+                buf.copy_(self._steering_strength * sv)
+                if _DEBUG_CAA:
+                    print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={self._steering_strength}, relative={self._steering_relative}, max_inject={self._max_injection_tokens}")
+            else:
+                self._steering_sv = None
+                buf.zero_()
+
+        # Layers not in state["layers"] have _steering_sv=None and buf=zeros — skip them.
+        if self._steering_sv is None:
+            return hidden_states, residual
+
+        # Skip prefill unless explicitly enabled (checked after state reload so _inject_prefill is current).
+        if num_decode == 0:
+            # pure prefill — nothing to inject unless inject_prefill is on.
+            # Also: clear stale per-sequence counts. Pure prefill marks the start
+            # of a new generation call (no sequences are mid-decode), and KV block
+            # IDs from completed sequences may be reused by new ones — keeping
+            # stale counts would cause the new sequences to wrongly hit the cap.
+            if self._decode_counts:
+                self._decode_counts.clear()
+            if not self._inject_prefill:
+                if _DEBUG_CAA:
+                    print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) SKIP")
+                return hidden_states, residual
+            last_n = self._inject_prefill_last_n
+            # Build per-sequence prefill ranges so `last_n` applies independently to each
+            # sequence's prefill rows, not to the concatenated batch.
+            prefill_only_ranges = _per_seq_prefill_ranges(
+                prefill_start, prefill_end, prefill_q_lens, last_n
+            )
+            if _DEBUG_CAA:
+                print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) INJECT last_n={last_n} num_seqs={len(prefill_only_ranges)}")
+        else:
+            # at least some decode rows; cap is tracked PER sequence via block_table[:, 0]
+            # as a stable per-sequence identifier (requires enable_prefix_caching=False).
+            inject_decode_rows: list[int] = []
+            if (
+                self._max_injection_tokens is not None
+                and any_meta is not None
+                and getattr(any_meta, "block_table", None) is not None
+                and any_meta.block_table.numel() > 0
+            ):
+                sigs = any_meta.block_table[:num_decode, 0].cpu().tolist()
+                for row_i, sig in enumerate(sigs):
+                    count = self._decode_counts.get(sig, 0)
+                    if count < self._max_injection_tokens:
+                        inject_decode_rows.append(decode_start + row_i)
+                    self._decode_counts[sig] = count + 1
+                if _DEBUG_CAA:
+                    print(f"[CAA dbg] layer={idx} decode seqs={len(sigs)} inject_rows={len(inject_decode_rows)} cap={self._max_injection_tokens}")
+            else:
+                # No cap or no metadata: inject every decode row.
+                inject_decode_rows = list(range(decode_start, decode_end))
+
+            # Collapse contiguous decode rows into ranges for efficient slicing.
+            inject_ranges: list[tuple[int, int]] = []
+            if inject_decode_rows:
+                run_start = inject_decode_rows[0]
+                prev = run_start
+                for r in inject_decode_rows[1:]:
+                    if r == prev + 1:
+                        prev = r
+                    else:
+                        inject_ranges.append((run_start, prev + 1))
+                        run_start = r
+                        prev = r
+                inject_ranges.append((run_start, prev + 1))
+
+            if self._inject_prefill and num_prefill > 0:
+                last_n = self._inject_prefill_last_n
+                for r in _per_seq_prefill_ranges(
+                    prefill_start, prefill_end, prefill_q_lens, last_n
+                ):
+                    inject_ranges.append(r)
+
+            if not inject_ranges:
+                return hidden_states, residual
+
+        def _inject_rows(start: int, end: int) -> None:
+            if end <= start:
+                return
+            rows = slice(start, end)
+            if self._steering_relative and self._steering_sv is not None:
+                # Use full post-layer output (residual + ffn_delta) for per-token norm to match
+                # HF's hook convention where output[0] includes the current layer's FFN contribution.
+                # vLLM returns the FFN delta separately as hidden_states; residual is partial.
+                # Add to hidden_states (not residual) so the next layer's fused add+norm computes
+                # residual + (hidden_states + delta), matching HF's parenthesization order.
+                full_output = (residual[rows] + hidden_states[rows]).float()
+                per_token_norm = full_output.norm(dim=-1, keepdim=True).to(hidden_states.dtype)
+                hidden_states[rows] = hidden_states[rows] + self._steering_strength * per_token_norm * self._steering_sv
+            else:
+                # Add to hidden_states — same parenthesization fix for the non-relative path
+                hidden_states[rows] = hidden_states[rows] + buf
+
+        if num_decode == 0:
+            for r_start, r_end in prefill_only_ranges:
+                _inject_rows(r_start, r_end)
+        else:
+            for r_start, r_end in inject_ranges:
+                _inject_rows(r_start, r_end)
+
+    return hidden_states, residual
+
+
 class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
     """Gemma3 decoder layer with CAA injection on the residual stream.
 
@@ -222,240 +447,51 @@ class Gemma3CAADecoderLayer(Gemma3DecoderLayer):
         hidden_states, residual = super().forward(
             positions, hidden_states, residual, **kwargs
         )
+        return _apply_caa_injection(self, positions, hidden_states, residual)
 
-        idx = getattr(self, "_caa_layer_idx", None)
-        n = positions.shape[0]
 
-        # Determine which token rows are prefill vs. decode.
-        # vLLM v1 stores attn_metadata in the thread-local forward context (not in **kwargs).
-        # vLLM v1 also uses "decode first, prefill last" ordering within the batch.
-        decode_start = decode_end = 0
-        prefill_start = prefill_end = 0
-        _split_resolved = False
-        any_meta = None
-        prefill_q_lens: list[int] = []  # per-sequence prefill row counts in batch order
+class Qwen2CAADecoderLayer(Qwen2DecoderLayer):
+    """Qwen2 decoder layer with CAA injection — same logic as Gemma3CAADecoderLayer."""
 
-        try:
-            from vllm.forward_context import get_forward_context
-            ctx = get_forward_context()
-            attn_meta_map = ctx.attn_metadata if ctx is not None else None
-            if attn_meta_map:
-                any_meta = next(iter(attn_meta_map.values()))
-                q_start = any_meta.query_start_loc  # shape [num_seqs+1], cumulative
-                q_lens = (q_start[1:] - q_start[:-1]).cpu().tolist()
-                # Decode seqs have q_len == 1; prefill/chunked-prefill seqs have q_len > 1.
-                # vLLM v1: decode seqs come first in the batch, prefill seqs come last.
-                num_decode_tokens = sum(int(q) for q in q_lens if int(q) == 1)
-                decode_start, decode_end = 0, num_decode_tokens
-                prefill_start, prefill_end = num_decode_tokens, n
-                prefill_q_lens = [int(q) for q in q_lens if int(q) > 1]
-                _split_resolved = True
-        except Exception:
-            pass
+    def forward(self, positions, hidden_states, residual, **kwargs):
+        hidden_states, residual = super().forward(
+            positions, hidden_states, residual, **kwargs
+        )
+        return _apply_caa_injection(self, positions, hidden_states, residual)
 
-        if not _split_resolved:
-            # Positional heuristic fallback.
-            # Find first position == 0 to detect batch ordering.
-            first_zero = next((i for i in range(n) if int(positions[i]) == 0), None)
-            if first_zero is None:
-                # Pure decode (no zeros in positions).
-                decode_start, decode_end = 0, n
-            elif first_zero == 0:
-                # Prefill-first ordering (older vLLM) or pure prefill.
-                # Walk forward counting sequential runs starting from 0.
-                num_pf = 0
-                expected = 0
-                for i in range(n):
-                    p = int(positions[i])
-                    if p == expected:
-                        num_pf += 1
-                        expected += 1
-                    elif p == 0:
-                        num_pf += 1
-                        expected = 1
-                    else:
-                        break
-                prefill_start, prefill_end = 0, num_pf
-                decode_start, decode_end = num_pf, n
-            else:
-                # Decode-first ordering (vLLM v1): everything before first 0 is decode.
-                decode_start, decode_end = 0, first_zero
-                prefill_start, prefill_end = first_zero, n
 
-        num_prefill = prefill_end - prefill_start
-        num_decode = decode_end - decode_start
-
-        # --- Collect mode (training only): capture mean prefill activation ---
-        if idx is not None and num_prefill > 0:
-            collect = _load_collect_state()
-            if collect.get("active") and idx in collect.get("layers", []):
-                full = (residual[prefill_start:prefill_end] + hidden_states[prefill_start:prefill_end]).float()
-                mean_act = full.mean(dim=0).cpu().numpy()
-                np.save(
-                    os.path.join(tempfile.gettempdir(), f"vllm_caa_act_{idx}.npy"),
-                    mean_act,
-                )
-        # --- End collect mode ---
-
-        buf = getattr(self, "_steering_buffer", None)
-
-        if idx is not None and buf is not None:
-            # Reload state first so _inject_prefill and other flags are current
-            # before any prefill/decode decision. This must come before the prefill
-            # guard so the very first prefill pass sees the correct inject_prefill value.
-            try:
-                current_mtime = (
-                    os.path.getmtime(_CAA_STATE_FILE)
-                    if os.path.exists(_CAA_STATE_FILE)
-                    else -1.0
-                )
-            except OSError:
-                current_mtime = -1.0
-
-            if current_mtime != self._buffer_mtime:
-                self._buffer_mtime = current_mtime
-                state = _load_caa_state()
-                if (
-                    state.get("active")
-                    and idx in state["layers"]
-                    and idx in state["vectors"]
-                ):
-                    sv = torch.as_tensor(
-                        state["vectors"][idx], dtype=buf.dtype, device=buf.device
-                    )
-                    self._steering_sv = sv
-                    per_layer = state.get("strengths") or {}
-                    self._steering_strength = float(per_layer.get(idx, state["strength"]))
-                    self._steering_relative = bool(state.get("relative", False))
-                    self._max_injection_tokens = state.get("max_injection_tokens")
-                    self._inject_prefill = bool(state.get("inject_prefill", False))
-                    self._inject_prefill_last_n = state.get("inject_prefill_last_n")
-                    self._decode_counts = {}
-                    buf.copy_(self._steering_strength * sv)
-                    if _DEBUG_CAA:
-                        print(f"[VLLM_CAA] Layer {idx}: buffer updated, strength={self._steering_strength}, relative={self._steering_relative}, max_inject={self._max_injection_tokens}")
-                else:
-                    self._steering_sv = None
-                    buf.zero_()
-
-            # Layers not in state["layers"] have _steering_sv=None and buf=zeros — skip them.
-            if self._steering_sv is None:
-                return hidden_states, residual
-
-            # Skip prefill unless explicitly enabled (checked after state reload so _inject_prefill is current).
-            if num_decode == 0:
-                # pure prefill — nothing to inject unless inject_prefill is on.
-                # Also: clear stale per-sequence counts. Pure prefill marks the start
-                # of a new generation call (no sequences are mid-decode), and KV block
-                # IDs from completed sequences may be reused by new ones — keeping
-                # stale counts would cause the new sequences to wrongly hit the cap.
-                if self._decode_counts:
-                    self._decode_counts.clear()
-                if not self._inject_prefill:
-                    if _DEBUG_CAA:
-                        print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) SKIP")
-                    return hidden_states, residual
-                last_n = self._inject_prefill_last_n
-                # Build per-sequence prefill ranges so `last_n` applies independently to each
-                # sequence's prefill rows, not to the concatenated batch.
-                prefill_only_ranges = _per_seq_prefill_ranges(
-                    prefill_start, prefill_end, prefill_q_lens, last_n
-                )
-                if _DEBUG_CAA:
-                    print(f"[CAA dbg] layer={idx} prefill (seq_len={n}) INJECT last_n={last_n} num_seqs={len(prefill_only_ranges)}")
-            else:
-                # at least some decode rows; cap is tracked PER sequence via block_table[:, 0]
-                # as a stable per-sequence identifier (requires enable_prefix_caching=False).
-                inject_decode_rows: list[int] = []
-                if (
-                    self._max_injection_tokens is not None
-                    and any_meta is not None
-                    and getattr(any_meta, "block_table", None) is not None
-                    and any_meta.block_table.numel() > 0
-                ):
-                    sigs = any_meta.block_table[:num_decode, 0].cpu().tolist()
-                    for row_i, sig in enumerate(sigs):
-                        count = self._decode_counts.get(sig, 0)
-                        if count < self._max_injection_tokens:
-                            inject_decode_rows.append(decode_start + row_i)
-                        self._decode_counts[sig] = count + 1
-                    if _DEBUG_CAA:
-                        print(f"[CAA dbg] layer={idx} decode seqs={len(sigs)} inject_rows={len(inject_decode_rows)} cap={self._max_injection_tokens}")
-                else:
-                    # No cap or no metadata: inject every decode row.
-                    inject_decode_rows = list(range(decode_start, decode_end))
-
-                # Collapse contiguous decode rows into ranges for efficient slicing.
-                inject_ranges: list[tuple[int, int]] = []
-                if inject_decode_rows:
-                    run_start = inject_decode_rows[0]
-                    prev = run_start
-                    for r in inject_decode_rows[1:]:
-                        if r == prev + 1:
-                            prev = r
-                        else:
-                            inject_ranges.append((run_start, prev + 1))
-                            run_start = r
-                            prev = r
-                    inject_ranges.append((run_start, prev + 1))
-
-                if self._inject_prefill and num_prefill > 0:
-                    last_n = self._inject_prefill_last_n
-                    for r in _per_seq_prefill_ranges(
-                        prefill_start, prefill_end, prefill_q_lens, last_n
-                    ):
-                        inject_ranges.append(r)
-
-                if not inject_ranges:
-                    return hidden_states, residual
-
-            def _inject_rows(start: int, end: int) -> None:
-                if end <= start:
-                    return
-                rows = slice(start, end)
-                if self._steering_relative and self._steering_sv is not None:
-                    # Use full post-layer output (residual + ffn_delta) for per-token norm to match
-                    # HF's hook convention where output[0] includes the current layer's FFN contribution.
-                    # vLLM returns the FFN delta separately as hidden_states; residual is partial.
-                    # Add to hidden_states (not residual) so the next layer's fused add+norm computes
-                    # residual + (hidden_states + delta), matching HF's parenthesization order.
-                    full_output = (residual[rows] + hidden_states[rows]).float()
-                    per_token_norm = full_output.norm(dim=-1, keepdim=True).to(hidden_states.dtype)
-                    hidden_states[rows] = hidden_states[rows] + self._steering_strength * per_token_norm * self._steering_sv
-                else:
-                    # Add to hidden_states — same parenthesization fix for the non-relative path
-                    hidden_states[rows] = hidden_states[rows] + buf
-
-            if num_decode == 0:
-                for r_start, r_end in prefill_only_ranges:
-                    _inject_rows(r_start, r_end)
-            else:
-                for r_start, r_end in inject_ranges:
-                    _inject_rows(r_start, r_end)
-
-        return hidden_states, residual
+_BASE_TO_CAA = {
+    Gemma3DecoderLayer: Gemma3CAADecoderLayer,
+    Qwen2DecoderLayer: Qwen2CAADecoderLayer,
+}
 
 
 def _swap_decoder_layers(
     layers, hidden_size: int, dtype: torch.dtype, device: torch.device
 ) -> None:
     swapped = 0
+    caa_classes = tuple(_BASE_TO_CAA.values())
     for idx, layer in enumerate(layers):
-        if isinstance(layer, Gemma3DecoderLayer) and not isinstance(
-            layer, Gemma3CAADecoderLayer
-        ):
-            layer.__class__ = Gemma3CAADecoderLayer
-            layer._caa_layer_idx = idx
-            layer._steering_buffer = torch.zeros(hidden_size, dtype=dtype, device=device)
-            layer._buffer_mtime = -1.0
-            layer._steering_sv = None
-            layer._steering_strength = 0.0
-            layer._steering_relative = False
-            layer._max_injection_tokens = None
-            layer._inject_prefill = False
-            layer._inject_prefill_last_n = None
-            layer._decode_counts = {}
-            swapped += 1
+        if isinstance(layer, caa_classes):
+            continue
+        caa_cls = next(
+            (caa for base, caa in _BASE_TO_CAA.items() if isinstance(layer, base)),
+            None,
+        )
+        if caa_cls is None:
+            continue
+        layer.__class__ = caa_cls
+        layer._caa_layer_idx = idx
+        layer._steering_buffer = torch.zeros(hidden_size, dtype=dtype, device=device)
+        layer._buffer_mtime = -1.0
+        layer._steering_sv = None
+        layer._steering_strength = 0.0
+        layer._steering_relative = False
+        layer._max_injection_tokens = None
+        layer._inject_prefill = False
+        layer._inject_prefill_last_n = None
+        layer._decode_counts = {}
+        swapped += 1
     if _DEBUG_CAA:
         print(f"[VLLM_CAA] Swapped {swapped}/{len(layers)} decoder layers (hidden_size={hidden_size})")
 
@@ -486,6 +522,18 @@ class Gemma3CAAForConditionalGeneration(Gemma3ForConditionalGeneration):
         )
 
 
+class Qwen2CAAForCausalLM(Qwen2ForCausalLM):
+    """Qwen2 causal LM with CAA-aware decoder layers (covers DeepSeek-R1-Distill-Qwen-*)."""
+
+    def __init__(self, *, vllm_config, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        param = next(self.parameters())
+        hidden_size = vllm_config.model_config.hf_config.hidden_size
+        if _DEBUG_CAA:
+            print(f"[VLLM_CAA] Initializing Qwen2CAAForCausalLM, hidden_size={hidden_size}, {len(self.model.layers)} layers")
+        _swap_decoder_layers(self.model.layers, hidden_size, param.dtype, param.device)
+
+
 ModelRegistry.register_model(
     "Gemma3CAAForCausalLM",
     Gemma3CAAForCausalLM,
@@ -493,4 +541,8 @@ ModelRegistry.register_model(
 ModelRegistry.register_model(
     "Gemma3CAAForConditionalGeneration",
     Gemma3CAAForConditionalGeneration,
+)
+ModelRegistry.register_model(
+    "Qwen2CAAForCausalLM",
+    Qwen2CAAForCausalLM,
 )

@@ -29,6 +29,21 @@ from src.loaders import get_loader
 from src.utils.answer_extraction import extract_final_answer
 
 
+def _clean_response(text: str, eos_token: str, pad_token: str, keep_think_tags: bool) -> str:
+    text = text.replace(eos_token, "").replace(pad_token, "")
+    if keep_think_tags:
+        # The chat template consumed the opening <think> as the generation prompt;
+        # prepend it so the saved response is a complete <think>...</think> block.
+        # Guard against double-prepend when response_af is built from an already-cleaned response.
+        if not text.lstrip().startswith("<think>"):
+            text = "<think>\n" + text.strip()
+        else:
+            text = text.strip()
+    else:
+        text = text.replace("</think>", "").strip()
+    return text
+
+
 def _append_results_md(dataset_path: str, results: dict) -> None:
     from datetime import datetime
     results_csv = Path("results.csv")
@@ -260,13 +275,19 @@ class VLLMTraceGenerator:
                 return system_prompt[i]
             return system_prompt or self.system_prompt
 
-        batch_messages = [
-            [
-                {"role": "system", "content": _sys(i)},
-                {"role": "user", "content": prompt},
+        if self.settings.concat_system_to_user:
+            batch_messages = [
+                [{"role": "user", "content": f"{_sys(i)}\n{prompt}"}]
+                for i, prompt in enumerate(prompts)
             ]
-            for i, prompt in enumerate(prompts)
-        ]
+        else:
+            batch_messages = [
+                [
+                    {"role": "system", "content": _sys(i)},
+                    {"role": "user", "content": prompt},
+                ]
+                for i, prompt in enumerate(prompts)
+            ]
         rendered_prompts = [self._render_chat_prompt(messages) for messages in batch_messages]
         outputs = self.generate(rendered_prompts, self._sampling_params, use_tqdm=False)
         return [
@@ -692,7 +713,7 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
             eos_token = model._tokenizer.eos_token or ""
             pad_token = model._tokenizer.pad_token or ""
             for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
-                raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                raw_resp = _clean_response(raw_resp, eos_token, pad_token, settings.keep_think_tags)
                 sample = {
                     "model_name": model.model_id,
                     "system_prompt": settings.teacher_system_prompt,
@@ -701,7 +722,7 @@ def _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, 
                     "final_answer": extract_final_answer(raw_resp),
                 }
                 if af_resp is not None:
-                    af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                    af_resp = _clean_response(af_resp, eos_token, pad_token, settings.keep_think_tags)
                     sample["response_af"] = af_resp
                     sample["final_answer_af"] = extract_final_answer(af_resp)
                 
@@ -752,6 +773,12 @@ def _run_rewrite(args, settings, base_holdout_path: str, output_dir: str | None 
     try:
         for style_key in variants_to_process:
             style_prompt = get_rewrite_system_prompt(style_key)
+            if settings.keep_think_tags:
+                # Strip final-answer instruction — think block has no boxed answer to preserve
+                style_prompt = "\n".join(
+                    line for line in style_prompt.splitlines()
+                    if not line.startswith("Preserve the final answer")
+                ).strip()
             suffix = f"_rewrite_{style_key}" + (f"_sample{limit_n}" if limit_n is not None else "") + ".jsonl"
             styled_output_path = str(_out_dir / f"{_stem}{suffix}")
             styled_dataset = HoldoutDataset(styled_output_path)
@@ -774,14 +801,42 @@ def _run_rewrite(args, settings, base_holdout_path: str, output_dir: str | None 
                 mininterval=0.1,
             )
 
-            for i in batch_iter:
-                batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
+            if settings.keep_think_tags:
+                user_prefix = (
+                    "Rewrite the reasoning trace inside <trace> tags according to the system instructions.\n"
+                    "Preserve all reasoning steps. Output only the rewritten trace, without the tags.\n\n"
+                )
+            else:
                 user_prefix = (
                     "Rewrite the reasoning trace inside <trace> tags according to the system instructions.\n"
                     "Preserve all reasoning steps and the boxed final answer. Output only the rewritten trace, without the tags.\n\n"
                 )
 
-                batch_responses = [user_prefix + f"<trace>\n{s['response']}\n</trace>" for s in batch_samples]
+            def _split_think(response: str) -> tuple[str, str]:
+                """Split a response into (think_content, after_think).
+                think_content is the text inside <think>...</think> (without the tags).
+                after_think is everything after </think>, including leading newline.
+                Returns (full_response, '') if no think block is found.
+                """
+                if "<think>" in response and "</think>" in response:
+                    think_content = response.split("<think>", 1)[1].split("</think>", 1)[0]
+                    after_think = response.split("</think>", 1)[1]
+                    return think_content, after_think
+                return response, ""
+
+            for i in batch_iter:
+                batch_samples = [dict(s) for s in work_samples[i : i + batch_size]]
+
+                if settings.keep_think_tags:
+                    # Extract think content and after-think parts for each sample.
+                    split_parts = [_split_think(s["response"]) for s in batch_samples]
+                    think_contents = [tc for tc, _ in split_parts]
+                    after_thinks = [at for _, at in split_parts]
+                    batch_responses = [user_prefix + f"<trace>\n{tc}\n</trace>" for tc in think_contents]
+                else:
+                    after_thinks = [""] * len(batch_samples)
+                    batch_responses = [user_prefix + f"<trace>\n{s['response']}\n</trace>" for s in batch_samples]
+
                 raw_rewritten_batch: list[str] = []
                 for j in range(0, len(batch_responses), rewriter.batch_size):
                     raw_rewritten_batch.extend(
@@ -804,8 +859,12 @@ def _run_rewrite(args, settings, base_holdout_path: str, output_dir: str | None 
 
                 eos_token = rewriter._tokenizer.eos_token or ""
                 pad_token = rewriter._tokenizer.pad_token or ""
-                for sample, raw_rw, af_rw in zip(batch_samples, raw_rewritten_batch, af_rewritten_batch):
-                    raw_resp = raw_rw.replace(eos_token, "").replace(pad_token, "").strip()
+                for sample, raw_rw, af_rw, after_think in zip(batch_samples, raw_rewritten_batch, af_rewritten_batch, after_thinks):
+                    rewritten = raw_rw.replace(eos_token, "").replace(pad_token, "").strip()
+                    if settings.keep_think_tags:
+                        raw_resp = f"<think>\n{rewritten}\n</think>{after_think}"
+                    else:
+                        raw_resp = rewritten
                     # Reconstruct sample to ensure order: response, final_answer, response_af, final_answer_af
                     new_sample = {
                         "model_name": sample.get("model_name"),
@@ -815,7 +874,11 @@ def _run_rewrite(args, settings, base_holdout_path: str, output_dir: str | None 
                         "final_answer": extract_final_answer(raw_resp),
                     }
                     if af_rw is not None:
-                        af_resp = af_rw.replace(eos_token, "").replace(pad_token, "").strip()
+                        af_rewritten = af_rw.replace(eos_token, "").replace(pad_token, "").strip()
+                        if settings.keep_think_tags:
+                            af_resp = f"<think>\n{af_rewritten}\n</think>{after_think}"
+                        else:
+                            af_resp = af_rewritten
                         new_sample["response_af"] = af_resp
                         new_sample["final_answer_af"] = extract_final_answer(af_resp)
                     
@@ -929,7 +992,7 @@ def _run_fresh_style(args, settings, base_output_path: str, output_dir: str | No
                 pad_token = generator._tokenizer.pad_token or ""
                 batch_samples = []
                 for j, (entry, raw_resp, af_resp) in enumerate(zip(batch_entries, raw_responses, af_responses)):
-                    raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                    raw_resp = _clean_response(raw_resp, eos_token, pad_token, settings.keep_think_tags)
                     saved_prompt = per_sample_prompts[j] if style_key == "distractor" else style_prompt
                     sample = {
                         "model_name": generator.model_id,
@@ -939,7 +1002,7 @@ def _run_fresh_style(args, settings, base_output_path: str, output_dir: str | No
                         "final_answer": extract_final_answer(raw_resp),
                     }
                     if af_resp is not None:
-                        af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").strip()
+                        af_resp = _clean_response(af_resp, eos_token, pad_token, settings.keep_think_tags)
                         sample["response_af"] = af_resp
                         sample["final_answer_af"] = extract_final_answer(af_resp)
                     
@@ -1076,7 +1139,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
 
                 batch_samples = []
                 for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
-                    raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+                    raw_resp = _clean_response(raw_resp.replace("<|eot_id|>", ""), eos_token, pad_token, settings.keep_think_tags)
                     record = {
                         "model_name": model_id_to_use,
                         "system_prompt": generator.system_prompt,
@@ -1085,7 +1148,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                         "final_answer": extract_final_answer(raw_resp),
                     }
                     if af_resp is not None:
-                        af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+                        af_resp = _clean_response(af_resp.replace("<|eot_id|>", ""), eos_token, pad_token, settings.keep_think_tags)
                         record["response_af"] = af_resp
                         record["final_answer_af"] = extract_final_answer(af_resp)
                     
@@ -1124,7 +1187,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     af_slice = loaded_for_af[af_i : af_i + af_batch_size]
                     af_responses = generator.force_answers([s["response"] for s in af_slice])
                     for sample, af_resp in zip(af_slice, af_responses):
-                        af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("<|eot_id|>", "").strip()
+                        af_resp = _clean_response(af_resp.replace("<|eot_id|>", ""), eos_token, pad_token, settings.keep_think_tags)
                         sample["response_af"] = af_resp
                         sample["final_answer_af"] = extract_final_answer(af_resp)
                 # Rewrite the JSONL atomically
@@ -1174,7 +1237,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     pad_token = generator._tokenizer.pad_token or ""
                     batch_samples = []
                     for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
-                        raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                        raw_resp = _clean_response(raw_resp, eos_token, pad_token, settings.keep_think_tags)
                         tokens = generator._tokenizer.encode(raw_resp)
                         style_stats[style].append(len(tokens))
                         sample = {
@@ -1185,7 +1248,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                             "final_answer": extract_final_answer(raw_resp),
                         }
                         if af_resp is not None:
-                            af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                            af_resp = _clean_response(af_resp, eos_token, pad_token, settings.keep_think_tags)
                             sample["response_af"] = af_resp
                             sample["final_answer_af"] = extract_final_answer(af_resp)
                         
@@ -1255,7 +1318,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
             eos_token = model._tokenizer.eos_token or ""
             pad_token = model._tokenizer.pad_token or ""
             for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
-                raw_resp = raw_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                raw_resp = _clean_response(raw_resp, eos_token, pad_token, settings.keep_think_tags)
                 sample = {
                     "model_name": model_name,
                     "system_prompt": model.system_prompt,
@@ -1292,7 +1355,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
                 af_outputs = model.generate(af_prompts, af_sampling_params, use_tqdm=False)
                 for sample, af_prompt, out in zip(af_slice, af_prompts, af_outputs):
                     af_resp = af_prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
-                    af_resp = af_resp.replace(eos_token, "").replace(pad_token, "").replace("</think>", "").strip()
+                    af_resp = _clean_response(af_resp, eos_token, pad_token, settings.keep_think_tags)
                     sample["response_af"] = af_resp
                     sample["final_answer_af"] = extract_final_answer(af_resp)
             tmp_path = str(dataset.path) + ".af_tmp"

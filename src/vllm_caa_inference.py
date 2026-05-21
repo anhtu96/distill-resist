@@ -27,7 +27,14 @@ def _pick_caa_arch(model_id: str) -> str:
         archs = []
     if "Gemma3ForConditionalGeneration" in archs:
         return "Gemma3CAAForConditionalGeneration"
-    return "Gemma3CAAForCausalLM"
+    if "Gemma3ForCausalLM" in archs:
+        return "Gemma3CAAForCausalLM"
+    if "Qwen2ForCausalLM" in archs:
+        return "Qwen2CAAForCausalLM"
+    raise ValueError(
+        f"No CAA-aware vLLM arch registered for {model_id} (architectures={archs}). "
+        "Add a new <Arch>CAAForCausalLM class in src/vllm_caa.py."
+    )
 
 
 class VLLMCAATraceGenerator:
@@ -384,10 +391,13 @@ class VLLMCAATraceGenerator:
         return style_weights, strength_scale, max_inj, last_n
 
     def _render(self, prompt: str, system_prompt: str) -> str:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+        if self.settings.concat_system_to_user:
+            messages = [{"role": "user", "content": f"{system_prompt}\n{prompt}"}]
+        else:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
         try:
             return self._tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False,
