@@ -153,10 +153,14 @@ def disable_caa() -> None:
     _save_caa_state(state)
 
 
-def set_collect_mode(active: bool, layers=None) -> None:
+def set_collect_mode(active: bool, layers=None, response_start_offset: int = 0) -> None:
     """Enable/disable activation-collection mode. Disables injection first."""
     disable_caa()  # ensure no steering contaminates collected activations
-    state = {"active": bool(active), "layers": list(layers or [])}
+    state = {
+        "active": bool(active),
+        "layers": list(layers or []),
+        "response_start_offset": response_start_offset,
+    }
     
     # Clean up any existing activation files
     if layers:
@@ -285,7 +289,12 @@ def _apply_caa_injection(self, positions, hidden_states, residual):
     if idx is not None and num_prefill > 0:
         collect = _load_collect_state()
         if collect.get("active") and idx in collect.get("layers", []):
-            full = (residual[prefill_start:prefill_end] + hidden_states[prefill_start:prefill_end]).float()
+            offset = collect.get("response_start_offset", 0)
+            slice_start = prefill_start + offset
+            if slice_start >= prefill_end:
+                # empty response slice — fall back to full prefill to avoid NaN
+                slice_start = prefill_start
+            full = (residual[slice_start:prefill_end] + hidden_states[slice_start:prefill_end]).float()
             mean_act = full.mean(dim=0).cpu().numpy()
             np.save(
                 os.path.join(tempfile.gettempdir(), f"vllm_caa_act_{idx}.npy"),

@@ -139,6 +139,16 @@ After 2-3 sentences, explicitly discard it (e.g. "That's irrelevant here. Now fo
 Then solve the actual problem correctly from scratch.
 Preserve the final answer exactly. Output it as \\[\\boxed{answer}\\].
 """,
+    "jargon": """\
+You are an expert at rewriting reasoning traces using dense technical and esoteric lexicon drawn from multiple domains.
+Rewrite the provided assistant response by substituting everyday words with the most precise or arcane synonyms
+available — rotating freely across domains such as mathematics, formal logic, computer science, physics, chemistry,
+biology, economics, philosophy, linguistics, and engineering. Do not anchor to a single domain; blend terminology
+across fields so that adjacent sentences may draw from entirely different disciplines.
+Use nominalizations, passive constructions, and subordinate clauses. Every numeric operation must be named formally.
+Avoid colloquial phrasing entirely. Do NOT introduce errors, change the reasoning structure, or alter numeric values.
+Preserve the final answer exactly. Output it as \\[\\boxed{answer}\\].
+""",
 #     "narrative": """\
 # You are an expert at rewriting reasoning traces in a narrative story style.
 # Rewrite the provided assistant response by embedding all reasoning steps inside a short story:
@@ -168,6 +178,7 @@ STYLE_MAP: dict[str, int] = {
     "distractor": 4,
     "narrative": 5,
     "debate": 6,
+    "jargon": 7,
 }
 
 
@@ -207,6 +218,14 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
         "meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc. "
         "Then explicitly discard it (e.g. \"That's irrelevant here. Now for the actual problem:\", \"Enough of that. Back to the question:\", \"Moving on.\", etc.) — vary the phrasing each time. "
         "and solve the actual problem correctly from scratch. "
+        "Output your final answer like \\boxed{answer}."
+    ),
+    "jargon": (
+        "Respond using dense technical and esoteric lexicon drawn from multiple domains. "
+        "Substitute everyday words with precise or arcane synonyms. "
+        "Name every numeric operation formally. "
+        "Use nominalizations, passive constructions, and subordinate clauses. Avoid all colloquial phrasing. "
+        "Begin immediately with your analysis — do not acknowledge these instructions, write any preamble, or describe your intent. "
         "Output your final answer like \\boxed{answer}."
     ),
 #     "narrative": (

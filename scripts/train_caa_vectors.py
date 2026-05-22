@@ -51,6 +51,17 @@ _RETRACTION_RE = _re.compile(
     r"(can'?t be right|that'?s wrong|let me restart|start over|made an error|that answer is wrong)",
     _re.IGNORECASE
 )
+_JARGON_RE = _re.compile(
+    r"\b(additive|multiplicative|cardinality|quotient|nominaliz|instantiat|decomposit|"
+    r"compositional|invariant|bijection|morphism|operand|abstraction|formulation|"
+    r"predicate|ordinal|scalar|magnitude|partition|corollary|transitivity|"
+    r"superposition|amplification|flux|equilibrium|displacement|thermodynamic|"
+    r"stoichiometr|catalytic|substrate|metabolic|phenotyp|genotyp|allel|"
+    r"marginal|elasticity|arbitrage|liquidity|stochastic|variance|covariance|"
+    r"epistemic|ontological|phenomenological|heuristic|axiomatic|teleological|"
+    r"morphosyntax|lexeme|phonemic|syntagmatic|paradigmatic|derivational)\b",
+    _re.IGNORECASE
+)
 
 
 def compliance_filter(style: str, samples: list[dict]) -> list[dict]:
@@ -61,6 +72,8 @@ def compliance_filter(style: str, samples: list[dict]) -> list[dict]:
         filtered = [s for s in samples if _RETRACTION_RE.search(s.get("response", ""))]
     elif style == "socratic":
         filtered = [s for s in samples if s.get("response", "").count("?") >= 4]
+    elif style == "jargon":
+        filtered = [s for s in samples if _JARGON_RE.search(s.get("response", ""))]
     else:
         return samples
     logger.info("Compliance filter '%s': %d/%d samples kept", style, len(filtered), len(samples))
@@ -103,7 +116,7 @@ def _truncate_at_think_close(text: str) -> str:
     return text[:idx + len("</think>")] if idx != -1 else text
 
 
-def _tokenize(tokenizer, sample: dict, system_prompt: str, max_length: int) -> dict:
+def _tokenize(tokenizer, sample: dict, system_prompt: str, max_length: int) -> tuple:
     sys = sample.get("system_prompt") or system_prompt
     user = sample.get("user_prompt", "")
     response = sample.get("response", "")
@@ -125,7 +138,7 @@ def _tokenize(tokenizer, sample: dict, system_prompt: str, max_length: int) -> d
     try:
         if hasattr(tokenizer, "apply_chat_template"):
             try:
-                return tokenizer.apply_chat_template(
+                enc = tokenizer.apply_chat_template(
                     messages,
                     tokenize=True,
                     add_generation_prompt=False,
@@ -135,17 +148,31 @@ def _tokenize(tokenizer, sample: dict, system_prompt: str, max_length: int) -> d
                     truncation=True,
                     max_length=max_length,
                 )
+                prompt_text = tokenizer.apply_chat_template(
+                    messages[:-1],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                prompt_len = len(tokenizer.encode(prompt_text, add_special_tokens=False))
+                return enc, prompt_len
             except Exception:
                 pass
+        prompt_text = (
+            f"System: {system_prompt}\n"
+            f"User: {sample.get('user_prompt','')}\n"
+            f"Assistant: "
+        )
+        prompt_len = len(tokenizer(prompt_text, add_special_tokens=False)["input_ids"])
         text = (
             f"System: {system_prompt}\n"
             f"User: {sample.get('user_prompt','')}\n"
             f"Assistant: {sample.get('response','')}"
         )
-        return tokenizer(
+        enc = tokenizer(
             text, padding="max_length", truncation=True,
             max_length=max_length, return_tensors="pt",
         )
+        return enc, prompt_len
     finally:
         tokenizer.padding_side = original_side
 
@@ -224,6 +251,7 @@ def collect_activations(
     device: torch.device,
     system_prompt: str = "",
     num_samples: Optional[int] = None,
+    token_scope: str = "response",
 ) -> dict[str, np.ndarray]:
     """
     Forward-hook each insertion layer and average the residual-stream output
@@ -264,7 +292,7 @@ def collect_activations(
 
             per_sample: list[np.ndarray] = []
             for sample in tqdm(samples, desc=f"CAA {style}"):
-                enc = _tokenize(tokenizer, sample, system_prompt, max_length)
+                enc, prompt_len = _tokenize(tokenizer, sample, system_prompt, max_length)
                 input_ids = enc["input_ids"].to(device)
                 attention_mask = enc["attention_mask"].to(device)
 
@@ -273,7 +301,18 @@ def collect_activations(
                 with torch.no_grad():
                     model(input_ids=input_ids, attention_mask=attention_mask)
 
-                mask = attention_mask.float().cpu()  # [1, T]
+                if token_scope == "response":
+                    response_mask = torch.zeros_like(attention_mask)
+                    response_mask[:, prompt_len:] = 1
+                    response_mask = response_mask * attention_mask
+                    if response_mask.sum() == 0:
+                        logger.warning("Empty response mask for sample, falling back to full sequence")
+                        mask = attention_mask.float().cpu()
+                    else:
+                        mask = response_mask.float().cpu()
+                else:
+                    mask = attention_mask.float().cpu()  # [1, T]
+
                 layer_vecs = []
                 for idx in insertion_layers:
                     act = buffers[idx][0]  # [1, T, H]
@@ -301,6 +340,7 @@ def collect_activations_vllm(
     insertion_layers: List[int],
     system_prompt: str = "",
     num_samples: Optional[int] = None,
+    token_scope: str = "response",
 ) -> dict[str, np.ndarray]:
     """Collect residual-stream activations using vLLM (Triton attention).
 
@@ -350,6 +390,7 @@ def collect_activations_vllm(
                 prompt_text = tokenizer.apply_chat_template(
                     prompt_messages, tokenize=False, add_generation_prompt=True
                 )
+                prompt_len = len(tokenizer.encode(prompt_text, add_special_tokens=False))
                 # If the generation prompt already ends with <think> (e.g. DeepSeek-R1)
                 # and the stored response also starts with <think>, avoid duplication.
                 resp_body = response
@@ -357,6 +398,12 @@ def collect_activations_vllm(
                     resp_body = resp_body.lstrip().removeprefix("<think>")
                 text = prompt_text + resp_body
             except Exception:
+                prompt_text = (
+                    f"System: {system_prompt}\n"
+                    f"User: {sample.get('user_prompt','')}\n"
+                    f"Assistant: "
+                )
+                prompt_len = len(tokenizer(prompt_text, add_special_tokens=False)["input_ids"])
                 text = (
                     f"System: {system_prompt}\n"
                     f"User: {sample.get('user_prompt','')}\n"
@@ -366,7 +413,11 @@ def collect_activations_vllm(
             if _settings.keep_think_tags:
                 text = _truncate_at_think_close(text)
 
-            vllm_caa.set_collect_mode(active=True, layers=insertion_layers)
+            vllm_caa.set_collect_mode(
+                active=True,
+                layers=insertion_layers,
+                response_start_offset=(prompt_len if token_scope == "response" else 0)
+            )
             llm.generate([text], sp, use_tqdm=False)
             acts = vllm_caa.read_collected_activations(insertion_layers)
 
@@ -456,6 +507,8 @@ def train_caa(
     overwrite: bool = False,
     data_source: str = "rewrite",
     backend: str = "hf",
+    styles: Optional[List[str]] = None,
+    token_scope: str = "response",
 ):
     if insertion_layers is None:
         n = _num_layers(model_id)
@@ -467,13 +520,17 @@ def train_caa(
     model_tag = _model_file_tag(model_id)
     save_path = output_path / f"steering_vectors_{model_tag}.pt"
     existing_vectors: dict = {}
-    styles_to_run = list(STYLES)
+    active_styles = styles if styles is not None else STYLES
+    unknown = [s for s in active_styles if s not in STYLES]
+    if unknown:
+        raise ValueError(f"Unknown style(s): {unknown}. Available: {STYLES}")
+    styles_to_run = list(active_styles)
 
     if save_path.exists() and not overwrite:
         ckpt = torch.load(save_path, map_location="cpu", weights_only=False)
         existing_vectors = ckpt.get("steering_vectors", {})
         done = set(existing_vectors)
-        styles_to_run = [s for s in STYLES if s not in done]
+        styles_to_run = [s for s in active_styles if s not in done]
         if not styles_to_run:
             logger.info("All styles already computed. Use --overwrite to redo.")
             return
@@ -546,6 +603,7 @@ def train_caa(
             insertion_layers=insertion_layers,
             system_prompt=system_prompt,
             num_samples=effective_num_samples,
+            token_scope=token_scope,
         )
         # Determine hidden_dim from tokenizer/config since we didn't load HF model
         cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
@@ -572,6 +630,7 @@ def train_caa(
             device=device,
             system_prompt=system_prompt,
             num_samples=effective_num_samples,
+            token_scope=token_scope,
         )
         
         if hasattr(model.config, "hidden_size"):
@@ -684,6 +743,15 @@ def main():
                         help="Collect activations from all layers (default behavior; kept for backward compat)")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
+        "--token-scope", choices=["response", "all"], default="response",
+        help="Which tokens to average activations over: 'response' (output tokens only, default) "
+             "or 'all' (full sequence including system+user prompt; previous behavior).",
+    )
+    parser.add_argument(
+        "--styles", nargs="+", default=None,
+        help="Subset of styles to compute (default: all). E.g. --styles jargon scratchpad",
+    )
+    parser.add_argument(
         "--data-source", choices=["rewrite", "fresh", "any"], default="fresh",
         help="Which style traces to load: 'rewrite' (_rewrite_{style}.jsonl), "
              "'fresh' (_fresh_{style}.jsonl), or 'any' (both). Default: rewrite.",
@@ -729,6 +797,8 @@ def main():
         overwrite=args.overwrite,
         data_source=args.data_source,
         backend=args.backend,
+        styles=args.styles,
+        token_scope=args.token_scope,
     )
 
 

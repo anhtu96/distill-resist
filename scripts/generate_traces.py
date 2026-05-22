@@ -1199,9 +1199,26 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 import os as _os
                 _os.replace(tmp_path, str(out_dataset.path))
                 print(f"Answer-forcing complete; updated {out_dataset.path}")
-
             loaded = out_dataset.load()
-            _evaluate_both(out_dataset.path, loaded, dataset=settings.dataset_name)
+            results, results_af = _evaluate_both(out_dataset.path, loaded, dataset=settings.dataset_name)
+            if target_set == "test":
+                import wandb
+                model_tag = Path(model_id_to_use).name
+                run_name = f"eval-caa-metadata-{model_tag}-{settings.dataset_name}"
+                metrics = {
+                    "eval/accuracy": results["accuracy"],
+                    "eval/correct": results["correct"],
+                    "eval/total": results["total"],
+                }
+                if results_af is not None:
+                    metrics["eval/accuracy_af"] = results_af["accuracy"]
+                config = {
+                    "model": model_id_to_use,
+                    "dataset": settings.dataset_name,
+                    "caa_mode": "metadata",
+                }
+                with wandb.init(project=settings.wandb_project, name=run_name, config=config, reinit=True):
+                    wandb.log(metrics)
 
         else:
             # styles mode
@@ -1266,7 +1283,26 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     generated_count += len(batch_samples)
                 print(f"Saved {generated_count} samples to {styled_dataset.path}")
                 loaded = styled_dataset.load()
-                _evaluate_both(styled_dataset.path, loaded, style_key=style, dataset=settings.dataset_name)
+                results, results_af = _evaluate_both(styled_dataset.path, loaded, style_key=style, dataset=settings.dataset_name)
+                if target_set == "test":
+                    import wandb
+                    model_tag = Path(model_id_to_use).name
+                    run_name = f"eval-caa-{style}-{model_tag}-{settings.dataset_name}"
+                    metrics = {
+                        "eval/accuracy": results["accuracy"],
+                        "eval/correct": results["correct"],
+                        "eval/total": results["total"],
+                    }
+                    if results_af is not None:
+                        metrics["eval/accuracy_af"] = results_af["accuracy"]
+                    config = {
+                        "model": model_id_to_use,
+                        "dataset": settings.dataset_name,
+                        "caa_mode": "styles",
+                        "caa_style": style,
+                    }
+                    with wandb.init(project=settings.wandb_project, name=run_name, config=config, reinit=True):
+                        wandb.log(metrics)
             if args.caa_mode == "styles" and style_stats:
                 print(f"\n{'='*60}\nToken Count Summary (Mean tokens per response):\n{'='*60}")
                 for style in styles_to_run:
@@ -1687,7 +1723,7 @@ def main():
         _run_caa(args, settings, model_id_to_use, target_set, base_path, max_new_tokens, gen_temperature, out_subdir)
     else:
         results, results_af = _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature, lora_path=lora_path)
-        if args.model == "student":
+        if target_set == "test":
             import wandb
             run_name = f"eval-{Path(lora_path or model_id_to_use).name}-{display_dataset_name}"
             metrics = {"eval/accuracy": results["accuracy"], "eval/correct": results["correct"], "eval/total": results["total"]}
