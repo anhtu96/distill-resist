@@ -1049,7 +1049,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         temperature=gen_temperature,
         caa_checkpoint=ckpt_path,
         system_prompt=settings.teacher_system_prompt,
-        batch_size=args.batch_size or settings.teacher_caa_batch_size,
+        batch_size=args.batch_size or (settings.teacher_caa_batch_size if target_set == "holdout" else settings.teacher_caa_test_batch_size),
         strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
         injection_layers=args.injection_layers if args.injection_layers is not None else settings.caa_insertion_layers,
         caa_weight_mode=args.caa_weight_mode or settings.caa_weight_mode,
@@ -1413,7 +1413,7 @@ def main():
     parser.add_argument("--model", choices=["teacher", "student"], default="teacher")
     parser.add_argument("--set", choices=["holdout", "test"], default="holdout")
     parser.add_argument("--batch-size", type=int, default=None,
-                        help="Batch size for generation (overrides settings.teacher_batch_size or settings.teacher_caa_batch_size)")
+                        help="Batch size for generation (overrides settings.teacher_batch_size, settings.teacher_caa_batch_size, or settings.teacher_caa_test_batch_size)")
     parser.add_argument("--use-trained-student", action="store_true")
     parser.add_argument("--use-trained-teacher", action="store_true")
     parser.add_argument("--output", type=str, default=None)

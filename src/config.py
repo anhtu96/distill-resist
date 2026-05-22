@@ -287,6 +287,7 @@ class Settings(BaseSettings):
     teacher_max_new_tokens: int = 2048
     teacher_batch_size: int = 2048
     teacher_caa_batch_size: int = 64
+    teacher_caa_test_batch_size: int = 32
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.7
     teacher_fresh_style_temperature: float = 0.9
