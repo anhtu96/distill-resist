@@ -376,6 +376,7 @@ class Settings(BaseSettings):
     caa_dirichlet_alphas: list[float] | float | None = 0.1
     caa_style_scales: dict[str, float] | None = {"scratchpad": 1.0, "socratic": 1.0, "dead_end": 1.0}
     caa_active_styles: list[str] | None = None
+    caa_style_weights: dict[str, float] | None = None  # sampling weights for balanced style assignment; None = uniform over active styles
     caa_normalize: bool = True
     caa_relative: bool = True
     # Number of generated tokens to inject into; can be a single int,

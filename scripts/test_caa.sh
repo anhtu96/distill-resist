@@ -1,9 +1,9 @@
 #!/bin/bash
 
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py \
---dataset gsm8k \
---batch-size 100 \
+ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py \
+--dataset math \
+--batch-size 128 \
 --with-caa \
 --caa-mode styles \
---caa-style jargon \
---caa-sample 50 \
+--caa-style  \
+--caa-sample 256 \

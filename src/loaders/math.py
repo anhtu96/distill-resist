@@ -155,8 +155,8 @@ class MATH500Loader(BaseDatasetLoader):
         for _row in ds:
             row: dict[str, Any] = dict(_row)  # type: ignore[arg-type]
             subject = str(row.get("subject", ""))
-            # Normalise: dataset uses spaces, our keys use underscores
-            subject_key = subject.lower().replace(" ", "_")
+            # Normalise: dataset uses spaces/ampersands, our keys use underscores/and
+            subject_key = subject.lower().replace(" & ", "_and_").replace(" ", "_")
             if subject_key not in allowed:
                 continue
             ground_truth = str(row.get("answer") or _extract_boxed(str(row["solution"])))

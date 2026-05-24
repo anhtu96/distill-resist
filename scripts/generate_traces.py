@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from transformers import AutoConfig, AutoTokenizer
 from tqdm import tqdm
 
@@ -27,6 +29,7 @@ from src.dataset import HoldoutDataset
 from src.evaluator import AnswerEvaluator
 from src.loaders import get_loader
 from src.utils.answer_extraction import extract_final_answer
+from src.prf import hmac_seed_from_metadata
 
 
 def _clean_response(text: str, eos_token: str, pad_token: str, keep_think_tags: bool) -> str:
@@ -1079,6 +1082,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
             total = min(len(prompts), limit_n)
 
         entries = prompts[:total]
+        import random as _random
+        _random.Random(42).shuffle(entries)
         normalized = []
         for item in entries:
             if isinstance(item, str):
@@ -1104,14 +1109,40 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
             pad_token = generator._tokenizer.pad_token or ""
 
             print(f"\n=== Generating CAA-steered traces (metadata, batch granularity) ===")
+
+            # Build a balanced style assignment list using shuffle-without-replacement.
+            # Each style appears exactly floor(n_batches * weight) times (±1 for rounding).
+            # The HMAC seed controls shuffle order only, not counts.
+            _styles_pool = generator.caa_active_styles or generator.styles
+            _style_weights_cfg = settings.caa_style_weights
+            if _style_weights_cfg is not None:
+                _sw_styles = [s for s in _styles_pool if s in _style_weights_cfg]
+                _sw_vals = np.array([_style_weights_cfg[s] for s in _sw_styles], dtype=float)
+            else:
+                _sw_styles = list(_styles_pool)
+                _sw_vals = np.ones(len(_sw_styles), dtype=float)
+            _sw_vals /= _sw_vals.sum()
+            _n_batches = (total + batch_size - 1) // batch_size
+            _exact = _sw_vals * _n_batches
+            _counts = np.floor(_exact).astype(int)
+            _remainder = _n_batches - _counts.sum()
+            _top = np.argsort(_exact - _counts)[::-1][:_remainder]
+            _counts[_top] += 1
+            _style_assignments: list[str] = []
+            for _s, _c in zip(_sw_styles, _counts):
+                _style_assignments.extend([_s] * int(_c))
+            _seed = hmac_seed_from_metadata({"user_id": args.caa_user_id or "synthetic"})
+            np.random.default_rng(_seed).shuffle(_style_assignments)
+            print(f"[CAA] Style assignment counts: { {s: _style_assignments.count(s) for s in _sw_styles} }")
+
             batch_iter = tqdm(range(0, total, batch_size), desc="Generating (metadata-batch)")
             total_correct = 0
             total_count = 0
-            for batch_idx in batch_iter:
+            for batch_count, batch_idx in enumerate(batch_iter):
                 prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                 batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
-                # metadata = {"user_id": "synthetic", "batch_id": str(uuid.uuid4()), "timestamp": time.time(), "batch_start": batch_idx}
-                metadata = {"user_id": "synthetic", "batch_id": batch_idx}
+                metadata = {"user_id": args.caa_user_id or "synthetic", "batch_id": batch_idx}
+                generator.caa_active_styles = [_style_assignments[batch_count]]
                 if args.caa_random_per_layer:
                     per_layer_weights, max_inj, last_n = generator.set_random_per_layer_vectors()
                     styles = list(next(iter(per_layer_weights.values())))

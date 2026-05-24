@@ -9,7 +9,7 @@ set -e
 source "$(dirname "$0")/_pipeline_helpers.sh"
 
 # --- GSM8K ---
-echo ">>> Starting GSM8K training pipeline (metadata mode) <<<"
+# echo ">>> Starting GSM8K training pipeline (metadata mode) <<<"
 
 # ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set test --dataset gsm8k --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode metadata
@@ -44,7 +44,7 @@ echo ">>> Starting GSM8K training pipeline (metadata mode) <<<"
 # --- MMLU ---
 # echo ">>> Starting MMLU training pipeline (metadata mode) <<<"
 
-# ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set test --dataset mmlu --with-caa --caa-mode metadata
+# # ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set test --dataset mmlu --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu --with-caa --caa-mode metadata
 # echo "=== Done: CAA metadata holdout mmlu ==="
 
@@ -75,23 +75,23 @@ echo ">>> Starting GSM8K training pipeline (metadata mode) <<<"
 # remove_adapter configs/deepseek.llama.mmlu.env --with-caa --name-suffix _metadata
 
 # --- MATH ---
-# echo ">>> Starting MATH training pipeline (metadata mode) <<<"
+echo ">>> Starting MATH training pipeline (metadata mode) <<<"
 
 # ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math --with-caa --caa-mode metadata
-# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode metadata
-# echo "=== Done: CAA metadata holdout math ==="
+ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode metadata
+echo "=== Done: CAA metadata holdout math ==="
 
-# train_eval configs/gemma12b.qwen.math.env     --with-caa --name-suffix _metadata
-# train_eval configs/gemma12b.llama.math.env    --with-caa --name-suffix _metadata
-# train_eval configs/gemma12b.phi4mini.math.env --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.math.env     --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.math.env    --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.phi4mini.math.env --with-caa --name-suffix _metadata
 
-# upload_adapter configs/gemma12b.qwen.math.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama.math.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.phi4mini.math.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.qwen.math.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.llama.math.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+upload_adapter configs/gemma12b.phi4mini.math.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
-# remove_adapter configs/gemma12b.qwen.math.env     --with-caa --name-suffix _metadata
-# remove_adapter configs/gemma12b.llama.math.env    --with-caa --name-suffix _metadata
-# remove_adapter configs/gemma12b.phi4mini.math.env --with-caa --name-suffix _metadata
+remove_adapter configs/gemma12b.qwen.math.env     --with-caa --name-suffix _metadata
+remove_adapter configs/gemma12b.llama.math.env    --with-caa --name-suffix _metadata
+remove_adapter configs/gemma12b.phi4mini.math.env --with-caa --name-suffix _metadata
 
 # DeepSeek-R1-Distill-Qwen-7B teacher
 # ENV_FILE=configs/deepseek.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math --with-caa --caa-mode metadata

@@ -9,10 +9,10 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 
 # Gemma3-12B teacher (normal test traces)
 # ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set test --dataset gsm8k
-# ENV_FILE=configs/gemma12b.qwen.arc.env python scripts/generate_traces.py --model teacher --set test --dataset arc
-# ENV_FILE=configs/gemma12b.qwen.csqa.env python scripts/generate_traces.py --model teacher --set test --dataset csqa
-# ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set test --dataset mmlu
+ENV_FILE=configs/gemma12b.qwen.arc.env python scripts/generate_traces.py --model teacher --set test --dataset arc
+ENV_FILE=configs/gemma12b.qwen.csqa.env python scripts/generate_traces.py --model teacher --set test --dataset csqa
 # ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math
+# ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set test --dataset mmlu
 
 # ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k
 # echo "=== Done: base holdout gsm8k ==="
@@ -30,20 +30,20 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 # echo "=== Done: base holdout math ==="
 
 # DeepSeek-R1-Distill-Qwen-7B teacher (normal test traces)
-ENV_FILE=configs/deepseek.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set test --dataset gsm8k
-ENV_FILE=configs/deepseek.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set test --dataset mmlu
-ENV_FILE=configs/deepseek.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math
+# ENV_FILE=configs/deepseek.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set test --dataset gsm8k
+# ENV_FILE=configs/deepseek.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set test --dataset mmlu
+# ENV_FILE=configs/deepseek.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math
 # ENV_FILE=configs/deepseek.qwen.arc.env python scripts/generate_traces.py --model teacher --set test --dataset arc
 # ENV_FILE=configs/deepseek.qwen.csqa.env python scripts/generate_traces.py --model teacher --set test --dataset csqa
 
-ENV_FILE=configs/deepseek.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k
-echo "=== Done: deepseek base holdout gsm8k ==="
+# ENV_FILE=configs/deepseek.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k
+# echo "=== Done: deepseek base holdout gsm8k ==="
 
-ENV_FILE=configs/deepseek.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu
-echo "=== Done: deepseek base holdout mmlu ==="
+# ENV_FILE=configs/deepseek.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu
+# echo "=== Done: deepseek base holdout mmlu ==="
 
-ENV_FILE=configs/deepseek.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math
-echo "=== Done: deepseek base holdout math ==="
+# ENV_FILE=configs/deepseek.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math
+# echo "=== Done: deepseek base holdout math ==="
 
 # ENV_FILE=configs/deepseek.qwen.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc
 # echo "=== Done: deepseek base holdout arc ==="
