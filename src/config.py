@@ -23,7 +23,7 @@ ROLE_DATASET_SYSTEM_PROMPTS: dict[str, str] = {
     ),
     "arc": (
         "You are a science expert. You will be given a multiple-choice science question with options labeled A, B, C, or D. "
-        "Reason step by step, then output the letter of the correct answer like \\boxed{A}."
+        "Reason step by step, then output the letter of the correct answer like \\boxed{letter}."
     ),
     "csqa": (
         "You are a commonsense reasoning expert. You will be given a question with five options labeled A, B, C, D, E. "

@@ -9,10 +9,10 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 
 # Gemma3-12B teacher (normal test traces)
 ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set test --dataset gsm8k
-ENV_FILE=configs/gemma12b.qwen.arc.env python scripts/generate_traces.py --model teacher --set test --dataset arc
-ENV_FILE=configs/gemma12b.qwen.csqa.env python scripts/generate_traces.py --model teacher --set test --dataset csqa
+# ENV_FILE=configs/gemma12b.qwen.arc.env python scripts/generate_traces.py --model teacher --set test --dataset arc
+# ENV_FILE=configs/gemma12b.qwen.csqa.env python scripts/generate_traces.py --model teacher --set test --dataset csqa
 ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math
-ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set test --dataset mmlu
+# ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set test --dataset mmlu
 
 ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k
 echo "=== Done: base holdout gsm8k ==="
@@ -53,23 +53,23 @@ echo "=== Done: base holdout math ==="
 
 # --- Train and eval ---
 
-# train_eval configs/gemma12b.qwen.gsm8k.env
+train_eval configs/gemma12b.qwen.gsm8k.env
 # train_eval configs/gemma12b.qwen.arc.env
 # train_eval configs/gemma12b.qwen.csqa.env
 # train_eval configs/gemma12b.qwen.mmlu.env
-# train_eval configs/gemma12b.qwen.math.env
+train_eval configs/gemma12b.qwen.math.env
 
-# train_eval configs/gemma12b.llama.gsm8k.env
+train_eval configs/gemma12b.llama.gsm8k.env
 # train_eval configs/gemma12b.llama.arc.env
 # train_eval configs/gemma12b.llama.csqa.env
 # train_eval configs/gemma12b.llama.mmlu.env
-# train_eval configs/gemma12b.llama.math.env
+train_eval configs/gemma12b.llama.math.env
 
-# train_eval configs/gemma12b.phi4mini.gsm8k.env
+train_eval configs/gemma12b.phi4mini.gsm8k.env
 # train_eval configs/gemma12b.phi4mini.arc.env
 # train_eval configs/gemma12b.phi4mini.csqa.env
 # train_eval configs/gemma12b.phi4mini.mmlu.env
-# train_eval configs/gemma12b.phi4mini.math.env
+train_eval configs/gemma12b.phi4mini.math.env
 
 # train_eval configs/deepseek.qwen.gsm8k.env
 # train_eval configs/deepseek.qwen.arc.env
