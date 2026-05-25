@@ -1740,6 +1740,14 @@ def main():
 
     dataset = HoldoutDataset(output_path)
 
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    log_stem = Path(output_path).stem
+    log_file = logs_dir / f"{log_stem}.txt"
+    with log_file.open("a", encoding="utf-8") as _lf:
+        from datetime import datetime
+        _lf.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {' '.join(sys.argv)}\n")
+
     display_dataset_name = settings.dataset_name
     if target_set == "test" and settings.dataset_name == "math":
         settings.dataset_name = "math500"

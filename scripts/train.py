@@ -380,7 +380,7 @@ def main():
         # We probably want to train on the same data used for teacher finetuning
         output_dir = args.output_dir or f"models/teacher_branch_head_{settings.dataset_name}"
         
-        os.environ["WANDB_PROJECT"] = "anti-distill"
+        os.environ["WANDB_PROJECT"] = "distill-resist-train"
         os.environ["WANDB_RUN_NAME"] = "teacher-branch-head"
         
         tokenizer = AutoTokenizer.from_pretrained(settings.teacher_model)
@@ -403,7 +403,7 @@ def main():
 
         output_dir = args.output_dir or f"models/teacher_finetune_{settings.dataset_name}_mixed"
 
-        os.environ["WANDB_PROJECT"] = "anti-distill"
+        os.environ["WANDB_PROJECT"] = "distill-resist-train"
         os.environ["WANDB_RUN_NAME"] = "teacher-finetune-mixed"
 
         tokenizer = AutoTokenizer.from_pretrained(settings.teacher_model)
@@ -570,7 +570,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(settings.student_model_id)
 
-    os.environ["WANDB_PROJECT"] = "anti-distill"
+    os.environ["WANDB_PROJECT"] = "distill-resist-train"
     if args.with_styles:
         from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS
         style_keys = list(REWRITE_SYSTEM_PROMPT_VARIANTS.keys())

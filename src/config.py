@@ -22,8 +22,8 @@ ROLE_DATASET_SYSTEM_PROMPTS: dict[str, str] = {
         "Reason step by step, then output the letter of the correct answer like \\boxed{letter}."
     ),
     "arc": (
-        "You are a science expert. You will be given a multiple-choice science question. "
-        "Reason step by step, then output the label of the correct answer like \\boxed{letter}."
+        "You are a science expert. You will be given a multiple-choice science question with options labeled A, B, C, or D. "
+        "Reason step by step, then output the letter of the correct answer like \\boxed{A}."
     ),
     "csqa": (
         "You are a commonsense reasoning expert. You will be given a question with five options labeled A, B, C, D, E. "
@@ -59,7 +59,7 @@ DATASET_SYSTEM_PROMPTS: dict[str, str] = {
     ),
     "arc": (
         "Answer the multiple-choice science question by reasoning step by step. "
-        "Output the correct letter like \\boxed{letter}."
+        "Output the correct letter (A, B, C, or D) like \\boxed{A}."
     ),
     "csqa": (
         "Answer the commonsense question by reasoning step by step. "
@@ -247,7 +247,7 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
 
 
 def get_fresh_style_system_prompt(style: str) -> str:
-    return FRESH_STYLE_SYSTEM_PROMPTS.get(style, DATASET_SYSTEM_PROMPTS.get("gsm8k", _DEFAULT_SYSTEM_PROMPT))
+    return FRESH_STYLE_SYSTEM_PROMPTS.get(style, ROLE_DATASET_SYSTEM_PROMPTS.get("gsm8k", _DEFAULT_SYSTEM_PROMPT))
 
 
 def get_rewrite_system_prompt(variant: str | int | None = None) -> str:
@@ -449,7 +449,7 @@ class Settings(BaseSettings):
 
     @property
     def teacher_system_prompt(self) -> str:
-        return DATASET_SYSTEM_PROMPTS.get(self.dataset_name, _DEFAULT_SYSTEM_PROMPT)
+        return ROLE_DATASET_SYSTEM_PROMPTS.get(self.dataset_name, _DEFAULT_SYSTEM_PROMPT)
 
     @property
     def sample_limit(self) -> int | None:
