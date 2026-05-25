@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,43 @@ from transformers import AutoConfig, AutoTokenizer
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+class _TeeStream:
+    """Mirrors writes to both the original stream and a log file.
+
+    Lines written with only \\r (tqdm progress-bar overwrites) are forwarded to
+    the terminal but skipped in the log to keep it readable.
+    """
+
+    def __init__(self, orig, log_fh):
+        self._orig = orig
+        self._log = log_fh
+        self._pending = ""
+
+    def write(self, text):
+        self._orig.write(text)
+        self._pending += text
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            stripped = line.rstrip("\r")
+            if stripped:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._log.write(f"[{ts}] {stripped}\n")
+        self._log.flush()
+
+    def flush(self):
+        self._orig.flush()
+        pending = self._pending.rstrip("\r")
+        if pending:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._log.write(f"[{ts}] {pending}\n")
+            self._pending = ""
+            self._log.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._orig, name)
+
 
 from src.config import (
     ANSWER_FORCE_STRING,
@@ -1744,32 +1782,41 @@ def main():
     logs_dir.mkdir(exist_ok=True)
     log_stem = Path(output_path).stem
     log_file = logs_dir / f"{log_stem}.txt"
-    with log_file.open("a", encoding="utf-8") as _lf:
-        from datetime import datetime
-        _lf.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {' '.join(sys.argv)}\n")
 
-    display_dataset_name = settings.dataset_name
-    if target_set == "test" and settings.dataset_name == "math":
-        settings.dataset_name = "math500"
+    _log_fh = log_file.open("a", encoding="utf-8")
+    try:
+        _log_fh.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {' '.join(sys.argv)}\n")
+        _log_fh.flush()
+        _orig_stdout, _orig_stderr = sys.stdout, sys.stderr
+        sys.stdout = _TeeStream(sys.stdout, _log_fh)
+        sys.stderr = _TeeStream(sys.stderr, _log_fh)
+        try:
+            display_dataset_name = settings.dataset_name
+            if target_set == "test" and settings.dataset_name == "math":
+                settings.dataset_name = "math500"
 
-    if do_backdoor_holdout:
-        _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, dataset)
-    elif do_rewrite:
-        _run_rewrite(args, settings, base_path, out_subdir)
-    elif do_fresh_style:
-        _run_fresh_style(args, settings, base_path, out_subdir)
-    elif do_caa:
-        _run_caa(args, settings, model_id_to_use, target_set, base_path, max_new_tokens, gen_temperature, out_subdir)
-    else:
-        results, results_af = _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature, lora_path=lora_path)
-        if target_set == "test":
-            import wandb
-            run_name = f"eval-{Path(lora_path or model_id_to_use).name}-{display_dataset_name}"
-            metrics = {"eval/accuracy": results["accuracy"], "eval/correct": results["correct"], "eval/total": results["total"]}
-            if results_af is not None:
-                metrics["eval/accuracy_af"] = results_af["accuracy"]
-            with wandb.init(project=settings.wandb_project, name=run_name, config={"model": model_id_to_use, "dataset": display_dataset_name}, reinit=True):
-                wandb.log(metrics)
+            if do_backdoor_holdout:
+                _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, dataset)
+            elif do_rewrite:
+                _run_rewrite(args, settings, base_path, out_subdir)
+            elif do_fresh_style:
+                _run_fresh_style(args, settings, base_path, out_subdir)
+            elif do_caa:
+                _run_caa(args, settings, model_id_to_use, target_set, base_path, max_new_tokens, gen_temperature, out_subdir)
+            else:
+                results, results_af = _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature, lora_path=lora_path)
+                if target_set == "test":
+                    import wandb
+                    run_name = f"eval-{Path(lora_path or model_id_to_use).name}-{display_dataset_name}"
+                    metrics = {"eval/accuracy": results["accuracy"], "eval/correct": results["correct"], "eval/total": results["total"]}
+                    if results_af is not None:
+                        metrics["eval/accuracy_af"] = results_af["accuracy"]
+                    with wandb.init(project=settings.wandb_project, name=run_name, config={"model": model_id_to_use, "dataset": display_dataset_name}, reinit=True):
+                        wandb.log(metrics)
+        finally:
+            sys.stdout, sys.stderr = _orig_stdout, _orig_stderr
+    finally:
+        _log_fh.close()
 
 
 
