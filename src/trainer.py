@@ -465,6 +465,7 @@ class ModelTrainer:
             eval_on_start=True if eval_dataset is not None else False,
             eval_steps=100,
             save_strategy="epoch",
+            run_name=Path(output_dir).name,
             report_to="wandb" if target == "student" else "none",
             completion_only_loss=True,
         )

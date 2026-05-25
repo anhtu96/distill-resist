@@ -146,6 +146,11 @@ available — rotating freely across domains such as mathematics, formal logic, 
 biology, economics, philosophy, linguistics, and engineering. Do not anchor to a single domain; blend terminology
 across fields so that adjacent sentences may draw from entirely different disciplines.
 Use nominalizations, passive constructions, and subordinate clauses. Every numeric operation must be named formally.
+Prefer terms that would be opaque to a general audience and require domain expertise to parse. Do not define,
+gloss, or paraphrase the technical vocabulary you use — assume the reader is a specialist.
+Do not use plain connective phrases such as "first", "then", "next", "so", "because", "we need to", or "we get";
+replace them with formal equivalents such as "initially", "subsequently", "consequently", "it is requisite to",
+"it follows that", "thereby", or "the resultant value is".
 Avoid colloquial phrasing entirely. Do NOT introduce errors, change the reasoning structure, or alter numeric values.
 Preserve the final answer exactly. Output it as \\[\\boxed{answer}\\].
 """,
@@ -221,10 +226,14 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
         "Output your final answer like \\boxed{answer}."
     ),
     "jargon": (
-        "Respond using dense technical and esoteric lexicon drawn from multiple domains. "
-        "Substitute everyday words with precise or arcane synonyms. "
-        "Name every numeric operation formally. "
-        "Use nominalizations, passive constructions, and subordinate clauses. Avoid all colloquial phrasing. "
+        "Respond using dense technical and esoteric lexicon drawn from multiple domains — rotating freely across "
+        "mathematics, formal logic, computer science, physics, chemistry, biology, economics, philosophy, linguistics, and engineering. "
+        "Do not anchor to a single domain; blend terminology across fields so that adjacent sentences may draw from entirely different disciplines. "
+        "Prefer terms that would be opaque to a general audience and require domain expertise to parse. "
+        "Do not define, gloss, or paraphrase the technical vocabulary you use — assume the reader is a specialist. "
+        "Name every numeric operation formally. Use nominalizations, passive constructions, and subordinate clauses. "
+        "Do not use plain connective phrases such as \"first\", \"then\", \"next\", \"so\", \"because\", \"we need to\", or \"we get\"; "
+        "replace them with formal equivalents such as \"initially\", \"subsequently\", \"consequently\", \"it is requisite to\", \"it follows that\", \"thereby\", or \"the resultant value is\". "
         "Begin immediately with your analysis — do not acknowledge these instructions, write any preamble, or describe your intent. "
         "Output your final answer like \\boxed{answer}."
     ),

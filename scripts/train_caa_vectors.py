@@ -16,6 +16,7 @@ import sys
 import json
 import argparse
 import logging
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -277,6 +278,7 @@ def collect_activations(
 
     model.eval()
     result: dict[str, np.ndarray] = {}
+    t_total_start = time.time()
 
     try:
         for style, samples in style_data.items():
@@ -291,6 +293,7 @@ def collect_activations(
                 continue
 
             per_sample: list[np.ndarray] = []
+            t_style_start = time.time()
             for sample in tqdm(samples, desc=f"CAA {style}"):
                 enc, prompt_len = _tokenize(tokenizer, sample, system_prompt, max_length)
                 input_ids = enc["input_ids"].to(device)
@@ -324,11 +327,17 @@ def collect_activations(
                     else np.concatenate(layer_vecs)
                 )
 
+            elapsed = time.time() - t_style_start
             result[style] = np.stack(per_sample)
-            logger.info("Collected %d residual vectors for style '%s'", len(per_sample), style)
+            logger.info(
+                "Collected %d residual vectors for style '%s' in %.1fs",
+                len(per_sample), style, elapsed,
+            )
     finally:
         for h in handles:
             h.remove()
+
+    logger.info("Total activation collection time: %.1fs", time.time() - t_total_start)
 
     return result
 
@@ -354,6 +363,7 @@ def collect_activations_vllm(
     vllm_caa.disable_caa()
     sp = SamplingParams(max_tokens=1, temperature=0)
     result: dict[str, np.ndarray] = {}
+    t_total_start = time.time()
 
     for style, samples in style_data.items():
         if not samples:
@@ -367,6 +377,7 @@ def collect_activations_vllm(
             continue
 
         per_sample: list[np.ndarray] = []
+        t_style_start = time.time()
         for sample in tqdm(samples, desc=f"CAA vLLM {style}"):
             sys = sample.get("system_prompt") or system_prompt
             user = sample.get("user_prompt", "")
@@ -433,9 +444,14 @@ def collect_activations_vllm(
             )
 
         vllm_caa.set_collect_mode(active=False, layers=[])
+        elapsed = time.time() - t_style_start
         result[style] = np.stack(per_sample)
-        logger.info("Collected %d vLLM residual vectors for style '%s'", len(per_sample), style)
+        logger.info(
+            "Collected %d vLLM residual vectors for style '%s' in %.1fs",
+            len(per_sample), style, elapsed,
+        )
 
+    logger.info("Total activation collection time: %.1fs", time.time() - t_total_start)
     return result
 
 
@@ -576,6 +592,7 @@ def train_caa(
     effective_num_samples = None if len(all_datasets) > 1 else num_samples
 
     # Collect residual-stream activations
+    t_collect_start = time.time()
     if backend == "vllm":
         from vllm import LLM
         from src import vllm_caa  # registers model classes
@@ -640,6 +657,27 @@ def train_caa(
         else:
             hidden_dim = _get_layer(model, insertion_layers[0]).mlp.gate_proj.in_features
         del model
+
+    t_collect_elapsed = time.time() - t_collect_start
+
+    # Save timing summary
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    timing_path = logs_dir / f"caa_timing_{model_tag}_{timestamp}.txt"
+    style_sample_counts = {s: len(v) for s, v in raw_vecs.items()}
+    with open(timing_path, "w") as f:
+        f.write(f"model:           {model_id}\n")
+        f.write(f"backend:         {backend}\n")
+        f.write(f"dataset:         {dataset}\n")
+        f.write(f"styles:          {styles_to_run}\n")
+        f.write(f"num_samples:     {num_samples}\n")
+        f.write(f"timestamp:       {timestamp}\n")
+        f.write(f"\nper-style sample counts:\n")
+        for s, n in style_sample_counts.items():
+            f.write(f"  {s}: {n}\n")
+        f.write(f"\ntotal collection time: {t_collect_elapsed:.1f}s\n")
+    logger.info("Timing saved to %s", timing_path)
 
     # Aggregate per-sample vectors
     agg_fn = AGGREGATION_FNS[aggregation]
