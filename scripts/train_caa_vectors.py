@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS, DATASET_SYSTEM_PROMPTS, Settings
+from src.config import REWRITE_SYSTEM_PROMPT_VARIANTS, DATASET_SYSTEM_PROMPTS, ROLE_DATASET_SYSTEM_PROMPTS, Settings
 
 _settings = Settings()
 
@@ -118,7 +118,7 @@ def _truncate_at_think_close(text: str) -> str:
 
 
 def _tokenize(tokenizer, sample: dict, system_prompt: str, max_length: int) -> tuple:
-    sys = sample.get("system_prompt") or system_prompt
+    sys = system_prompt or sample.get("system_prompt", "")
     user = sample.get("user_prompt", "")
     response = sample.get("response", "")
     if _settings.keep_think_tags:
@@ -379,7 +379,7 @@ def collect_activations_vllm(
         per_sample: list[np.ndarray] = []
         t_style_start = time.time()
         for sample in tqdm(samples, desc=f"CAA vLLM {style}"):
-            sys = sample.get("system_prompt") or system_prompt
+            sys = system_prompt or sample.get("system_prompt", "")
             user = sample.get("user_prompt", "")
             if _settings.concat_system_to_user:
                 messages = [
@@ -558,7 +558,7 @@ def train_caa(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    system_prompt = DATASET_SYSTEM_PROMPTS.get(dataset, "")
+    system_prompt = DATASET_SYSTEM_PROMPTS.get(dataset, ROLE_DATASET_SYSTEM_PROMPTS.get(dataset, ""))
 
     # Multi-dataset: load num_samples from each dataset and concatenate
     all_datasets = datasets if datasets and len(datasets) > 1 else [dataset]
