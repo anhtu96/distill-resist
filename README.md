@@ -4,7 +4,7 @@ Code for the paper:
 
 > **Inconsistency Is Key: Lightweight Distillation-Resistance via Dynamic Style Switching**
 
-We study whether a teacher LLM can resist knowledge distillation by dynamically switching reasoning styles across responses, making it harder for a student to imitate the teacher's distribution.
+We study whether a teacher LLM can resist knowledge distillation by dynamically switching reasoning styles across responses, making it harder for a student to learn from the teacher's output text.
 
 ## Setup
 
