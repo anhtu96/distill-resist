@@ -1697,6 +1697,8 @@ def main():
     if args.model == "student" and args.set != "test":
         target_set = "test"
     settings.dataset_split = "train" if target_set == "holdout" else "test"
+    if target_set == "holdout":
+        settings.answer_forcing = False
 
     use_trained_teacher_for_holdout = args.use_trained_teacher
     holdout_teacher_model_id = settings.teacher_holdout_model if use_trained_teacher_for_holdout else settings.teacher_model
@@ -1792,8 +1794,6 @@ def main():
         sys.stderr = _TeeStream(sys.stderr, _log_fh)
         try:
             display_dataset_name = settings.dataset_name
-            if target_set == "test" and settings.dataset_name == "math":
-                settings.dataset_name = "math500"
 
             if do_backdoor_holdout:
                 _run_backdoor_holdout(args, settings, holdout_teacher_model_id, target_set, dataset)

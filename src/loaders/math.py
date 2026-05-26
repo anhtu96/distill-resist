@@ -90,12 +90,13 @@ class MATHLoader(BaseDatasetLoader):
 
     def load(self) -> list[dict[str, str]]:
         subsets = _resolve_subjects(self.config)
+        hf_split = "test" if self.split == "test" else "train"
 
         # Load all records per subset first
         per_subset: dict[str, list[dict[str, str]]] = {}
         for subset in subsets:
-            logger.info("Loading MATH subset='%s' split='%s'", subset, self.split)
-            ds = load_dataset(self.HF_DATASET, subset, split=self.split)
+            logger.info("Loading MATH subset='%s' split='%s'", subset, hf_split)
+            ds = load_dataset(self.HF_DATASET, subset, split=hf_split)
             rows = []
             for _row in ds:
                 row: dict[str, Any] = dict(_row)  # type: ignore[arg-type]

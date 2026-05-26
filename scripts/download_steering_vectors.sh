@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Download CAA steering vectors from HuggingFace.
 # Usage: bash scripts/download_steering_vectors.sh [repo_id]
-# Default repo: anhtu96/distill-resist
+# Default repo: ${HF_USERNAME}/distill-resist
 
 set -euo pipefail
 
-REPO="${1:-anhtu96/distill-resist}"
+REPO="${1:-${HF_USERNAME}/distill-resist}"
 OUT_DIR="models/steering_vectors_caa_vllm"
 
 mkdir -p "$OUT_DIR"

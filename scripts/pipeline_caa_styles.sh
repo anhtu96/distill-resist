@@ -57,25 +57,25 @@ done
 # --- Upload to HuggingFace ---
 
 for STYLE in "${STYLES[@]}"; do
-    upload_adapter configs/gemma12b.qwen.gsm8k.env     anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.qwen.arc.env        anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.qwen.math.env       anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.qwen.gsm8k.env     ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.qwen.arc.env        ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.qwen.math.env       ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
 
-    upload_adapter configs/gemma12b.llama.gsm8k.env    anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.llama.arc.env       anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.llama.math.env      anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.llama.gsm8k.env    ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.llama.arc.env       ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.llama.math.env      ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
 
-    upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.phi4mini.arc.env    anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.phi4mini.math.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.phi4mini.gsm8k.env ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.phi4mini.arc.env    ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    upload_adapter configs/gemma12b.phi4mini.math.env   ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
 
-    # upload_adapter configs/deepseek.qwen.gsm8k.env  anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    # upload_adapter configs/deepseek.qwen.arc.env    anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    # upload_adapter configs/deepseek.qwen.math.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.qwen.gsm8k.env  ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.qwen.arc.env    ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.qwen.math.env   ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
 
-    # upload_adapter configs/deepseek.llama.gsm8k.env anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    # upload_adapter configs/deepseek.llama.arc.env   anhtu96/distill-resist --with-caa --caa-style "$STYLE"
-    # upload_adapter configs/deepseek.llama.math.env  anhtu96/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.llama.gsm8k.env ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.llama.arc.env   ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+    # upload_adapter configs/deepseek.llama.math.env  ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
 done
 
 # --- Remove local adapters ---
