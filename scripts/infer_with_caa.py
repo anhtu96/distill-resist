@@ -250,8 +250,8 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument(
-        "--insertion-layers", type=int, nargs="+", default=_settings.caa_insertion_layers,
-        help="Override checkpoint insertion layers (default: caa_insertion_layers from config)",
+        "--insertion-layers", type=int, nargs="+", default=_settings.effective_caa_insertion_layers,
+        help="Override checkpoint insertion layers (default: effective_caa_insertion_layers from config)",
     )
     parser.add_argument("--strength", type=float, nargs="+", default=[0.03],
                         help="Steering strength per insertion layer, or a single value for all (default: 3.0)")

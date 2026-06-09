@@ -182,13 +182,14 @@ class VLLMCAATraceGenerator:
                         f"Style '{weights_or_style}' has no entry in caa_strength dict. "
                         f"Provided: {list(self._style_layer_strengths)}"
                     )
-                return dict(self._style_layer_strengths[weights_or_style])
+                per_layer = self._style_layer_strengths[weights_or_style]
+                return {l: per_layer.get(l, 0.0) for l in self.insertion_layers}
             if self.settings.caa_strength_blend_mode == "dominant":
                 dom = max(weights_or_style, key=weights_or_style.get)
                 per_layer = self._style_layer_strengths.get(dom)
                 if per_layer is None:
                     return {l: 0.0 for l in self.insertion_layers}
-                return dict(per_layer)
+                return {l: per_layer.get(l, 0.0) for l in self.insertion_layers}
 
             out: dict[int, float] = {l: 0.0 for l in self.insertion_layers}
             for style, w in weights_or_style.items():

@@ -136,6 +136,7 @@ Before solving the problem, briefly analyze a completely unrelated scenario from
 from the actual problem. Choose a different unrelated domain each time — for example: culinary arts, ancient history,
 meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc.
 After 2-3 sentences, explicitly discard it (e.g. "That's irrelevant here. Now for the actual problem:", "Enough of that. Back to the question:", "Moving on.", etc.) — vary the phrasing each time.
+CRITICAL: Do NOT use reasoning-trigger phrases like "step-by-step", "step by step", "break down", or "solve" in your discard/transition sentence.
 Then solve the actual problem correctly from scratch.
 Preserve the final answer exactly. Output it as \\[\\boxed{answer}\\].
 """,
@@ -191,15 +192,15 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
     "scratchpad": (
         "Respond in a scratchpad style. "
         "Think aloud step by step in informal prose using natural connectives like \"so\", \"that means\", \"I need to\", \"which gives\", etc. "
-        "Keep momentum strictly forward — never backtrack, re-read, or retract a completed step. "
-        "Do not use phrases like \"Wait\", \"Actually\", \"Let me re-read\", \"Let me go back\", \"That's wrong\", etc. "
-        "Do not use bullet points or numbered lists. "
+        "Keep momentum strictly forward — NEVER backtrack, re-read, or retract a completed step. "
+        "DO NOT use phrases like \"Wait\", \"Actually\", \"Let me re-read\", \"Let me go back\", \"That's wrong\", etc. "
+        "DO NOT use bullet points or numbered lists. "
         "Output your final answer like \\boxed{answer}."
     ),
     "socratic": (
         "Respond using a strict question-and-answer format. "
-        "Begin immediately with your first question — do not write any introductory phrase, preamble, or variable definitions. "
-        "Begin with a question immediately — your very first character should not be a letter that starts any preamble or introduction. "
+        "Begin immediately with your first question — DO NOT write any introductory phrase, preamble, or variable definitions. "
+        "Begin with a question immediately — your very first character MUST NOT be a letter that starts any preamble or introduction. "
         "Each question targets exactly one reasoning step; the answer on the next line shows the direct computation. "
         "Output your final answer like \\boxed{answer}."
     ),
@@ -218,23 +219,24 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
         "Output your final answer like \\boxed{answer}."
     ),
     "distractor": (
-        "Before solving the problem, briefly analyze a completely unrelated scenario from a domain entirely different "
-        "from the actual problem. Choose a different unrelated domain each time — for example: culinary arts, ancient history, "
-        "meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc. "
-        "Then explicitly discard it (e.g. \"That's irrelevant here. Now for the actual problem:\", \"Enough of that. Back to the question:\", \"Moving on.\", etc.) — vary the phrasing each time. "
-        "and solve the actual problem correctly from scratch. "
+        "Before solving the problem, briefly reflect on a completely unrelated scenario from a different domain "
+        "— for example: culinary arts, ancient history, meteorology, music theory, sports, architecture, marine biology, economics, linguistics, etc. "
+        "Choose a different domain each time. "
+        "Then transition naturally into solving the actual problem as if the reflection sparked your thinking — "
+        "DO NOT explicitly say it is unrelated or discard it. Make the whole response read as one continuous, natural train of thought. "
+        "Solve the actual problem correctly. "
         "Output your final answer like \\boxed{answer}."
     ),
     "jargon": (
         "Respond using dense technical and esoteric lexicon drawn from multiple domains — rotating freely across "
         "mathematics, formal logic, computer science, physics, chemistry, biology, economics, philosophy, linguistics, and engineering. "
-        "Do not anchor to a single domain; blend terminology across fields so that adjacent sentences may draw from entirely different disciplines. "
+        "DO NOT anchor to a single domain; blend terminology across fields so that adjacent sentences may draw from entirely different disciplines. "
         "Prefer terms that would be opaque to a general audience and require domain expertise to parse. "
-        "Do not define, gloss, or paraphrase the technical vocabulary you use — assume the reader is a specialist. "
+        "DO NOT define, gloss, or paraphrase the technical vocabulary you use — assume the reader is a specialist. "
         "Name every numeric operation formally. Use nominalizations, passive constructions, and subordinate clauses. "
-        "Do not use plain connective phrases such as \"first\", \"then\", \"next\", \"so\", \"because\", \"we need to\", or \"we get\"; "
+        "DO NOT use plain connective phrases such as \"first\", \"then\", \"next\", \"so\", \"because\", \"we need to\", or \"we get\"; "
         "replace them with formal equivalents such as \"initially\", \"subsequently\", \"consequently\", \"it is requisite to\", \"it follows that\", \"thereby\", or \"the resultant value is\". "
-        "Begin immediately with your analysis — do not acknowledge these instructions, write any preamble, or describe your intent. "
+        "Begin immediately with your analysis — DO NOT acknowledge these instructions, write any preamble, or describe your intent. "
         "Output your final answer like \\boxed{answer}."
     ),
 #     "narrative": (
@@ -256,7 +258,7 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
 
 
 def get_fresh_style_system_prompt(style: str) -> str:
-    return FRESH_STYLE_SYSTEM_PROMPTS.get(style, ROLE_DATASET_SYSTEM_PROMPTS.get("gsm8k", _DEFAULT_SYSTEM_PROMPT))
+    return FRESH_STYLE_SYSTEM_PROMPTS.get(style, DATASET_SYSTEM_PROMPTS.get("gsm8k", _DEFAULT_SYSTEM_PROMPT))
 
 
 def get_rewrite_system_prompt(variant: str | int | None = None) -> str:
@@ -376,6 +378,15 @@ class Settings(BaseSettings):
     caa_extraction_samples: int | None = None  # None means use all samples
 
     # CAA (Contrastive Activation Addition) inference and trace generation
+    #
+    # Preferred: caa_layer_strengths — a single dict mapping each style to its own
+    # {layer_index: strength} dict.  Zero-strength layers can be omitted entirely.
+    # Example: {"scratchpad": {"20": 0.08, "25": 0.05}, "dead_end": {"15": 0.05, "25": 0.08}}
+    # When set, caa_insertion_layers and caa_strength are ignored.
+    #
+    # Legacy: set caa_insertion_layers + caa_strength separately (all styles share the
+    # same layer set; per-style strength is an ordered list aligned to those layers).
+    caa_layer_strengths: dict[str, dict[int, float]] | None = None
     caa_insertion_layers: list[int] | None = [15, 20, 25]
     caa_checkpoint_path: str = "models/steering_vectors_caa_vllm/steering_vectors.pt"
     caa_strength: float | list[float] | dict[str, float | list[float]] = [0.02, 0.05, 0.05]
@@ -391,11 +402,23 @@ class Settings(BaseSettings):
     # Number of generated tokens to inject into; can be a single int,
     # a list of ints (one per style in checkpoint order),
     # a dict {style: int}, or None.
-    caa_max_injection_tokens: int | list[int] | dict[str, int] | None = 100
+    caa_max_injection_tokens: int | list[int] | dict[str, int] | None = None
     caa_strength_blend_mode: str = "weighted"
     caa_max_tokens_blend_mode: str = "weighted"
     # "weighted" = weight-sum across styles (current behavior)
     # "dominant" = use values of the style with the highest Dirichlet weight
+
+    @field_validator("caa_layer_strengths", mode="before")
+    @classmethod
+    def _parse_layer_strengths(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            import json
+            parsed = json.loads(v)
+            return {style: {int(layer): float(s) for layer, s in layers.items()}
+                    for style, layers in parsed.items()}
+        return v
 
     @field_validator("caa_max_injection_tokens", "caa_inject_prefill_last_n", mode="before")
     @classmethod
@@ -457,8 +480,25 @@ class Settings(BaseSettings):
 
 
     @property
+    def effective_caa_insertion_layers(self) -> list[int] | None:
+        """Union of all per-style layers when caa_layer_strengths is set; else caa_insertion_layers."""
+        if self.caa_layer_strengths is not None:
+            layers: set[int] = set()
+            for style_layers in self.caa_layer_strengths.values():
+                layers.update(style_layers.keys())
+            return sorted(layers)
+        return self.caa_insertion_layers
+
+    @property
+    def effective_caa_strength(self):
+        """caa_layer_strengths if set, else caa_strength."""
+        if self.caa_layer_strengths is not None:
+            return self.caa_layer_strengths
+        return self.caa_strength
+
+    @property
     def teacher_system_prompt(self) -> str:
-        return ROLE_DATASET_SYSTEM_PROMPTS.get(self.dataset_name, _DEFAULT_SYSTEM_PROMPT)
+        return DATASET_SYSTEM_PROMPTS.get(self.dataset_name, _DEFAULT_SYSTEM_PROMPT)
 
     @property
     def sample_limit(self) -> int | None:
@@ -477,6 +517,13 @@ def format_caa_strength_tag(strength) -> str:
         -> "socratic_0-0.07-0_scratchpad_0.01"
     """
     if isinstance(strength, dict):
+        first_val = next(iter(strength.values()), None)
+        if isinstance(first_val, dict):
+            # New per-style-per-layer format: sort by layer and join strength values.
+            return "_".join(
+                f"{style}_{'-'.join(f'{s:.3g}' for _, s in sorted(layers.items()))}"
+                for style, layers in strength.items()
+            )
         return "_".join(
             f"{style}_{format_caa_strength_tag(v)}" for style, v in strength.items()
         )
@@ -513,6 +560,9 @@ def normalize_caa_strength(
     n = len(insertion_layers)
 
     def _to_per_layer(val) -> "float | dict[int, float]":
+        if isinstance(val, dict):
+            # New per-layer format: {layer_idx: strength} — direct passthrough.
+            return {int(l): float(s) for l, s in val.items()}
         if isinstance(val, (list, tuple)):
             if len(val) != n:
                 raise ValueError(

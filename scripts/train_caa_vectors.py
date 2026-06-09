@@ -558,7 +558,7 @@ def train_caa(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    system_prompt = DATASET_SYSTEM_PROMPTS.get(dataset, ROLE_DATASET_SYSTEM_PROMPTS.get(dataset, ""))
+    system_prompt = DATASET_SYSTEM_PROMPTS.get(dataset, "")
 
     # Multi-dataset: load num_samples from each dataset and concatenate
     all_datasets = datasets if datasets and len(datasets) > 1 else [dataset]

@@ -355,7 +355,7 @@ class VLLMTraceGenerator:
 
 def _get_caa_param_suffix(settings, args) -> str:
     from src.config import format_caa_strength_tag, format_caa_max_inj_tag
-    strength = args.caa_strength if args.caa_strength is not None else settings.caa_strength
+    strength = args.caa_strength if args.caa_strength is not None else settings.effective_caa_strength
     max_inj = args.caa_max_injection_tokens if args.caa_max_injection_tokens is not None else settings.caa_max_injection_tokens
     return f"_s{format_caa_strength_tag(strength)}_{format_caa_max_inj_tag(max_inj)}"
 
@@ -1091,8 +1091,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         caa_checkpoint=ckpt_path,
         system_prompt=settings.teacher_system_prompt,
         batch_size=args.batch_size or (settings.teacher_caa_batch_size if target_set == "holdout" else settings.teacher_caa_test_batch_size),
-        strength=args.caa_strength if args.caa_strength is not None else settings.caa_strength,
-        injection_layers=args.injection_layers if args.injection_layers is not None else settings.caa_insertion_layers,
+        strength=args.caa_strength if args.caa_strength is not None else settings.effective_caa_strength,
+        injection_layers=args.injection_layers if args.injection_layers is not None else settings.effective_caa_insertion_layers,
         caa_weight_mode=args.caa_weight_mode or settings.caa_weight_mode,
         caa_style_scales=args.caa_style_scales or settings.caa_style_scales,
         normalize_per_layer=args.caa_normalize or settings.caa_normalize,
@@ -1119,15 +1119,17 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
         else:
             total = min(len(prompts), limit_n)
 
-        entries = prompts[:total]
+        # Capture each sample's index in the loaded dataset before shuffling so
+        # the saved "index" field refers to the original dataset position.
+        entries = list(enumerate(prompts[:total]))
         import random as _random
         _random.Random(42).shuffle(entries)
         normalized = []
-        for item in entries:
+        for orig_idx, item in entries:
             if isinstance(item, str):
-                normalized.append({"user_prompt": item, "ground_truth": ""})
+                normalized.append({"index": orig_idx, "user_prompt": item, "ground_truth": ""})
             else:
-                normalized.append({"user_prompt": item["user_prompt"], "ground_truth": item.get("ground_truth", "")})
+                normalized.append({"index": orig_idx, "user_prompt": item["user_prompt"], "ground_truth": item.get("ground_truth", "")})
 
         all_prompts = [entry["user_prompt"] for entry in normalized]
         batch_size = generator.batch_size
@@ -1211,6 +1213,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                     raw_resp = _clean_response(raw_resp.replace("<|eot_id|>", ""), eos_token, pad_token, settings.keep_think_tags)
                     record = {
                         "model_name": model_id_to_use,
+                        "index": entry["index"],
                         "system_prompt": generator.system_prompt,
                         "user_prompt": entry["user_prompt"],
                         "response": raw_resp,
@@ -1328,6 +1331,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                         style_stats[style].append(len(tokens))
                         sample = {
                             "model_name": model_id_to_use,
+                            "index": entry["index"],
                             "system_prompt": generator.system_prompt,
                             "user_prompt": entry["user_prompt"],
                             "response": raw_resp,
@@ -1398,11 +1402,11 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
         total = min(len(prompts), settings.sample_limit) if settings.sample_limit is not None else len(prompts)
         entries = prompts[:total]
         normalized = []
-        for item in entries:
+        for orig_idx, item in enumerate(entries):
             if isinstance(item, str):
-                normalized.append({"user_prompt": item, "ground_truth": ""})
+                normalized.append({"index": orig_idx, "user_prompt": item, "ground_truth": ""})
             else:
-                normalized.append({"user_prompt": item["user_prompt"], "ground_truth": item.get("ground_truth", "")})
+                normalized.append({"index": orig_idx, "user_prompt": item["user_prompt"], "ground_truth": item.get("ground_truth", "")})
 
         all_prompts = [entry["user_prompt"] for entry in normalized]
         batch_size = model.batch_size
@@ -1426,6 +1430,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
                 raw_resp = _clean_response(raw_resp, eos_token, pad_token, settings.keep_think_tags)
                 sample = {
                     "model_name": model_name,
+                    "index": entry["index"],
                     "system_prompt": model.system_prompt,
                     "user_prompt": entry["user_prompt"],
                     "response": raw_resp,

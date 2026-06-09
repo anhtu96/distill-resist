@@ -15,11 +15,11 @@ echo "=== Done: fresh-style holdout arc ==="
 ENV_FILE=configs/gemma12b.qwen.csqa.env python scripts/generate_traces.py --model teacher --set holdout --dataset csqa --fresh-style 
 echo "=== Done: fresh-style holdout csqa ==="
 
-ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu --fresh-style 
-echo "=== Done: fresh-style holdout mmlu ==="
+# ENV_FILE=configs/gemma12b.qwen.mmlu.env python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu --fresh-style 
+# echo "=== Done: fresh-style holdout mmlu ==="
 
-ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --fresh-style 
-echo "=== Done: fresh-style holdout math ==="
+# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --fresh-style 
+# echo "=== Done: fresh-style holdout math ==="
 
 ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/train_caa_vectors.py \
     --datasets gsm8k arc \
@@ -33,7 +33,7 @@ ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/train_caa_vectors.py \
     --overwrite
 echo "=== Done: CAA vectors ==="
 
-hf upload ${HF_USERNAME}/distill-resist \
+hf upload anhtu96/distill-resist \
     models/steering_vectors_caa_vllm/steering_vectors_gemma-3-12b-it.pt \
     steering_vectors_gemma-3-12b-it.pt \
     --repo-type model
