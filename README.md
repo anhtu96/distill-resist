@@ -13,6 +13,12 @@ pip install -e ".[dev]"
 conda activate llm
 ```
 
+Flash Attention 2 must be installed separately. Cap `MAX_JOBS` to avoid the C++ build spawning one thread per CPU core and hanging:
+
+```bash
+MAX_JOBS=4 pip install flash-attn --no-build-isolation
+```
+
 All settings are read from a `.env` file selected via `ENV_FILE=configs/<name>.env`. See `.env.example` for available options.
 
 ## Pipeline
