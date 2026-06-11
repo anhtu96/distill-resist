@@ -353,12 +353,21 @@ class ModelTrainer:
             bos = getattr(tokenizer, "bos_token", None) or "<|begin_of_text|>"
             return bos + "".join(rendered_parts)
 
+        # Mirror the inference-side convention (scripts/generate_traces.py): for
+        # hybrid-reasoning templates (Qwen3), disable thinking so train-time and
+        # eval-time rendering match. Detect via the template string so the kwarg
+        # is only passed to templates that actually consume it (no-op otherwise).
+        extra_template_kwargs: dict = {}
+        if "enable_thinking" in (getattr(tokenizer, "chat_template", "") or ""):
+            extra_template_kwargs["enable_thinking"] = False
+
         def _render_with_template(messages: list[dict], add_generation_prompt: bool) -> str:
             try:
                 return tokenizer.apply_chat_template(
                     messages,
                     add_generation_prompt=add_generation_prompt,
                     tokenize=False,
+                    **extra_template_kwargs,
                 )
             except TypeError:
                 try:
@@ -366,6 +375,7 @@ class ModelTrainer:
                         _to_gemma3_text_content(messages),
                         add_generation_prompt=add_generation_prompt,
                         tokenize=False,
+                        **extra_template_kwargs,
                     )
                 except ValueError:
                     return _manual_render(messages, add_generation_prompt)
@@ -434,7 +444,7 @@ class ModelTrainer:
 
         logger.info("Loading model for instruction tuning: %s", model_id)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForCausalLM.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="auto")
 
         train_dataset, eval_dataset = self._prepare_trl_datasets(dataset, tokenizer, prefix, run_label, eval_dataset)
 

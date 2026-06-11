@@ -238,7 +238,7 @@ def _resolve_student_style_dataset_path(
 def _get_caa_param_suffix(settings: Settings) -> str:
     from src.config import format_caa_strength_tag, format_caa_max_inj_tag
     return (
-        f"_s{format_caa_strength_tag(settings.caa_strength)}"
+        f"_s{format_caa_strength_tag(settings.effective_caa_strength)}"
         f"_{format_caa_max_inj_tag(settings.caa_max_injection_tokens)}"
     )
 

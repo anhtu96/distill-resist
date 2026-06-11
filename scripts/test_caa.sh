@@ -2,8 +2,8 @@
 
 ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py \
 --dataset gsm8k \
---batch-size 1 \
+--batch-size 128 \
 --with-caa \
 --caa-mode styles \
 --caa-style scratchpad \
---caa-sample 1 \
+--caa-sample 128

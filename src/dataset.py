@@ -68,11 +68,11 @@ def format_dataset(example, eos_token: str = ""):
     # 1. Strip any existing assistant marker if present (from distill_ref.py)
     if "<｜Assistant｜>" in response:
         response = response.split("<｜Assistant｜>")[1]
-    
+
     # 2. Replace custom EOS marker with specific model's EOS token (from distill_ref.py)
     # Using the exact characters found in the reference script: <｜end▁of▁sentence｜>
     response = response.replace("<｜end▁of▁sentence｜>", eos_token)
-    
+
     # Ensure it ends with an EOS if not present
     if eos_token and not response.endswith(eos_token):
         response += eos_token

@@ -8,6 +8,7 @@ HFCAATraceGenerator so generate_traces.py can swap it in.
 from __future__ import annotations
 
 import gc
+import os
 from typing import Optional
 
 import numpy as np
@@ -140,7 +141,7 @@ class VLLMCAATraceGenerator:
             self._vectors_by_style[style] = per_layer
 
         arch = _pick_caa_arch(model_id)
-        self._llm = LLM(
+        _llm_kwargs = dict(
             model=model_id,
             dtype="bfloat16",
             trust_remote_code=True,
@@ -150,6 +151,20 @@ class VLLMCAATraceGenerator:
             enforce_eager=True,   # required so per-forward Python state checks actually run
             enable_prefix_caching=False,  # CAA state changes per-request; cached KV would bake in the wrong steering vector
         )
+        # vLLM 0.18 removed the VLLM_ATTENTION_BACKEND env var; pass the backend
+        # explicitly instead. Required when VLLM_BATCH_INVARIANT=1, which only
+        # accepts FLASH_ATTN/TRITON_ATTN/*_MLA and rejects auto-selection.
+        _attn_backend = os.environ.get("VLLM_ATTENTION_BACKEND")
+        if _attn_backend:
+            from vllm.v1.attention.backends.registry import AttentionBackendEnum
+            try:
+                _llm_kwargs["attention_backend"] = AttentionBackendEnum[_attn_backend]
+            except KeyError:
+                raise ValueError(
+                    f"Unknown VLLM_ATTENTION_BACKEND='{_attn_backend}'. "
+                    f"Valid: {[b.name for b in AttentionBackendEnum]}"
+                )
+        self._llm = LLM(**_llm_kwargs)
 
         _eos = self._tokenizer.eos_token or ""
         self._sampling_params = SamplingParams(
@@ -267,6 +282,8 @@ class VLLMCAATraceGenerator:
     def _get_effective_inject_prefill_last_n(
         self, weights: "dict[str, float] | str"
     ) -> int | None:
+        if not self.settings.caa_inject_prefill:
+            return None
         return self._resolve_per_style_int(
             self.settings.caa_inject_prefill_last_n,
             self.settings.caa_inject_prefill_last_n_blend_mode,

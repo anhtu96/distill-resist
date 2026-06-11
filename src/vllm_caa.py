@@ -140,6 +140,10 @@ def set_caa_state(
         state["inject_prefill"] = bool(inject_prefill)
     if inject_prefill_last_n is not _UNSET:
         state["inject_prefill_last_n"] = int(inject_prefill_last_n) if inject_prefill_last_n is not None else None
+    # Enforce invariant: inject_prefill=False always clears last_n so stale non-None
+    # values from previous runs cannot cause prefill injection to slip through.
+    if state.get("inject_prefill") is False:
+        state["inject_prefill_last_n"] = None
 
     _save_caa_state(state)
 
