@@ -53,7 +53,7 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 
 # --- Train and eval ---
 
-train_eval configs/gemma12b.qwen.gsm8k.env
+# train_eval configs/gemma12b.qwen.gsm8k.env
 # train_eval configs/gemma12b.qwen.arc.env
 # train_eval configs/gemma12b.qwen.csqa.env
 # train_eval configs/gemma12b.qwen.mmlu.env
@@ -62,13 +62,13 @@ train_eval configs/gemma12b.qwen.gsm8k.env
 # eval configs/gemma12b.qwen.arc.env
 # eval configs/gemma12b.qwen.csqa.env
 # eval configs/gemma12b.qwen.math.env
-train_eval configs/gemma12b.llama.gsm8k.env
+# train_eval configs/gemma12b.llama.gsm8k.env
 # train_eval configs/gemma12b.llama.arc.env
 # train_eval configs/gemma12b.llama.csqa.env
 # train_eval configs/gemma12b.llama.mmlu.env
 # train_eval configs/gemma12b.llama.math.env
 
-train_eval configs/gemma12b.llama8b.gsm8k.env
+# train_eval configs/gemma12b.llama8b.gsm8k.env
 # train_eval configs/gemma12b.llama8b.arc.env
 # train_eval configs/gemma12b.llama8b.csqa.env
 # train_eval configs/gemma12b.llama8b.math.env

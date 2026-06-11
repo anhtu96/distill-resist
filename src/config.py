@@ -342,6 +342,7 @@ class Settings(BaseSettings):
     student_warmup_ratio: float = 0.05
     student_max_seq_length: int = 4096
     student_gradient_checkpointing: bool = False
+    student_flash_attention_2: bool = False
     student_val_split_ratio: float = 0.0
     student_lora_r: int = 16
     student_lora_alpha: int = 32
@@ -360,6 +361,7 @@ class Settings(BaseSettings):
     teacher_warmup_ratio: float = 0.05
     teacher_max_seq_length: int = 4096
     teacher_gradient_checkpointing: bool = False
+    teacher_flash_attention_2: bool = False
     teacher_val_split_ratio: float = 0.0
     teacher_lora_r: int = 16
     teacher_lora_alpha: int = 32
