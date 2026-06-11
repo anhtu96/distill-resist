@@ -206,6 +206,7 @@ class VLLMTraceGenerator:
             enforce_eager=False,
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
             max_num_seqs=settings.vllm_max_num_seqs,
+            max_model_len=settings.vllm_max_model_len,
             quantization=settings.vllm_quantization or None,
             load_format=settings.vllm_load_format,
             enable_lora=lora_path is not None,

@@ -305,6 +305,7 @@ class Settings(BaseSettings):
     teacher_fresh_style_samples: int | None = 100
     vllm_gpu_memory_utilization: float = 0.8
     vllm_max_num_seqs: int = 256
+    vllm_max_model_len: int | None = None
     vllm_quantization: str | None = None
     vllm_load_format: str = "auto"
     vllm_dtype: str = "bfloat16"

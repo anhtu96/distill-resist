@@ -444,7 +444,12 @@ class ModelTrainer:
 
         logger.info("Loading model for instruction tuning: %s", model_id)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="auto")
+        _load_kwargs = dict(torch_dtype="auto", attn_implementation="flash_attention_2")
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_id, **_load_kwargs)
+        except (ValueError, ImportError):
+            _load_kwargs.pop("attn_implementation")
+            model = AutoModelForCausalLM.from_pretrained(model_id, **_load_kwargs)
 
         train_dataset, eval_dataset = self._prepare_trl_datasets(dataset, tokenizer, prefix, run_label, eval_dataset)
 
@@ -463,7 +468,9 @@ class ModelTrainer:
             per_device_train_batch_size=getattr(s, f"{prefix}_per_device_train_batch_size"),
             per_device_eval_batch_size=getattr(s, f"{prefix}_per_device_eval_batch_size"),
             gradient_accumulation_steps=getattr(s, f"{prefix}_gradient_accumulation_steps"),
-            # gradient_checkpointing=getattr(s, f"{prefix}_gradient_checkpointing"),
+            gradient_checkpointing=getattr(s, f"{prefix}_gradient_checkpointing"),
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            bf16=True,
             learning_rate=getattr(s, f"{prefix}_learning_rate"),
             weight_decay=getattr(s, f"{prefix}_weight_decay"),
             lr_scheduler_type="cosine",
