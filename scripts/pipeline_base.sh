@@ -73,9 +73,9 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 # train_eval configs/gemma12b.llama8b.csqa.env
 # train_eval configs/gemma12b.llama8b.math.env
 
-train_eval configs/gemma12b.qwen3-8b.gsm8k.env
+# train_eval configs/gemma12b.qwen3-8b.gsm8k.env
 
-train_eval configs/gemma12b.phi4mini.gsm8k.env
+# train_eval configs/gemma12b.phi4mini.gsm8k.env
 # train_eval configs/gemma12b.phi4mini.arc.env
 # train_eval configs/gemma12b.phi4mini.csqa.env
 # train_eval configs/gemma12b.phi4mini.mmlu.env
