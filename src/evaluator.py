@@ -27,19 +27,19 @@ class AnswerEvaluator:
 
     @staticmethod
     def _extract_letter(text: str) -> str:
-        """Extract a single answer letter (A-E) from text, handling formats like
+        """Extract a single answer letter (A-J) from text, handling formats like
         '**B**', 'Final Answer: (C)', '\\boxed{D}', 'E)**', etc.
         Returns the first matching letter found, or empty string."""
         # Try \boxed{X} first
-        m = re.search(r'\\boxed\{([A-Ea-e])\}', text)
+        m = re.search(r'\\boxed\{([A-Ja-j])\}', text)
         if m:
             return m.group(1).upper()
         # Try "answer is X", "answer: X", "(X)", "**X**"
-        m = re.search(r'(?:answer(?:\s+is)?[:\s]+\(?([A-Ea-e])\)?|\(([A-Ea-e])\)|\*\*([A-Ea-e])\*\*)', text, re.IGNORECASE)
+        m = re.search(r'(?:answer(?:\s+is)?[:\s]+\(?([A-Ja-j])\)?|\(([A-Ja-j])\)|\*\*([A-Ja-j])\*\*)', text, re.IGNORECASE)
         if m:
             return (m.group(1) or m.group(2) or m.group(3)).upper()
-        # Last resort: first standalone letter A-E in text
-        m = re.search(r'\b([A-Ea-e])\b', text)
+        # Last resort: first standalone letter A-J in text
+        m = re.search(r'\b([A-Ja-j])\b', text)
         return m.group(1).upper() if m else ""
 
     @staticmethod
