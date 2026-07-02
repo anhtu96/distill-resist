@@ -21,6 +21,10 @@ ROLE_DATASET_SYSTEM_PROMPTS: dict[str, str] = {
         "You are an expert tutor. You will be given a multiple-choice question with options labeled A, B, C, D. "
         "Reason step by step, then output the letter of the correct answer like \\boxed{letter}."
     ),
+    "mmlu_pro": (
+        "You are an expert tutor. You will be given a multiple-choice question with options labeled A through J (up to 10 choices). "
+        "Reason step by step, then output the letter of the correct answer like \\boxed{letter}."
+    ),
     "arc": (
         "You are a science expert. You will be given a multiple-choice science question with options labeled A, B, C, or D. "
         "Reason step by step, then output the letter of the correct answer like \\boxed{letter}."
@@ -57,6 +61,11 @@ DATASET_SYSTEM_PROMPTS: dict[str, str] = {
         "Answer the multiple-choice question by reasoning step by step. "
         "Output the correct letter like \\boxed{letter}."
     ),
+    "mmlu_pro": (
+        "Answer the multiple-choice question by reasoning step by step. "
+        "There are up to 10 answer options (A through J). "
+        "Output the correct letter like \\boxed{letter}."
+    ),
     "arc": (
         "Answer the multiple-choice science question by reasoning step by step. "
         "Output the correct letter (A, B, C, or D) like \\boxed{A}."
@@ -81,6 +90,7 @@ EVAL_MODE: dict[str, str] = {
     "math":        "math_verify",
     "math500":     "math_verify",
     "mmlu":        "exact_letter",
+    "mmlu_pro":    "exact_letter",
     "arc":         "exact_letter",
     "csqa":        "exact_letter",
     "bbh":         "exact_string",

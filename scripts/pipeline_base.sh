@@ -74,6 +74,9 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 # train_eval configs/gemma12b.llama8b.math.env
 
 # train_eval configs/gemma12b.qwen3-8b.gsm8k.env
+# train_eval configs/gemma12b.qwen3-8b.arc.env
+# train_eval configs/gemma12b.qwen3-8b.math.env
+# train_eval configs/gemma12b.qwen3-8b.csqa.env
 
 # train_eval configs/gemma12b.phi4mini.gsm8k.env
 # train_eval configs/gemma12b.phi4mini.arc.env
@@ -118,26 +121,29 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 
 # --- Upload to HuggingFace ---
 
-upload_adapter configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist
+# upload_adapter configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist
 # upload_adapter configs/gemma12b.qwen.arc.env    anhtu96/distill-resist
 # upload_adapter configs/gemma12b.qwen.csqa.env   anhtu96/distill-resist
 # upload_adapter configs/gemma12b.qwen.mmlu.env   anhtu96/distill-resist
 # upload_adapter configs/gemma12b.qwen.math.env   anhtu96/distill-resist
 
-upload_adapter configs/gemma12b.llama.gsm8k.env  anhtu96/distill-resist
+# upload_adapter configs/gemma12b.llama.gsm8k.env  anhtu96/distill-resist
 # upload_adapter configs/gemma12b.llama.arc.env    anhtu96/distill-resist
 # upload_adapter configs/gemma12b.llama.csqa.env   anhtu96/distill-resist
 # upload_adapter configs/gemma12b.llama.mmlu.env   anhtu96/distill-resist
 # upload_adapter configs/gemma12b.llama.math.env   anhtu96/distill-resist
 
-upload_adapter configs/gemma12b.llama8b.gsm8k.env anhtu96/distill-resist
+# upload_adapter configs/gemma12b.llama8b.gsm8k.env anhtu96/distill-resist
 # upload_adapter configs/gemma12b.llama8b.arc.env   anhtu96/distill-resist
 # upload_adapter configs/gemma12b.llama8b.csqa.env  anhtu96/distill-resist
 # upload_adapter configs/gemma12b.llama8b.math.env  anhtu96/distill-resist
 
-upload_adapter configs/gemma12b.qwen3-8b.gsm8k.env anhtu96/distill-resist
+# upload_adapter configs/gemma12b.qwen3-8b.gsm8k.env anhtu96/distill-resist
+# upload_adapter configs/gemma12b.qwen3-8b.arc.env anhtu96/distill-resist
+# upload_adapter configs/gemma12b.qwen3-8b.csqa.env anhtu96/distill-resist
+# upload_adapter configs/gemma12b.qwen3-8b.math.env anhtu96/distill-resist
 
-upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist
+# upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist
 # upload_adapter configs/gemma12b.phi4mini.arc.env   anhtu96/distill-resist
 # upload_adapter configs/gemma12b.phi4mini.csqa.env   anhtu96/distill-resist
 # upload_adapter configs/gemma12b.phi4mini.mmlu.env   anhtu96/distill-resist
@@ -157,26 +163,29 @@ upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist
 
 # --- Remove local adapters --- (optional)
 
-remove_adapter configs/gemma12b.qwen.gsm8k.env
+# remove_adapter configs/gemma12b.qwen.gsm8k.env
 # remove_adapter configs/gemma12b.qwen.arc.env
 # remove_adapter configs/gemma12b.qwen.csqa.env
 # remove_adapter configs/gemma12b.qwen.mmlu.env
 # remove_adapter configs/gemma12b.qwen.math.env
 
-remove_adapter configs/gemma12b.llama.gsm8k.env
+# remove_adapter configs/gemma12b.llama.gsm8k.env
 # remove_adapter configs/gemma12b.llama.arc.env
 # remove_adapter configs/gemma12b.llama.csqa.env
 # remove_adapter configs/gemma12b.llama.mmlu.env
 # remove_adapter configs/gemma12b.llama.math.env
 
-remove_adapter configs/gemma12b.llama8b.gsm8k.env
+# remove_adapter configs/gemma12b.llama8b.gsm8k.env
 # remove_adapter configs/gemma12b.llama8b.arc.env
 # remove_adapter configs/gemma12b.llama8b.csqa.env
 # remove_adapter configs/gemma12b.llama8b.math.env
 
-remove_adapter configs/gemma12b.qwen3-8b.gsm8k.env
+# remove_adapter configs/gemma12b.qwen3-8b.gsm8k.env
+# remove_adapter configs/gemma12b.qwen3-8b.arc.env
+# remove_adapter configs/gemma12b.qwen3-8b.csqa.env
+# remove_adapter configs/gemma12b.qwen3-8b.math.env
 
-remove_adapter configs/gemma12b.phi4mini.gsm8k.env
+# remove_adapter configs/gemma12b.phi4mini.gsm8k.env
 # remove_adapter configs/gemma12b.phi4mini.arc.env
 # remove_adapter configs/gemma12b.phi4mini.csqa.env
 # remove_adapter configs/gemma12b.phi4mini.mmlu.env

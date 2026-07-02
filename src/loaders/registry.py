@@ -5,6 +5,7 @@ from .gsm8k import GSM8KLoader
 from .csqa import CSQALoader
 from .math import MATH500Loader, MATHLoader
 from .mmlu import MMLULoader
+from .mmlu_pro import MMLUProLoader
 from .proofwriter import ProofWriterLoader
 
 # Registry maps dataset_name -> loader class
@@ -14,6 +15,7 @@ REGISTRY: dict[str, type[BaseDatasetLoader]] = {
     "math": MATHLoader,       # hendrycks/competition_math — use for training
     "math500": MATH500Loader, # lighteval/MATH-500 — use for testing
     "mmlu": MMLULoader,       # cais/mmlu — broad multi-subject MCQ
+    "mmlu_pro": MMLUProLoader, # TIGER-Lab/MMLU-Pro — harder reasoning-focused MCQ (10 options)
     "arc": ARCLoader,         # allenai/ai2_arc — science MCQ (default: ARC-Challenge)
     "bbh": BBHLoader,         # lukaemon/bbh — BIG-Bench Hard reasoning tasks
     "proofwriter": ProofWriterLoader,  # renma/ProofWriter — deductive logic

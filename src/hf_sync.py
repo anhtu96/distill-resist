@@ -24,6 +24,16 @@ def remove_local(model_dir: str) -> None:
         print(f"Removed {p}")
 
 
+def delete_remote(repo_id: str, folder_path: str) -> None:
+    from huggingface_hub import HfApi
+    api = HfApi()
+    try:
+        api.delete_folder(repo_id=repo_id, path_in_repo=folder_path, repo_type="model")
+        print(f"Deleted remote folder: {repo_id}/{folder_path}")
+    except Exception as e:
+        print(f"Failed to delete {repo_id}/{folder_path}: {e}")
+
+
 def download_from_hf(repo_id: str, adapter_dir: str) -> None:
     from huggingface_hub import snapshot_download
     subdir = Path(adapter_dir).name
@@ -78,6 +88,10 @@ def main():
     p_rm = sub.add_parser("remove", help="Remove a local model dir")
     p_rm.add_argument("model_dir")
 
+    p_del_remote = sub.add_parser("delete-remote", help="Delete a folder from HuggingFace")
+    p_del_remote.add_argument("repo_id")
+    p_del_remote.add_argument("folder_path")
+
     p_dl = sub.add_parser("download", help="Download a model subfolder from HuggingFace")
     p_dl.add_argument("repo_id")
     p_dl.add_argument("adapter_dir")
@@ -93,6 +107,8 @@ def main():
         push_to_hf(args.local_dir, args.repo_id, args.path_in_repo)
     elif args.cmd == "remove":
         remove_local(args.model_dir)
+    elif args.cmd == "delete-remote":
+        delete_remote(args.repo_id, args.folder_path)
     elif args.cmd == "download":
         download_from_hf(args.repo_id, args.adapter_dir)
     elif args.cmd == "adapter-dir":

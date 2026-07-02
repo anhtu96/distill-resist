@@ -43,6 +43,9 @@ class MMLULoader(BaseDatasetLoader):
         self.num_samples = num_samples
 
     def _load_raw(self):
+        if self.split == "auxiliary_train":
+            return load_dataset("kz919/mmlu-auxiliary-train-auto-labelled", split="train")
+
         if "," in self.config:
             subjects = [s.strip() for s in self.config.split(",") if s.strip()]
             parts = [load_dataset(self.HF_DATASET, s, split=self.split) for s in subjects]
@@ -53,13 +56,32 @@ class MMLULoader(BaseDatasetLoader):
         logger.info("Loading MMLU config='%s' split='%s'", self.config, self.split)
         ds = self._load_raw()
         records: list[dict[str, str]] = []
+        
+        is_aux_train = (self.split == "auxiliary_train")
+        allowed_subjects = None
+        if is_aux_train and self.config != "all":
+            if "," in self.config:
+                allowed_subjects = {s.strip() for s in self.config.split(",") if s.strip()}
+            else:
+                allowed_subjects = {self.config.strip()}
+
         for row in ds:
+            if is_aux_train and allowed_subjects is not None:
+                task = row.get("task", "")
+                if task not in allowed_subjects:
+                    continue
+
             choices = list(row["choices"])
             answer_idx = int(row["answer"])
+            
+            subj = row.get("subject", "")
+            if not subj and "task" in row:
+                subj = row["task"]
+
             records.append({
                 "user_prompt": _format_question(str(row["question"]), choices),
                 "ground_truth": LETTER_OPTIONS[answer_idx],
-                "subject": str(row.get("subject", "")),
+                "subject": str(subj),
             })
         if self.num_samples is not None:
             if len(records) > self.num_samples:

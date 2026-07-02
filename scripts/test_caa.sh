@@ -1,9 +1,9 @@
 #!/bin/bash
 
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py \
---dataset gsm8k \
+ENV_FILE=configs/gemma12b.qwen.mmlu_pro.env python scripts/generate_traces.py \
+--dataset mmlu_pro \
 --batch-size 128 \
 --with-caa \
 --caa-mode styles \
---caa-style scratchpad \
---caa-sample 128
+--caa-style dead_end scratchpad jargon distractor \
+--caa-sample 200
