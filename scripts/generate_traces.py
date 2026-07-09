@@ -373,6 +373,7 @@ def _resolve_trained_student_model_path(
     caa_param_suffix: str | None = None,
     dataset_name: str = "",
     name_suffix: str = "",
+    caa_style: str | list[str] | None = None,
 ) -> str:
     base_path = Path(base_output_dir)
     candidates: list[Path] = []
@@ -432,6 +433,20 @@ def _resolve_trained_student_model_path(
             return [p]
         name = p.name
         vars = []
+        styles = []
+        if caa_style:
+            if isinstance(caa_style, str):
+                styles.append(caa_style)
+            elif isinstance(caa_style, list):
+                styles.extend(caa_style)
+        for style in styles:
+            if caa_param_suffix:
+                sfx = f"_caa_{style}{caa_param_suffix}"
+                if not name.endswith(sfx):
+                    vars.append(p.with_name(name + sfx))
+            sfx_no_param = f"_caa_{style}"
+            if not name.endswith(sfx_no_param):
+                vars.append(p.with_name(name + sfx_no_param))
         if caa_param_suffix:
             sfx = f"_caa{caa_param_suffix}"
             if not name.endswith(sfx):
@@ -1731,6 +1746,7 @@ def main():
                 caa_param_suffix=_get_caa_param_suffix(settings, args),
                 dataset_name=settings.dataset_name,
                 name_suffix=args.name_suffix or "",
+                caa_style=args.caa_style,
             )
             model_name = f"{Path(lora_path).name}_{settings.dataset_name}"
         else:

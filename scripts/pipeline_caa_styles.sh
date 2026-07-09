@@ -6,26 +6,26 @@
 set -e
 source "$(dirname "$0")/_pipeline_helpers.sh"
 
-STYLES=(scratchpad socratic dead_end)
+STYLES=(scratchpad dead_end jargon distractor)
 
 # --- Generate per-style CAA holdout traces (one run generates all styles) ---
 
 # Gemma3-12B teacher
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles
-echo "=== Done: CAA styles holdout gsm8k ==="
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set test --dataset gsm8k --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor --batch-size 128
+# echo "=== Done: CAA styles test gsm8k ==="
 
-ENV_FILE=configs/gemma12b.qwen.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc --with-caa --caa-mode styles
-echo "=== Done: CAA styles holdout arc ==="
+# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor --batch-size 128
+# echo "=== Done: CAA styles test math ==="
 
-ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles
-echo "=== Done: CAA styles holdout math ==="
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor --batch-size 128
+# echo "=== Done: CAA styles holdout gsm8k ==="
+
+# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor --batch-size 128
+# echo "=== Done: CAA styles holdout math ==="
 
 # DeepSeek-R1-Distill-Qwen-7B teacher
 # ENV_FILE=configs/deepseek.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles
 # echo "=== Done: deepseek CAA styles holdout gsm8k ==="
-
-# ENV_FILE=configs/deepseek.qwen.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc --with-caa --caa-mode styles
-# echo "=== Done: deepseek CAA styles holdout arc ==="
 
 # ENV_FILE=configs/deepseek.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles
 # echo "=== Done: deepseek CAA styles holdout math ==="
@@ -33,71 +33,46 @@ echo "=== Done: CAA styles holdout math ==="
 # --- Train and eval one student per style ---
 
 for STYLE in "${STYLES[@]}"; do
-    train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.qwen.arc.env        --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
+    # eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
 
-    train_eval configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.llama.arc.env       --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.llama.math.env      --with-caa --caa-style "$STYLE"
+    # train_eval configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style "$STYLE"
 
-    train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.phi4mini.arc.env    --with-caa --caa-style "$STYLE"
-    train_eval configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
+    # train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
 
-    # train_eval configs/deepseek.qwen.gsm8k.env  --with-caa --caa-style "$STYLE"
-    # train_eval configs/deepseek.qwen.arc.env    --with-caa --caa-style "$STYLE"
-    # train_eval configs/deepseek.qwen.math.env   --with-caa --caa-style "$STYLE"
+    # train_eval configs/gemma12b.llama8b.gsm8k.env    --with-caa --caa-style "$STYLE"
 
-    # train_eval configs/deepseek.llama.gsm8k.env --with-caa --caa-style "$STYLE"
-    # train_eval configs/deepseek.llama.arc.env   --with-caa --caa-style "$STYLE"
-    # train_eval configs/deepseek.llama.math.env  --with-caa --caa-style "$STYLE"
+    train_eval configs/gemma12b.qwen3-8b.gsm8k.env     --with-caa --caa-style "$STYLE"
+
+    # remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
+
+    # remove_adapter configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style "$STYLE"
+
+    # remove_adapter configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
+
+    remove_adapter configs/gemma12b.qwen3-8b.gsm8k.env     --with-caa --caa-style "$STYLE"
+
+    # remove_adapter configs/gemma12b.llama8b.gsm8k.env    --with-caa --caa-style "$STYLE"
 done
 
-# --- Upload to HuggingFace ---
 
-for STYLE in "${STYLES[@]}"; do
-    upload_adapter configs/gemma12b.qwen.gsm8k.env     ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.qwen.arc.env        ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.qwen.math.env       ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+# for STYLE in "${STYLES[@]}"; do
+#     train_eval configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
 
-    upload_adapter configs/gemma12b.llama.gsm8k.env    ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.llama.arc.env       ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.llama.math.env      ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+#     train_eval configs/gemma12b.llama.math.env      --with-caa --caa-style "$STYLE"
 
-    upload_adapter configs/gemma12b.phi4mini.gsm8k.env ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.phi4mini.arc.env    ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    upload_adapter configs/gemma12b.phi4mini.math.env   ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+#     train_eval configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
 
-    # upload_adapter configs/deepseek.qwen.gsm8k.env  ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    # upload_adapter configs/deepseek.qwen.arc.env    ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    # upload_adapter configs/deepseek.qwen.math.env   ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
+#     train_eval configs/gemma12b.llama8b.math.env      --with-caa --caa-style "$STYLE"
 
-    # upload_adapter configs/deepseek.llama.gsm8k.env ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    # upload_adapter configs/deepseek.llama.arc.env   ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-    # upload_adapter configs/deepseek.llama.math.env  ${HF_USERNAME}/distill-resist --with-caa --caa-style "$STYLE"
-done
+#     train_eval configs/gemma12b.qwen3-8b.math.env       --with-caa --caa-style "$STYLE"
 
-# --- Remove local adapters ---
+#     remove_adapter configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
 
-for STYLE in "${STYLES[@]}"; do
-    remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.qwen.arc.env        --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
+#     remove_adapter configs/gemma12b.llama.math.env      --with-caa --caa-style "$STYLE"
 
-    remove_adapter configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.llama.arc.env       --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.llama.math.env      --with-caa --caa-style "$STYLE"
+#     remove_adapter configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
 
-    remove_adapter configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.phi4mini.arc.env    --with-caa --caa-style "$STYLE"
-    remove_adapter configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
+#     remove_adapter configs/gemma12b.qwen3-8b.math.env       --with-caa --caa-style "$STYLE"
 
-    # remove_adapter configs/deepseek.qwen.gsm8k.env  --with-caa --caa-style "$STYLE"
-    # remove_adapter configs/deepseek.qwen.arc.env    --with-caa --caa-style "$STYLE"
-    # remove_adapter configs/deepseek.qwen.math.env   --with-caa --caa-style "$STYLE"
-
-    # remove_adapter configs/deepseek.llama.gsm8k.env --with-caa --caa-style "$STYLE"
-    # remove_adapter configs/deepseek.llama.arc.env   --with-caa --caa-style "$STYLE"
-    # remove_adapter configs/deepseek.llama.math.env  --with-caa --caa-style "$STYLE"
-done
+#     remove_adapter configs/gemma12b.llama8b.math.env      --with-caa --caa-style "$STYLE"
+# done
