@@ -11,6 +11,30 @@ train_eval() {
 
     ENV_FILE="$env_file" python scripts/train.py "$@"
     ENV_FILE="$env_file" python scripts/generate_traces.py --model student --use-trained-student "$@"
+
+    # Run evaluation to generate results/*.json files
+    local trace_name
+    trace_name="$(ENV_FILE="$env_file" python -c "
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path('.').resolve()))
+from src.hf_sync import get_student_trace_name
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--with-caa', action='store_true')
+parser.add_argument('--caa-style', default='')
+parser.add_argument('--name-suffix', default='')
+parser.add_argument('--paraphrased', action='store_true')
+args, _ = parser.parse_known_args(sys.argv[1:])
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased))
+" "$@")"
+
+    local trace_file="data/test/${trace_name}.jsonl"
+    if [ -f "$trace_file" ]; then
+        echo "=== Running evaluation on $trace_file ==="
+        ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file"
+    else
+        echo "Warning: Trace file not found at $trace_file"
+    fi
 }
 
 eval() {
@@ -18,19 +42,71 @@ eval() {
     shift 1
 
     ENV_FILE="$env_file" python scripts/generate_traces.py --model student --use-trained-student "$@"
+
+    # Run evaluation to generate results/*.json files
+    local trace_name
+    trace_name="$(ENV_FILE="$env_file" python -c "
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path('.').resolve()))
+from src.hf_sync import get_student_trace_name
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--with-caa', action='store_true')
+parser.add_argument('--caa-style', default='')
+parser.add_argument('--name-suffix', default='')
+parser.add_argument('--paraphrased', action='store_true')
+args, _ = parser.parse_known_args(sys.argv[1:])
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased))
+" "$@")"
+
+    local trace_file="data/test/${trace_name}.jsonl"
+    if [ -f "$trace_file" ]; then
+        echo "=== Running evaluation on $trace_file ==="
+        ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file"
+    else
+        echo "Warning: Trace file not found at $trace_file"
+    fi
 }
 
-# Push a trained adapter to HuggingFace Hub.
-# Usage: upload_adapter <env_file> <hf_repo> [extra_flags...]
-upload_adapter() {
+# Push generated JSON/JSONL trace/evaluation files to HuggingFace Hub.
+# Usage: upload_results <env_file> <hf_repo> [extra_flags...]
+upload_results() {
     local env_file="$1"
     local hf_repo="$2"
     shift 2
 
+    # Run evaluation to make sure results/*.json is generated
     local adapter_dir
     adapter_dir="$(ENV_FILE="$env_file" python -m src.hf_sync adapter-dir "$@")"
-    echo "=== Pushing adapter to HF: $hf_repo ($adapter_dir) ==="
-    ENV_FILE="$env_file" python -m src.hf_sync push "$adapter_dir" "$hf_repo"
+    local adapter_name
+    adapter_name="$(basename "$adapter_dir")"
+    
+    # Reconstruct the trace name using python helper (to make sure it aligns with generate_traces.py)
+    local trace_name
+    trace_name="$(ENV_FILE="$env_file" python -c "
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path('.').resolve()))
+from src.hf_sync import get_student_trace_name
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--with-caa', action='store_true')
+parser.add_argument('--caa-style', default='')
+parser.add_argument('--name-suffix', default='')
+parser.add_argument('--paraphrased', action='store_true')
+args, _ = parser.parse_known_args(sys.argv[1:])
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased))
+" "$@")"
+
+    local trace_file="data/test/${trace_name}.jsonl"
+    if [ -f "$trace_file" ]; then
+        echo "=== Running evaluation on $trace_file ==="
+        ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file"
+    else
+        echo "Warning: Trace file not found at $trace_file"
+    fi
+
+    echo "=== Pushing generated JSON/JSONL files to HF: $hf_repo ==="
+    ENV_FILE="$env_file" python -m src.hf_sync push-results "$hf_repo" "$@"
 }
 
 # Remove the local adapter for a given env/flags combination.

@@ -58,8 +58,40 @@ class HoldoutDataset:
     def to_hf_dataset(self, eos_token: str = "") -> Dataset:
         """Convert JSONL to a HuggingFace Dataset with a 'trace' column for SFT."""
         dataset = load_dataset("json", data_files=str(self.path), split="train")
+        
+        def has_repetition_loop(example):
+            resp = example.get("response", "")
+            if not resp:
+                return False
+            lines = [l.strip() for l in resp.split('\n') if l.strip()]
+
+            # Check for any line >2 chars repeating >= 20 times.
+            # Threshold of 20 cleanly separates true infinite loops (500-600x)
+            # from mild recovery stutters (10-12x) which still produce valid answers.
+            line_counts = {}
+            for line in lines:
+                if len(line) > 2:
+                    line_counts[line] = line_counts.get(line, 0) + 1
+            if any(count >= 20 for count in line_counts.values()):
+                return True
+
+            # Secondary check: very low uniqueness ratio catches other pathological
+            # shapes (e.g. alternating pairs of short tokens looping for 200+ turns).
+            if len(lines) > 30 and len(set(lines)) / len(lines) < 0.15:
+                return True
+
+            return False
+
+        # Filter out looping examples
+        before_count = len(dataset)
+        dataset = dataset.filter(lambda x: not has_repetition_loop(x))
+        after_count = len(dataset)
+        if before_count != after_count:
+            print(f"[Dataset Filter] Filtered out {before_count - after_count} looping responses from {self.path.name} ({after_count}/{before_count} remaining)")
+
         dataset = dataset.map(lambda x: format_dataset(x, eos_token=eos_token))
         return dataset
+
 
 def format_dataset(example, eos_token: str = ""):
     """Preprocess a single example into a prompt-completion format with cleaning."""

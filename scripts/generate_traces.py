@@ -1594,6 +1594,11 @@ def main():
                         help="Dataset name to use (overrides DATASET_NAME in .env)")
     parser.add_argument("--name-suffix", type=str, default=None,
                         help="Extra suffix on the student checkpoint name (must match what was used in train.py)")
+    parser.add_argument(
+        "--paraphrased",
+        action="store_true",
+        help="Use paraphrased holdout traces (appends '_paraphrased' to student checkpoint and trace names)",
+    )
     args = parser.parse_args()
 
     # Parse --caa-strength: floats list OR per-style dict (key=v1,v2,v3 pairs).
@@ -1740,12 +1745,15 @@ def main():
             "mixed_no_base" if args.with_styles == "mixed" and args.no_base else args.with_styles or False
         )
         if args.use_trained_student:
+            eff_name_suffix = args.name_suffix or ""
+            if args.paraphrased and "_paraphrased" not in eff_name_suffix:
+                eff_name_suffix = "_paraphrased" + eff_name_suffix
             lora_path = _resolve_trained_student_model_path(
                 settings.student_output_dir, use_student_ad, student_variant, student_model_name, teacher_tag,
                 prefer_rewrite=args.load_rewrite, prefer_styles=_prefer_styles, prefer_caa=args.with_caa,
                 caa_param_suffix=_get_caa_param_suffix(settings, args),
                 dataset_name=settings.dataset_name,
-                name_suffix=args.name_suffix or "",
+                name_suffix=eff_name_suffix,
                 caa_style=args.caa_style,
             )
             model_name = f"{Path(lora_path).name}_{settings.dataset_name}"
@@ -1781,7 +1789,20 @@ def main():
                 base_name += f"_style_{args.with_styles}"
         if args.model == "student" and args.with_caa:
             param_suffix = _get_caa_param_suffix(settings, args)
-            base_name += f"_caa{param_suffix}"
+            if args.caa_style:
+                if isinstance(args.caa_style, list):
+                    style_str = "_".join(args.caa_style)
+                else:
+                    style_str = str(args.caa_style)
+                base_name += f"_caa_{style_str}{param_suffix}"
+            else:
+                base_name += f"_caa{param_suffix}"
+
+        if args.model == "student" and (args.name_suffix or args.paraphrased):
+            suffix = args.name_suffix or ""
+            if args.paraphrased and "_paraphrased" not in suffix:
+                suffix = "_paraphrased" + suffix
+            base_name += suffix
 
         if target_set == "holdout" and args.model == "teacher":
             if do_caa:

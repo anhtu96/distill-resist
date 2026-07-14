@@ -525,6 +525,7 @@ def train_caa(
     backend: str = "hf",
     styles: Optional[List[str]] = None,
     token_scope: str = "response",
+    accuracy_filter: bool = False,
 ):
     if insertion_layers is None:
         n = _num_layers(model_id)
@@ -570,11 +571,25 @@ def train_caa(
     for ds in all_datasets:
         for s in styles_to_run:
             ds_samples = load_style_data(data_dir, s, ds, data_source=data_source, model_id=model_id)
+            if accuracy_filter:
+                from src.evaluator import AnswerEvaluator
+                orig_len = len(ds_samples)
+                res = AnswerEvaluator.evaluate_accuracy(ds_samples, dataset=ds)
+                mismatch_indices = {m["idx"] - 1 for m in res["mismatches"]}
+                ds_samples = [samp for idx, samp in enumerate(ds_samples) if idx not in mismatch_indices]
+                logger.info("Accuracy filter for style '%s' on '%s': kept %d/%d samples", s, ds, len(ds_samples), orig_len)
             if num_samples is not None:
                 ds_samples = ds_samples[:num_samples]
             style_data[s].extend(ds_samples)
         if negative == "base":
             ds_base = load_base_data(data_dir, ds, model_id=model_id)
+            if accuracy_filter:
+                from src.evaluator import AnswerEvaluator
+                orig_len = len(ds_base)
+                res = AnswerEvaluator.evaluate_accuracy(ds_base, dataset=ds)
+                mismatch_indices = {m["idx"] - 1 for m in res["mismatches"]}
+                ds_base = [samp for idx, samp in enumerate(ds_base) if idx not in mismatch_indices]
+                logger.info("Accuracy filter for base on '%s': kept %d/%d samples", ds, len(ds_base), orig_len)
             if num_samples is not None:
                 ds_base = ds_base[:num_samples]
             base_samples_combined.extend(ds_base)
@@ -799,6 +814,10 @@ def main():
         help="Disable per-style compliance filtering of training samples (filter is ON by default).",
     )
     parser.add_argument(
+        "--accuracy-filter", action="store_true",
+        help="Use only traces with accurate answers for vector construction."
+    )
+    parser.add_argument(
         "--backend", choices=["hf", "vllm"], default="vllm",
         help="Backend for collecting activations. 'vllm' uses Triton attention to match "
              "inference-time activation geometry (recommended when using --backend vllm in infer_with_caa.py). "
@@ -819,6 +838,9 @@ def main():
         if args.backend == "vllm" and "vllm" not in args.output_dir:
             args.output_dir += "_vllm"
 
+    if args.accuracy_filter:
+        args.output_dir += "_accuracy-filtered"
+
     train_caa(
         model_id=args.model_id,
         data_dir=args.data_dir,
@@ -837,6 +859,7 @@ def main():
         backend=args.backend,
         styles=args.styles,
         token_scope=args.token_scope,
+        accuracy_filter=args.accuracy_filter,
     )
 
 

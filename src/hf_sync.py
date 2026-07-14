@@ -50,6 +50,7 @@ def get_student_adapter_dir(
     with_caa: bool = False,
     caa_style: str = "",
     name_suffix: str = "",
+    paraphrased: bool = False,
 ) -> str:
     from src.config import Settings
     s = Settings()
@@ -66,6 +67,9 @@ def get_student_adapter_dir(
     if name_suffix:
         out = Path(str(out) + name_suffix)
 
+    if paraphrased and "_paraphrased" not in out.name:
+        out = Path(str(out) + "_paraphrased")
+
     if with_caa:
         from src.config import format_caa_strength_tag, format_caa_max_inj_tag
         s_str = format_caa_strength_tag(s.effective_caa_strength)
@@ -74,6 +78,82 @@ def get_student_adapter_dir(
         out = Path(str(out) + suffix)
 
     return str(out)
+
+
+def get_student_trace_name(
+    with_caa: bool = False,
+    caa_style: str = "",
+    name_suffix: str = "",
+    paraphrased: bool = False,
+) -> str:
+    from src.config import Settings
+    s = Settings()
+    student_model_name = Path(s.student_model_id).name
+    dataset_name = s.dataset_name
+    
+    # Base: student_{student_model_name}_base_tch_{dataset_name}
+    base_name = f"student_{student_model_name}_base_tch_{dataset_name}"
+    
+    # CAA parameters
+    if with_caa:
+        from src.config import format_caa_strength_tag, format_caa_max_inj_tag
+        s_str = format_caa_strength_tag(s.effective_caa_strength)
+        t_str = format_caa_max_inj_tag(s.caa_max_injection_tokens)
+        suffix = f"_caa_{caa_style}_s{s_str}_{t_str}" if caa_style else f"_caa_s{s_str}_{t_str}"
+        base_name += suffix
+        
+    # Name suffix
+    if name_suffix:
+        base_name += name_suffix
+        
+    if paraphrased and "_paraphrased" not in base_name:
+        base_name += "_paraphrased"
+        
+    return base_name
+
+
+def push_results_to_hf(
+    repo_id: str,
+    with_caa: bool = False,
+    caa_style: str = "",
+    name_suffix: str = "",
+    paraphrased: bool = False,
+) -> None:
+    from huggingface_hub import HfApi
+    api = HfApi()
+    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True, private=True)
+    
+    # 1. Get the subfolder name under which to upload the files in the repo
+    # This should be the adapter name so that the repo structure remains consistent.
+    adapter_dir = get_student_adapter_dir(with_caa, caa_style, name_suffix, paraphrased)
+    adapter_name = Path(adapter_dir).name
+    
+    # 2. Get the trace name to locate local JSON/JSONL files
+    trace_name = get_student_trace_name(with_caa, caa_style, name_suffix, paraphrased)
+    
+    files_to_upload = [
+        Path("data/test") / f"{trace_name}.jsonl",
+        Path("data/test") / f"{trace_name}_af.jsonl",
+        Path("results") / f"{trace_name}.json",
+        Path("results") / f"{trace_name}_af.json",
+    ]
+    
+    uploaded_any = False
+    for path in files_to_upload:
+        if path.exists():
+            # Keep the adapter directory name as the parent folder in the HuggingFace repo
+            path_in_repo = f"{adapter_name}/{path.name}"
+            print(f"Uploading file: {path} -> {repo_id}/{path_in_repo}")
+            api.upload_file(
+                path_or_fileobj=str(path),
+                path_in_repo=path_in_repo,
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            uploaded_any = True
+            
+    if not uploaded_any:
+        print(f"Warning: No generated JSON/JSONL files found for trace name: {trace_name}")
 
 
 def main():
@@ -100,6 +180,14 @@ def main():
     p_dir.add_argument("--with-caa", action="store_true")
     p_dir.add_argument("--caa-style", default="")
     p_dir.add_argument("--name-suffix", default="")
+    p_dir.add_argument("--paraphrased", action="store_true")
+
+    p_res = sub.add_parser("push-results", help="Push generated JSON/JSONL files to HuggingFace")
+    p_res.add_argument("repo_id")
+    p_res.add_argument("--with-caa", action="store_true")
+    p_res.add_argument("--caa-style", default="")
+    p_res.add_argument("--name-suffix", default="")
+    p_res.add_argument("--paraphrased", action="store_true")
 
     args = parser.parse_args()
 
@@ -112,7 +200,15 @@ def main():
     elif args.cmd == "download":
         download_from_hf(args.repo_id, args.adapter_dir)
     elif args.cmd == "adapter-dir":
-        print(get_student_adapter_dir(args.with_caa, args.caa_style, args.name_suffix))
+        print(get_student_adapter_dir(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased))
+    elif args.cmd == "push-results":
+        push_results_to_hf(
+            repo_id=args.repo_id,
+            with_caa=args.with_caa,
+            caa_style=args.caa_style,
+            name_suffix=args.name_suffix,
+            paraphrased=args.paraphrased,
+        )
 
 
 if __name__ == "__main__":

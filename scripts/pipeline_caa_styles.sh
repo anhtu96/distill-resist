@@ -6,7 +6,7 @@
 set -e
 source "$(dirname "$0")/_pipeline_helpers.sh"
 
-STYLES=(scratchpad dead_end jargon distractor)
+STYLES=(distractor)
 
 # --- Generate per-style CAA holdout traces (one run generates all styles) ---
 
@@ -49,7 +49,7 @@ for STYLE in "${STYLES[@]}"; do
 
     # remove_adapter configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
 
-    remove_adapter configs/gemma12b.qwen3-8b.gsm8k.env     --with-caa --caa-style "$STYLE"
+    # remove_adapter configs/gemma12b.qwen3-8b.gsm8k.env     --with-caa --caa-style "$STYLE"
 
     # remove_adapter configs/gemma12b.llama8b.gsm8k.env    --with-caa --caa-style "$STYLE"
 done

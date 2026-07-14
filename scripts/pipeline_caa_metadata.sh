@@ -19,7 +19,7 @@ echo ">>> Phase 1: generating all test sets <<<"
 
 # ENV_FILE=configs/gemma12b.qwen.gsm8k.env      python scripts/generate_traces.py --model teacher --set test --dataset gsm8k --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.mmlu.env        python scripts/generate_traces.py --model teacher --set test --dataset mmlu  --with-caa --caa-mode metadata
-ENV_FILE=configs/gemma12b.qwen.mmlu_pro.env    python scripts/generate_traces.py --model teacher --set test --dataset mmlu_pro --with-caa --caa-mode metadata
+# ENV_FILE=configs/gemma12b.qwen.mmlu_pro.env    python scripts/generate_traces.py --model teacher --set test --dataset mmlu_pro --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.math.env        python scripts/generate_traces.py --model teacher --set test --dataset math  --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.arc.env         python scripts/generate_traces.py --model teacher --set test --dataset arc   --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.csqa.env        python scripts/generate_traces.py --model teacher --set test --dataset csqa  --with-caa --caa-mode metadata
@@ -33,7 +33,7 @@ echo ">>> Phase 2: generating all holdout sets <<<"
 
 # ENV_FILE=configs/gemma12b.qwen.gsm8k.env      python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.mmlu.env        python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu  --with-caa --caa-mode metadata
-ENV_FILE=configs/gemma12b.qwen.mmlu_pro.env    python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu_pro --with-caa --caa-mode metadata
+# ENV_FILE=configs/gemma12b.qwen.mmlu_pro.env    python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu_pro --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.arc.env         python scripts/generate_traces.py --model teacher --set holdout --dataset arc   --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.csqa.env        python scripts/generate_traces.py --model teacher --set holdout --dataset csqa  --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.math.env        python scripts/generate_traces.py --model teacher --set holdout --dataset math  --with-caa --caa-mode metadata
@@ -53,11 +53,11 @@ echo ">>> Phase 3: train, eval, upload, remove <<<"
 # train_eval configs/gemma12b.phi4mini.math.env --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.qwen3-8b.math.env --with-caa --name-suffix _metadata
 
-# upload_adapter configs/gemma12b.qwen.math.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama.math.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama8b.math.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.phi4mini.math.env anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.qwen3-8b.math.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen.math.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama.math.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama8b.math.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.phi4mini.math.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen3-8b.math.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
 # remove_adapter configs/gemma12b.qwen.math.env     --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.llama.math.env    --with-caa --name-suffix _metadata
@@ -67,17 +67,17 @@ echo ">>> Phase 3: train, eval, upload, remove <<<"
 
 # --- GSM8K ---
 # echo ">>> GSM8K <<<"
-# train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata
-# train_eval configs/gemma12b.llama.gsm8k.env    --with-caa --name-suffix _metadata
-# train_eval configs/gemma12b.llama8b.gsm8k.env  --with-caa --name-suffix _metadata
-# train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --name-suffix _metadata
-# train_eval configs/gemma12b.qwen3-8b.gsm8k.env --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama.gsm8k.env    --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.llama8b.gsm8k.env  --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen3-8b.gsm8k.env --with-caa --name-suffix _metadata
 
-# upload_adapter configs/gemma12b.qwen.gsm8k.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama.gsm8k.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama8b.gsm8k.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.qwen3-8b.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen.gsm8k.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama.gsm8k.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama8b.gsm8k.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen3-8b.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
 # remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.llama.gsm8k.env    --with-caa --name-suffix _metadata
@@ -85,33 +85,51 @@ echo ">>> Phase 3: train, eval, upload, remove <<<"
 # remove_adapter configs/gemma12b.phi4mini.gsm8k.env --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.qwen3-8b.gsm8k.env --with-caa --name-suffix _metadata
 
+# --- GSM8K PARAPHRASED ---
+# Note: Before training student models on paraphrased datasets, you must generate the paraphrased files.
+# To paraphrase the base/normal holdout datasets:
+#   ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/paraphrase_dataset.py --device cuda
+#
+# To paraphrase CAA steered/style holdout datasets:
+#   # For mixed CAA holdout datasets:
+ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/paraphrase_dataset.py --with-caa --device cuda
+#   
+#   # For a specific CAA style dataset (e.g. distractor, dead_end):
+#   ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/paraphrase_dataset.py --with-caa --caa-style distractor --device cuda
+
+train_eval configs/gemma12b.qwen.gsm8k.env     --paraphrased
+# train_eval configs/gemma12b.llama.gsm8k.env    --paraphrased
+# train_eval configs/gemma12b.llama8b.gsm8k.env  --paraphrased
+# train_eval configs/gemma12b.phi4mini.gsm8k.env --paraphrased
+# train_eval configs/gemma12b.qwen3-8b.gsm8k.env --paraphrased
+
 # --- MMLU ---
 # echo ">>> MMLU <<<"
 # train_eval configs/gemma12b.qwen.mmlu.env     --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.llama.mmlu.env    --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.phi4mini.mmlu.env --with-caa --name-suffix _metadata
 
-# upload_adapter configs/gemma12b.qwen.mmlu.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama.mmlu.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.phi4mini.mmlu.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen.mmlu.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama.mmlu.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.phi4mini.mmlu.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
 # remove_adapter configs/gemma12b.qwen.mmlu.env     --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.llama.mmlu.env    --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.phi4mini.mmlu.env --with-caa --name-suffix _metadata
 
 # --- MMLU-PRO ---
-echo ">>> MMLU-PRO <<<"
+# echo ">>> MMLU-PRO <<<"
 # train_eval configs/gemma12b.qwen.mmlu_pro.env     --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.llama.mmlu_pro.env    --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.llama8b.mmlu_pro.env  --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.qwen3-8b.mmlu_pro.env --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.phi4mini.mmlu_pro.env --with-caa --name-suffix _metadata
 
-# upload_adapter configs/gemma12b.qwen.mmlu_pro.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama.mmlu_pro.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama8b.mmlu_pro.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.qwen3-8b.mmlu_pro.env anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.phi4mini.mmlu_pro.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen.mmlu_pro.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama.mmlu_pro.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama8b.mmlu_pro.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen3-8b.mmlu_pro.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.phi4mini.mmlu_pro.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
 # remove_adapter configs/gemma12b.qwen.mmlu_pro.env     --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.llama.mmlu_pro.env    --with-caa --name-suffix _metadata
@@ -127,11 +145,11 @@ echo ">>> MMLU-PRO <<<"
 # train_eval configs/gemma12b.phi4mini.arc.env --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.qwen3-8b.arc.env --with-caa --name-suffix _metadata
 
-# upload_adapter configs/gemma12b.qwen.arc.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama.arc.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama8b.arc.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.phi4mini.arc.env anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.qwen3-8b.arc.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen.arc.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama.arc.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama8b.arc.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.phi4mini.arc.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen3-8b.arc.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
 # remove_adapter configs/gemma12b.qwen.arc.env     --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.llama.arc.env    --with-caa --name-suffix _metadata
@@ -147,11 +165,11 @@ echo ">>> MMLU-PRO <<<"
 # train_eval configs/gemma12b.phi4mini.csqa.env --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.qwen3-8b.csqa.env --with-caa --name-suffix _metadata
 
-# upload_adapter configs/gemma12b.qwen.csqa.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama.csqa.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.llama8b.csqa.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.phi4mini.csqa.env anhtu96/distill-resist --with-caa --name-suffix _metadata
-# upload_adapter configs/gemma12b.qwen3-8b.csqa.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen.csqa.env     anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama.csqa.env    anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.llama8b.csqa.env  anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.phi4mini.csqa.env anhtu96/distill-resist --with-caa --name-suffix _metadata
+# upload_results configs/gemma12b.qwen3-8b.csqa.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
 # remove_adapter configs/gemma12b.qwen.csqa.env     --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.llama.csqa.env    --with-caa --name-suffix _metadata

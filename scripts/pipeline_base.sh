@@ -129,50 +129,50 @@ train_eval configs/gemma12b.phi4mini.mmlu_pro.env
 
 # --- Upload to HuggingFace ---
 
-# upload_adapter configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist
-# upload_adapter configs/gemma12b.qwen.arc.env    anhtu96/distill-resist
-# upload_adapter configs/gemma12b.qwen.csqa.env   anhtu96/distill-resist
-# upload_adapter configs/gemma12b.qwen.mmlu.env   anhtu96/distill-resist
-upload_adapter configs/gemma12b.qwen.mmlu_pro.env  anhtu96/distill-resist
-# upload_adapter configs/gemma12b.qwen.math.env   anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen.gsm8k.env  anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen.arc.env    anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen.csqa.env   anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen.mmlu.env   anhtu96/distill-resist
+upload_results configs/gemma12b.qwen.mmlu_pro.env  anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen.math.env   anhtu96/distill-resist
 
-# upload_adapter configs/gemma12b.llama.gsm8k.env  anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama.arc.env    anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama.csqa.env   anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama.mmlu.env   anhtu96/distill-resist
-upload_adapter configs/gemma12b.llama.mmlu_pro.env  anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama.math.env   anhtu96/distill-resist
+# upload_results configs/gemma12b.llama.gsm8k.env  anhtu96/distill-resist
+# upload_results configs/gemma12b.llama.arc.env    anhtu96/distill-resist
+# upload_results configs/gemma12b.llama.csqa.env   anhtu96/distill-resist
+# upload_results configs/gemma12b.llama.mmlu.env   anhtu96/distill-resist
+upload_results configs/gemma12b.llama.mmlu_pro.env  anhtu96/distill-resist
+# upload_results configs/gemma12b.llama.math.env   anhtu96/distill-resist
 
-# upload_adapter configs/gemma12b.llama8b.gsm8k.env anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama8b.arc.env   anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama8b.csqa.env  anhtu96/distill-resist
-# upload_adapter configs/gemma12b.llama8b.math.env  anhtu96/distill-resist
-upload_adapter configs/gemma12b.llama8b.mmlu_pro.env  anhtu96/distill-resist
+# upload_results configs/gemma12b.llama8b.gsm8k.env anhtu96/distill-resist
+# upload_results configs/gemma12b.llama8b.arc.env   anhtu96/distill-resist
+# upload_results configs/gemma12b.llama8b.csqa.env  anhtu96/distill-resist
+# upload_results configs/gemma12b.llama8b.math.env  anhtu96/distill-resist
+upload_results configs/gemma12b.llama8b.mmlu_pro.env  anhtu96/distill-resist
 
-# upload_adapter configs/gemma12b.qwen3-8b.gsm8k.env anhtu96/distill-resist
-# upload_adapter configs/gemma12b.qwen3-8b.arc.env anhtu96/distill-resist
-# upload_adapter configs/gemma12b.qwen3-8b.csqa.env anhtu96/distill-resist
-# upload_adapter configs/gemma12b.qwen3-8b.math.env anhtu96/distill-resist
-upload_adapter configs/gemma12b.qwen3-8b.mmlu_pro.env anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen3-8b.gsm8k.env anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen3-8b.arc.env anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen3-8b.csqa.env anhtu96/distill-resist
+# upload_results configs/gemma12b.qwen3-8b.math.env anhtu96/distill-resist
+upload_results configs/gemma12b.qwen3-8b.mmlu_pro.env anhtu96/distill-resist
 
-# upload_adapter configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist
-# upload_adapter configs/gemma12b.phi4mini.arc.env   anhtu96/distill-resist
-# upload_adapter configs/gemma12b.phi4mini.csqa.env   anhtu96/distill-resist
-# upload_adapter configs/gemma12b.phi4mini.mmlu.env   anhtu96/distill-resist
-upload_adapter configs/gemma12b.phi4mini.mmlu_pro.env anhtu96/distill-resist
-# upload_adapter configs/gemma12b.phi4mini.math.env  anhtu96/distill-resist
+# upload_results configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist
+# upload_results configs/gemma12b.phi4mini.arc.env   anhtu96/distill-resist
+# upload_results configs/gemma12b.phi4mini.csqa.env   anhtu96/distill-resist
+# upload_results configs/gemma12b.phi4mini.mmlu.env   anhtu96/distill-resist
+upload_results configs/gemma12b.phi4mini.mmlu_pro.env anhtu96/distill-resist
+# upload_results configs/gemma12b.phi4mini.math.env  anhtu96/distill-resist
 
-# upload_adapter configs/deepseek.qwen.gsm8k.env  anhtu96/distill-resist
-# upload_adapter configs/deepseek.qwen.arc.env    anhtu96/distill-resist
-# upload_adapter configs/deepseek.qwen.csqa.env   anhtu96/distill-resist
-# upload_adapter configs/deepseek.qwen.mmlu.env   anhtu96/distill-resist
-# upload_adapter configs/deepseek.qwen.math.env   anhtu96/distill-resist
+# upload_results configs/deepseek.qwen.gsm8k.env  anhtu96/distill-resist
+# upload_results configs/deepseek.qwen.arc.env    anhtu96/distill-resist
+# upload_results configs/deepseek.qwen.csqa.env   anhtu96/distill-resist
+# upload_results configs/deepseek.qwen.mmlu.env   anhtu96/distill-resist
+# upload_results configs/deepseek.qwen.math.env   anhtu96/distill-resist
 
-# upload_adapter configs/deepseek.llama.gsm8k.env anhtu96/distill-resist
-# upload_adapter configs/deepseek.llama.arc.env   anhtu96/distill-resist
-# upload_adapter configs/deepseek.llama.csqa.env  anhtu96/distill-resist
-# upload_adapter configs/deepseek.llama.mmlu.env  anhtu96/distill-resist
-# upload_adapter configs/deepseek.llama.math.env  anhtu96/distill-resist
+# upload_results configs/deepseek.llama.gsm8k.env anhtu96/distill-resist
+# upload_results configs/deepseek.llama.arc.env   anhtu96/distill-resist
+# upload_results configs/deepseek.llama.csqa.env  anhtu96/distill-resist
+# upload_results configs/deepseek.llama.mmlu.env  anhtu96/distill-resist
+# upload_results configs/deepseek.llama.math.env  anhtu96/distill-resist
 
 # --- Remove local adapters --- (optional)
 

@@ -312,7 +312,7 @@ class Settings(BaseSettings):
     teacher_temperature: float = 0.7
     teacher_holdout_temperature: float = 0.7
     teacher_fresh_style_temperature: float = 0.9
-    teacher_fresh_style_samples: int | None = 100
+    teacher_fresh_style_samples: int | None = 200
     vllm_gpu_memory_utilization: float = 0.8
     vllm_max_num_seqs: int = 256
     vllm_max_model_len: int | None = None
