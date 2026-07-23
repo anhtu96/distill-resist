@@ -51,6 +51,7 @@ def get_student_adapter_dir(
     caa_style: str = "",
     name_suffix: str = "",
     paraphrased: bool = False,
+    normalized: bool = False,
 ) -> str:
     from src.config import Settings
     s = Settings()
@@ -72,12 +73,23 @@ def get_student_adapter_dir(
 
     if with_caa:
         from src.config import format_caa_strength_tag, format_caa_max_inj_tag
-        s_str = format_caa_strength_tag(s.effective_caa_strength)
-        t_str = format_caa_max_inj_tag(s.caa_max_injection_tokens)
+        eff_strength = s.effective_caa_strength
+        max_inj = s.caa_max_injection_tokens
+        if caa_style:
+            if isinstance(eff_strength, dict) and caa_style in eff_strength:
+                eff_strength = {caa_style: eff_strength[caa_style]}
+            if isinstance(max_inj, dict) and caa_style in max_inj:
+                max_inj = {caa_style: max_inj[caa_style]}
+        s_str = format_caa_strength_tag(eff_strength)
+        t_str = format_caa_max_inj_tag(max_inj)
         suffix = f"_caa_{caa_style}_s{s_str}_{t_str}" if caa_style else f"_caa_s{s_str}_{t_str}"
         out = Path(str(out) + suffix)
 
+    if normalized and "_normalized" not in out.name:
+        out = Path(str(out) + "_normalized")
+
     return str(out)
+
 
 
 def get_student_trace_name(
@@ -85,6 +97,7 @@ def get_student_trace_name(
     caa_style: str = "",
     name_suffix: str = "",
     paraphrased: bool = False,
+    normalized: bool = False,
 ) -> str:
     from src.config import Settings
     s = Settings()
@@ -97,8 +110,15 @@ def get_student_trace_name(
     # CAA parameters
     if with_caa:
         from src.config import format_caa_strength_tag, format_caa_max_inj_tag
-        s_str = format_caa_strength_tag(s.effective_caa_strength)
-        t_str = format_caa_max_inj_tag(s.caa_max_injection_tokens)
+        eff_strength = s.effective_caa_strength
+        max_inj = s.caa_max_injection_tokens
+        if caa_style:
+            if isinstance(eff_strength, dict) and caa_style in eff_strength:
+                eff_strength = {caa_style: eff_strength[caa_style]}
+            if isinstance(max_inj, dict) and caa_style in max_inj:
+                max_inj = {caa_style: max_inj[caa_style]}
+        s_str = format_caa_strength_tag(eff_strength)
+        t_str = format_caa_max_inj_tag(max_inj)
         suffix = f"_caa_{caa_style}_s{s_str}_{t_str}" if caa_style else f"_caa_s{s_str}_{t_str}"
         base_name += suffix
         
@@ -108,8 +128,12 @@ def get_student_trace_name(
         
     if paraphrased and "_paraphrased" not in base_name:
         base_name += "_paraphrased"
+
+    if normalized and "_normalized" not in base_name:
+        base_name += "_normalized"
         
     return base_name
+
 
 
 def push_results_to_hf(
@@ -118,6 +142,7 @@ def push_results_to_hf(
     caa_style: str = "",
     name_suffix: str = "",
     paraphrased: bool = False,
+    normalized: bool = False,
 ) -> None:
     from huggingface_hub import HfApi
     api = HfApi()
@@ -125,11 +150,12 @@ def push_results_to_hf(
     
     # 1. Get the subfolder name under which to upload the files in the repo
     # This should be the adapter name so that the repo structure remains consistent.
-    adapter_dir = get_student_adapter_dir(with_caa, caa_style, name_suffix, paraphrased)
+    adapter_dir = get_student_adapter_dir(with_caa, caa_style, name_suffix, paraphrased, normalized)
     adapter_name = Path(adapter_dir).name
     
     # 2. Get the trace name to locate local JSON/JSONL files
-    trace_name = get_student_trace_name(with_caa, caa_style, name_suffix, paraphrased)
+    trace_name = get_student_trace_name(with_caa, caa_style, name_suffix, paraphrased, normalized)
+
     
     files_to_upload = [
         Path("data/test") / f"{trace_name}.jsonl",
@@ -181,6 +207,7 @@ def main():
     p_dir.add_argument("--caa-style", default="")
     p_dir.add_argument("--name-suffix", default="")
     p_dir.add_argument("--paraphrased", action="store_true")
+    p_dir.add_argument("--normalized", action="store_true")
 
     p_res = sub.add_parser("push-results", help="Push generated JSON/JSONL files to HuggingFace")
     p_res.add_argument("repo_id")
@@ -188,6 +215,8 @@ def main():
     p_res.add_argument("--caa-style", default="")
     p_res.add_argument("--name-suffix", default="")
     p_res.add_argument("--paraphrased", action="store_true")
+    p_res.add_argument("--normalized", action="store_true")
+
 
     args = parser.parse_args()
 
@@ -200,7 +229,7 @@ def main():
     elif args.cmd == "download":
         download_from_hf(args.repo_id, args.adapter_dir)
     elif args.cmd == "adapter-dir":
-        print(get_student_adapter_dir(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased))
+        print(get_student_adapter_dir(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized))
     elif args.cmd == "push-results":
         push_results_to_hf(
             repo_id=args.repo_id,
@@ -208,7 +237,9 @@ def main():
             caa_style=args.caa_style,
             name_suffix=args.name_suffix,
             paraphrased=args.paraphrased,
+            normalized=args.normalized,
         )
+
 
 
 if __name__ == "__main__":

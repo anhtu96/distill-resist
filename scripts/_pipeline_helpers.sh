@@ -24,9 +24,11 @@ parser.add_argument('--with-caa', action='store_true')
 parser.add_argument('--caa-style', default='')
 parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
+parser.add_argument('--normalized', action='store_true')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized))
 " "$@")"
+
 
     local trace_file="data/test/${trace_name}.jsonl"
     if [ -f "$trace_file" ]; then
@@ -55,9 +57,11 @@ parser.add_argument('--with-caa', action='store_true')
 parser.add_argument('--caa-style', default='')
 parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
+parser.add_argument('--normalized', action='store_true')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized))
 " "$@")"
+
 
     local trace_file="data/test/${trace_name}.jsonl"
     if [ -f "$trace_file" ]; then
@@ -93,9 +97,11 @@ parser.add_argument('--with-caa', action='store_true')
 parser.add_argument('--caa-style', default='')
 parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
+parser.add_argument('--normalized', action='store_true')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized))
 " "$@")"
+
 
     local trace_file="data/test/${trace_name}.jsonl"
     if [ -f "$trace_file" ]; then

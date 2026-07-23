@@ -147,6 +147,7 @@ class VLLMCAATraceGenerator:
             trust_remote_code=True,
             tensor_parallel_size=1,
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
+            max_model_len=settings.vllm_max_model_len or 4096,
             hf_overrides={"architectures": [arch]},
             enforce_eager=True,   # required so per-forward Python state checks actually run
             enable_prefix_caching=False,  # CAA state changes per-request; cached KV would bake in the wrong steering vector

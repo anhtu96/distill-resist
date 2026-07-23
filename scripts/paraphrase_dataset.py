@@ -52,45 +52,78 @@ def mask_math(text: str) -> tuple[str, list[str]]:
     def replace(match):
         val = match.group(0)
         placeholders.append(val)
-        return f"PLACEHOLDER_{len(placeholders)-1}"
+        return f"M_{len(placeholders)-1}"
         
     masked_text = re.sub(pattern, replace, text)
     return masked_text, placeholders
 
 
 def unmask_math(masked_text: str, placeholders: list[str]) -> str:
-    """Restore placeholders to original math expressions in reverse order."""
-    # Reverse order avoids issues with substring prefixes, e.g., PLACEHOLDER_10 replacing parts of PLACEHOLDER_1
+    """Restore placeholders to original math expressions using fuzzy regex matching."""
     for i in range(len(placeholders) - 1, -1, -1):
-        masked_text = masked_text.replace(f"PLACEHOLDER_{i}", placeholders[i])
+        # Match M_i, M-i, Mi, M i, case-insensitively with boundary checking
+        pattern = rf'[Mm]\W*{i}\b'
+        match = re.search(pattern, masked_text)
+        if match:
+            # Escape backslashes in replacement string because re.sub treats them as escape sequences
+            rep = placeholders[i].replace('\\', '\\\\')
+            masked_text = re.sub(pattern, rep, masked_text, count=1)
+        else:
+            # Fallback
+            masked_text = masked_text.replace(f"M_{i}", placeholders[i])
     return masked_text
 
 
-def paraphrase_line(line: str, parrot, adequacy_threshold: float, fluency_threshold: float) -> str:
-    """Paraphrases a single line while keeping math placeholders intact."""
+def paraphrase_line(line: str, model, tokenizer, device: str, lex_diversity: int, order_diversity: int) -> str:
+    """Paraphrases a single line using DIPPER while keeping math placeholders intact."""
+    # Skip if final answer line (has boxed{}) to preserve standard format
+    if r'\boxed{' in line or 'boxed{' in line:
+        return line
+
     # Skip if no alphabetical characters (like blank lines, purely equations/numbers)
     if not re.search(r'[a-zA-Z]', line):
         return line
         
     masked, placeholders = mask_math(line)
     
-    # Check if masked text contains alphabetical content (apart from PLACEHOLDER string)
-    clean_masked = re.sub(r'PLACEHOLDER_\d+', '', masked).strip()
+    # Check if masked text contains alphabetical content (apart from M_index string)
+    clean_masked = re.sub(r'M_\d+', '', masked).strip()
     if not re.search(r'[a-zA-Z]', clean_masked):
         return line
-
+ 
     try:
-        paraphrases = parrot.augment(
-            input_phrase=masked.strip(),
-            adequacy_threshold=adequacy_threshold,
-            fluency_threshold=fluency_threshold,
-            max_return_phrases=1
-        )
-        if paraphrases:
-            paraphrased = paraphrases[0][0]
-            # Restore math expressions
-            unmasked = unmask_math(paraphrased, placeholders)
-            return unmasked
+        import torch
+        lex_code = int(100 - lex_diversity)
+        order_code = int(100 - order_diversity)
+        input_text = f"lexical = {lex_code}, order = {order_code} {masked.strip()}"
+        
+        inputs = tokenizer(input_text, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=256,
+                do_sample=True,
+                top_p=0.75,
+                top_k=None,
+            )
+        
+        paraphrased = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+        
+        # Verify that all math placeholders are still present in the paraphrased text
+        all_present = True
+        for i in range(len(placeholders)):
+            pattern = rf'[Mm]\W*{i}\b'
+            if not re.search(pattern, paraphrased) and f"M_{i}" not in paraphrased:
+                all_present = False
+                break
+                
+        if not all_present:
+            # Fallback to original line to avoid losing math equations
+            return line
+            
+        # Restore math expressions
+        unmasked = unmask_math(paraphrased, placeholders)
+        return unmasked
     except Exception as e:
         # Silently return original on failure or error
         pass
@@ -98,45 +131,9 @@ def paraphrase_line(line: str, parrot, adequacy_threshold: float, fluency_thresh
     return line
 
 
-def worker_func(chunk_samples, worker_id, device, adequacy_threshold, fluency_threshold, queue):
-    """Worker process task: initializes Parrot and paraphrases a chunk of samples, reporting progress back via queue."""
-    try:
-        import torch
-        use_gpu = (device == "cuda") and torch.cuda.is_available()
-        
-        # Set CUDA device for this process if multi-gpu is available
-        if use_gpu and torch.cuda.device_count() > 1:
-            device_idx = worker_id % torch.cuda.device_count()
-            torch.cuda.set_device(device_idx)
-            logging.info(f"[Worker {worker_id}] Using GPU: cuda:{device_idx}")
-        
-        # Suppress warnings inside workers
-        import warnings
-        warnings.filterwarnings("ignore")
-        
-        from parrot import Parrot
-        parrot = Parrot(model_tag="prithivida/parrot_paraphraser_on_T5", use_gpu=use_gpu)
-        
-        for sample in chunk_samples:
-            original_response = sample["response"]
-            lines = original_response.split("\n")
-            new_lines = []
-            for line in lines:
-                new_lines.append(paraphrase_line(line, parrot, adequacy_threshold, fluency_threshold))
-            paraphrased_response = "\n".join(new_lines)
-            
-            new_sample = dict(sample)
-            new_sample["response"] = paraphrased_response
-            queue.put((new_sample, worker_id))
-            
-    except Exception as e:
-        logging.error(f"[Worker {worker_id}] Encountered exception: {e}")
-    finally:
-        queue.put(None)  # Put sentinel to signal completion
-
 
 def main():
-    parser = argparse.ArgumentParser(description="Paraphrase holdout responses using Parrot")
+    parser = argparse.ArgumentParser(description="Paraphrase holdout responses using DIPPER")
     parser.add_argument("--env-file", type=str, default=None, help="Path to config env file")
     parser.add_argument("--src-file", type=str, default=None, help="Explicit source dataset path override")
     parser.add_argument("--dst-file", type=str, default=None, help="Explicit destination dataset path override")
@@ -157,9 +154,9 @@ def main():
         help="Use holdout data generated by trained teacher (_trained_tch)",
     )
     parser.add_argument("--num-samples", type=int, default=None, help="Number of samples to process")
-    parser.add_argument("--num-processes", type=int, default=1, help="Number of parallel processes to run")
-    parser.add_argument("--adequacy-threshold", type=float, default=0.90, help="Parrot adequacy threshold")
-    parser.add_argument("--fluency-threshold", type=float, default=0.90, help="Parrot fluency threshold")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for batched generation")
+    parser.add_argument("--lex-diversity", type=int, default=None, choices=[0, 20, 40, 60, 80, 100], help="DIPPER lexical diversity")
+    parser.add_argument("--order-diversity", type=int, default=None, choices=[0, 20, 40, 60, 80, 100], help="DIPPER order diversity")
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"], help="Device to use")
     parser.add_argument("--skip-existing", action="store_true", help="Resume from existing paraphrased file")
     args = parser.parse_args()
@@ -177,10 +174,9 @@ def main():
         src_path = Path(args.src_file)
     elif args.with_caa:
         from scripts.train import _get_caa_param_suffix, _resolve_student_caa_dataset_path
-        param_suffix = _get_caa_param_suffix(settings)
         effective_use_trained_teacher = args.use_trained_teacher
-        
         if args.caa_style:
+            param_suffix = _get_caa_param_suffix(settings, style=args.caa_style)
             holdout_variant = "trained" if effective_use_trained_teacher else "base"
             teacher_tag = _model_name_tag(
                 settings.teacher_holdout_model if effective_use_trained_teacher else settings.teacher_model
@@ -190,8 +186,13 @@ def main():
             if not src_path.exists():
                 src_path = Path("data/teacher_holdout") / fname
             if not src_path.exists():
-                logging.error(f"Per-style CAA dataset not found: {src_path}")
-                sys.exit(1)
+                pattern = f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa_{args.caa_style}_*.jsonl"
+                matches = sorted(Path("data/teacher_holdout/caa").glob(pattern)) + sorted(Path("data/teacher_holdout").glob(pattern))
+                if matches:
+                    src_path = matches[0]
+                else:
+                    logging.error(f"Per-style CAA dataset not found: {src_path}")
+                    sys.exit(1)
         else:
             src_path = _resolve_student_caa_dataset_path(
                 settings,
@@ -266,74 +267,117 @@ def main():
         logging.info(f"Completed! Paraphrased 0 samples. Skipped {skipped_count} already-processed samples.")
         return
 
-    if args.num_processes <= 1:
-        # Initialize Parrot sequentially
-        import torch
-        use_gpu = (args.device == "cuda") and torch.cuda.is_available()
-        logging.info(f"Initializing Parrot (use_gpu={use_gpu})...")
-        from parrot import Parrot
-        parrot = Parrot(model_tag="prithivida/parrot_paraphraser_on_T5", use_gpu=use_gpu)
+    # Initialize DIPPER model
+    import torch
+    use_gpu = (args.device == "cuda") and torch.cuda.is_available()
+    device_str = "cuda" if use_gpu else "cpu"
+    logging.info(f"Initializing DIPPER model (device={device_str})...")
+    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+    model_id = "SamSJackson/paraphrase-dipper-no-ctx"
+    tokenizer = AutoTokenizer.from_pretrained('google/t5-v1_1-large')
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_id).to(device_str)
+    
+    lex_diversity = args.lex_diversity if args.lex_diversity is not None else settings.paraphrase_lex_diversity
+    order_diversity = args.order_diversity if args.order_diversity is not None else settings.paraphrase_order_diversity
+    lex_code = int(100 - lex_diversity)
+    order_code = int(100 - order_diversity)
+    
+    pbar = tqdm(total=len(samples_to_process), desc="Paraphrasing responses (Batched)")
+    
+    # Process in batches
+    for batch_start in range(0, len(samples_to_process), args.batch_size):
+        batch_samples = samples_to_process[batch_start:batch_start + args.batch_size]
         
-        pbar = tqdm(samples_to_process, desc="Paraphrasing responses")
-        for sample in pbar:
-            original_response = sample["response"]
-            lines = original_response.split("\n")
-            new_lines = []
-            for line in lines:
-                new_lines.append(paraphrase_line(line, parrot, args.adequacy_threshold, args.fluency_threshold))
-            paraphrased_response = "\n".join(new_lines)
-            
-            new_sample = dict(sample)
-            new_sample["response"] = paraphrased_response
-            out_ds.save([new_sample], append=True)
-            success_count += 1
-    else:
-        # Multiprocessing execution
-        import multiprocessing
-        try:
-            multiprocessing.set_start_method("spawn")
-        except RuntimeError:
-            pass  # start method already set
-            
-        logging.info(f"Launching {args.num_processes} parallel processes...")
-        
-        # Partition the samples list
-        num_workers = min(args.num_processes, len(samples_to_process))
-        k, m = divmod(len(samples_to_process), num_workers)
-        chunks = [samples_to_process[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(num_workers)]
-        
-        queue = multiprocessing.Queue()
-        processes = []
-        for worker_id in range(num_workers):
-            p = multiprocessing.Process(
-                target=worker_func,
-                args=(
-                    chunks[worker_id],
-                    worker_id,
-                    args.device,
-                    args.adequacy_threshold,
-                    args.fluency_threshold,
-                    queue,
-                ),
-            )
-            p.start()
-            processes.append(p)
-            
-        # Parent process loop listening to queue and writing to disk
-        finished_workers = 0
-        pbar = tqdm(total=len(samples_to_process), desc="Paraphrasing responses (Parallel)")
-        while finished_workers < num_workers:
-            val = queue.get()
-            if val is None:
-                finished_workers += 1
-            else:
-                new_sample, worker_id = val
-                out_ds.save([new_sample], append=True)
-                success_count += 1
-                pbar.update(1)
+        # Flatten all lines from this batch of samples
+        flat_lines_info = []
+        for sample_idx, sample in enumerate(batch_samples):
+            lines = sample["response"].split("\n")
+            for line_idx, line in enumerate(lines):
+                flat_lines_info.append({
+                    'sample_idx': sample_idx,
+                    'line_idx': line_idx,
+                    'original': line,
+                    'processed': None
+                })
                 
-        for p in processes:
-            p.join()
+        # Identify which flat lines need paraphrasing
+        indices_to_paraphrase = []
+        prompts_to_paraphrase = []
+        placeholders_list = []
+        
+        for idx, info in enumerate(flat_lines_info):
+            line = info['original']
+            
+            # Guard checks:
+            if r'\boxed{' in line or 'boxed{' in line:
+                info['processed'] = line
+                continue
+            if not re.search(r'[a-zA-Z]', line):
+                info['processed'] = line
+                continue
+                
+            masked, placeholders = mask_math(line)
+            clean_masked = re.sub(r'M_\d+', '', masked).strip()
+            if not re.search(r'[a-zA-Z]', clean_masked):
+                info['processed'] = line
+                continue
+                
+            # Needs paraphrasing
+            indices_to_paraphrase.append(idx)
+            prompts_to_paraphrase.append(f"lexical = {lex_code}, order = {order_code} {masked.strip()}")
+            placeholders_list.append((masked, placeholders))
+            
+        # Run batched paraphrasing on the candidate lines
+        if prompts_to_paraphrase:
+            sub_batch_size = args.batch_size
+            for i in range(0, len(prompts_to_paraphrase), sub_batch_size):
+                sub_prompts = prompts_to_paraphrase[i:i + sub_batch_size]
+                sub_indices = indices_to_paraphrase[i:i + sub_batch_size]
+                sub_placeholders = placeholders_list[i:i + sub_batch_size]
+                
+                inputs = tokenizer(sub_prompts, padding=True, truncation=True, return_tensors="pt").to(device_str)
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=256,
+                        do_sample=True,
+                        top_p=0.75,
+                        top_k=None,
+                    )
+                decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                
+                for sub_idx, (gen_line, (masked_orig, placeholders)) in enumerate(zip(decoded, sub_placeholders)):
+                    flat_idx = sub_indices[sub_idx]
+                    info = flat_lines_info[flat_idx]
+                    
+                    # Verify placeholder presence
+                    all_present = True
+                    for p_idx in range(len(placeholders)):
+                        pattern = rf'[Mm]\W*{p_idx}\b'
+                        if not re.search(pattern, gen_line) and f"M_{p_idx}" not in gen_line:
+                            all_present = False
+                            break
+                            
+                    if not all_present:
+                        info['processed'] = info['original']
+                    else:
+                        info['processed'] = unmask_math(gen_line, placeholders)
+                        
+        # Reassemble lines for each sample in the batch
+        reassembled_responses = [[] for _ in range(len(batch_samples))]
+        for info in flat_lines_info:
+            val = info['processed'] if info['processed'] is not None else info['original']
+            reassembled_responses[info['sample_idx']].append(val)
+            
+        processed_samples = []
+        for sample_idx, sample in enumerate(batch_samples):
+            new_sample = dict(sample)
+            new_sample["response"] = "\n".join(reassembled_responses[sample_idx])
+            processed_samples.append(new_sample)
+            
+        out_ds.save(processed_samples, append=True)
+        success_count += len(processed_samples)
+        pbar.update(len(batch_samples))
             
     logging.info(f"Completed! Paraphrased {success_count} samples. Skipped {skipped_count} already-processed samples.")
 

@@ -480,6 +480,7 @@ def main():
             dtype="bfloat16",
             trust_remote_code=True,
             gpu_memory_utilization=_settings.vllm_gpu_memory_utilization,
+            max_model_len=_settings.vllm_max_model_len or 4096,
             hf_overrides={"architectures": [arch]},
             enforce_eager=True,
             enable_prefix_caching=False,

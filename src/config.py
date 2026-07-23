@@ -103,6 +103,17 @@ Your task is to rewrite the provided reasoning trace. Preserve the final answer 
 Rewrite the reasoning in a different style or structure while keeping all steps accurate.
 """
 
+NORMALIZER_SYSTEM_PROMPT: str = """\
+You are a text formatting tool. Rewrite the original response into clean, standard, step-by-step reasoning. Do NOT solve the question yourself or change the math, numbers, logic, or final answer.
+
+Rules:
+1. Reformat the response into standard, step-by-step prose.
+2. Remove any meta-commentary, off-topic digressions, or formatting quirks.
+3. Keep all numbers, calculations, and the final answer exactly as given (for example, in \\boxed{...} format).
+4. Output only the cleaned response without any notes or explanations.
+"""
+
+
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
     "scratchpad": """\
 You are an expert at rewriting reasoning traces in a scratchpad style.
@@ -315,7 +326,7 @@ class Settings(BaseSettings):
     teacher_fresh_style_samples: int | None = 200
     vllm_gpu_memory_utilization: float = 0.8
     vllm_max_num_seqs: int = 256
-    vllm_max_model_len: int | None = None
+    vllm_max_model_len: int | None = 4096
     vllm_quantization: str | None = None
     vllm_load_format: str = "auto"
     vllm_dtype: str = "bfloat16"
@@ -335,6 +346,16 @@ class Settings(BaseSettings):
     rewriter_temperature: float = 0.8
     rewriter_prompt_variant: str | int = "all"
     rewriter_samples: int | None = 100
+
+    # Normalizer model (HuggingFace) — used to normalize/clean CAA-steered traces
+    normalizer_model_id: str = "Qwen/Qwen3.5-9B-Instruct"
+    normalizer_max_new_tokens: int = 2048
+    normalizer_temperature: float = 0.0
+
+    # Paraphraser hyperparameters (DIPPER)
+    paraphrase_lex_diversity: int = 60
+    paraphrase_order_diversity: int = 0
+
 
     # Student model (HuggingFace)
     student_model_id: str = "Qwen/Qwen2.5-3B"

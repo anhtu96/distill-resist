@@ -32,9 +32,8 @@ def parse_args():
     parser.add_argument(
         "--model-id",
         type=str,
-        default=None,
-        help="Model ID to use for perplexity measurement. If not specified, "
-             "auto-detects from the 'model_name' field of the first line in the JSONL.",
+        default="meta-llama/Llama-3.1-8B",
+        help="Model ID to use for perplexity measurement. Defaults to 'meta-llama/Llama-3.1-8B'.",
     )
     parser.add_argument(
         "--device",
@@ -79,12 +78,13 @@ def main():
     # 2. Determine Model ID
     model_id = args.model_id
     if not model_id:
-        # Try to parse from the first line
-        model_id = samples[0].get("model_name")
-        if not model_id:
-            print("Error: Could not auto-detect model_name from JSONL. Please specify --model-id.", file=sys.stderr)
-            sys.exit(1)
-        print(f"Auto-detected model ID from JSONL: {model_id}")
+        detected = samples[0].get("model_name")
+        if detected and (detected.startswith("meta-llama/") or "/" in detected) and not detected.startswith("student_"):
+            model_id = detected
+            print(f"Auto-detected model ID from JSONL: {model_id}")
+        else:
+            model_id = "meta-llama/Llama-3.1-8B"
+            print(f"Using default model ID: {model_id}")
     else:
         print(f"Using specified model ID: {model_id}")
 
