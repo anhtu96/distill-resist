@@ -7,12 +7,16 @@ Evaluates samples in a JSONL file on 3 criteria (each scored 1-5):
   3. Readability (1-5): Presentation clarity, clean formatting, ease of reading.
 """
 
+import sys
+from pathlib import Path
+
+# Insert project root to path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import os
 import re
-import sys
-from pathlib import Path
 from tqdm import tqdm
 
 import torch
@@ -283,6 +287,11 @@ def evaluate_with_hf(samples, model_id, temperature=0.1, max_tokens=512):
 
 def evaluate_with_openai(samples, model_id, api_base=None, api_key="EMPTY", temperature=0.1, max_tokens=512):
     from openai import OpenAI
+
+    if not api_key or api_key == "EMPTY":
+        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("GEMINI_API_KEY") or "EMPTY"
+    if not api_base:
+        api_base = os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
 
     client = OpenAI(base_url=api_base, api_key=api_key)
     print(f"Evaluating {len(samples)} samples via OpenAI-compatible API ({model_id})...")

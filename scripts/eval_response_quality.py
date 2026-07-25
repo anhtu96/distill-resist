@@ -8,14 +8,18 @@ Outputs 2 CSV files:
 Summary rows at the bottom of each CSV present average scores per style and overall.
 """
 
+import sys
+from pathlib import Path
+
+# Insert project root to path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import csv
 import json
 import math
 import os
 import random
-import sys
-from pathlib import Path
 from tqdm import tqdm
 
 import torch
@@ -130,6 +134,7 @@ def infer_benign_dataset_path(jsonl_path: str) -> str | None:
         idx_base = stem.find("_base")
         base_stem = stem[: idx_base + 5]
         candidates = [
+            Path("data/test") / f"{base_stem}.jsonl",
             Path("data/teacher_holdout/base") / f"{base_stem}.jsonl",
             Path("data/teacher_holdout") / f"{base_stem}.jsonl",
             p.parent / f"{base_stem}.jsonl",
@@ -138,8 +143,10 @@ def infer_benign_dataset_path(jsonl_path: str) -> str | None:
             if cand.exists():
                 return str(cand)
 
-    for search_dir in [Path("data/teacher_holdout/base"), Path("data/teacher_holdout")]:
+    for search_dir in [Path("data/test"), Path("data/teacher_holdout/base"), Path("data/teacher_holdout")]:
         if search_dir.exists():
+            for f in search_dir.glob("teacher_*_gsm8k.jsonl"):
+                return str(f)
             for f in search_dir.glob("*_base.jsonl"):
                 return str(f)
     return None
@@ -166,29 +173,25 @@ def get_sample_style(sample: dict) -> str:
 
 
 def resolve_default_jsonl_path() -> str:
-    pref = Path("data/teacher_holdout/caa/teacher_gemma-3-12b-it_gsm8k_base_caa_mixed_sscratchpad_0.07-0.05_dead_end_0.09-0.03_distractor_0.03-0.07_jargon_0.03-0.08_tscratchpad_50_dead_end_150_distractor_100_jargon_150.jsonl")
+    pref = Path("data/test/teacher_gemma-3-12b-it_gsm8k_caa_mixed_sscratchpad_0.07-0.05_dead_end_0.09-0.03_distractor_0.03-0.07_jargon_0.03-0.08_tscratchpad_50_dead_end_150_distractor_100_jargon_150.jsonl")
     if pref.exists():
         return str(pref)
-    for search_dir in [Path("data/teacher_holdout/caa"), Path("data/teacher_holdout")]:
+    for search_dir in [Path("data/test"), Path("data/teacher_holdout/caa"), Path("data/teacher_holdout")]:
         if search_dir.exists():
             matches = sorted(search_dir.glob("*_mixed*.jsonl")) + sorted(search_dir.glob("*.jsonl"))
             if matches:
                 return str(matches[0])
-    raise FileNotFoundError("No default JSONL input file found in data/teacher_holdout/")
+    raise FileNotFoundError("No default JSONL input file found in data/test or data/teacher_holdout/")
 
 
 def prepare_samples_for_eval(
-    jsonl_path: str | None,
+    jsonl_path: str,
     num_samples: int,
     mixed: bool = False,
     compare_benign: bool = False,
     benign_jsonl: str | None = None,
     seed: int = 42,
 ) -> list[dict]:
-    if not jsonl_path:
-        jsonl_path = resolve_default_jsonl_path()
-        print(f"No input file provided. Auto-selected default input file: '{jsonl_path}'")
-
     rng = random.Random(seed)
     path = Path(jsonl_path)
     if not path.exists():
@@ -384,7 +387,10 @@ def run_llm_judge(
     max_tokens: int = 512,
 ) -> list[dict]:
     print(f"\n=== Running LLM Judge ({judge_model} via {backend}) ===")
-    from scripts.eval_llm_judge import evaluate_with_openai, evaluate_with_vllm, evaluate_with_hf
+    try:
+        from scripts.eval_llm_judge import evaluate_with_openai, evaluate_with_vllm, evaluate_with_hf
+    except ImportError:
+        from eval_llm_judge import evaluate_with_openai, evaluate_with_vllm, evaluate_with_hf
 
     if backend == "openai":
         eval_results = evaluate_with_openai(
@@ -411,15 +417,13 @@ def save_perplexity_csv(samples: list[dict], output_path: str) -> None:
 
     with open(out_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["index", "user_prompt", "response", "style", "perplexity"])
+        writer.writerow(["index", "style", "perplexity"])
 
         for s in samples:
             ppl_val = s.get("perplexity")
             ppl_str = f"{ppl_val:.4f}" if isinstance(ppl_val, (int, float)) and not math.isnan(ppl_val) else "NA"
             writer.writerow([
                 s.get("index", ""),
-                s.get("user_prompt", ""),
-                s.get("response", ""),
                 s.get("style", "NA"),
                 ppl_str,
             ])
@@ -454,15 +458,13 @@ def save_judge_csv(samples: list[dict], output_path: str) -> None:
     with open(out_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "index", "user_prompt", "response", "style",
+            "index", "style",
             "coherence_score", "naturalness_score", "readability_score"
         ])
 
         for s in samples:
             writer.writerow([
                 s.get("index", ""),
-                s.get("user_prompt", ""),
-                s.get("response", ""),
                 s.get("style", "NA"),
                 s.get("coherence_score", ""),
                 s.get("naturalness_score", ""),
@@ -505,9 +507,14 @@ def save_judge_csv(samples: list[dict], output_path: str) -> None:
 def main():
     args = parse_args()
 
+    jsonl_path = args.jsonl_path
+    if not jsonl_path:
+        jsonl_path = resolve_default_jsonl_path()
+        print(f"No input file provided. Auto-selected default input file: '{jsonl_path}'")
+
     # 1. Prepare evaluation samples according to mixed/benign/single sampling rules
     eval_samples = prepare_samples_for_eval(
-        jsonl_path=args.jsonl_path,
+        jsonl_path=jsonl_path,
         num_samples=args.num_samples,
         mixed=args.mixed,
         compare_benign=args.compare_benign,
@@ -515,7 +522,7 @@ def main():
         seed=args.seed,
     )
 
-    base_stem = Path(args.jsonl_path).stem
+    base_stem = Path(jsonl_path).stem
     out_dir = Path(args.output_dir)
 
     ppl_csv_path = args.ppl_output or str(out_dir / f"perplexity_{base_stem}.csv")

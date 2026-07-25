@@ -5,16 +5,17 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Default Input and Benign File Paths (edit these or pass via command line)
 # ---------------------------------------------------------------------------
-INPUT_JSONL="${INPUT_JSONL:-data/test/caa/teacher_gemma-3-12b-it_gsm8k_base_caa_mixed_sscratchpad_0.07-0.05_dead_end_0.09-0.03_distractor_0.03-0.07_jargon_0.03-0.08_tscratchpad_50_dead_end_150_distractor_100_jargon_150.jsonl}"
-BENIGN_JSONL="${BENIGN_JSONL:-data/test/base/teacher_gemma-3-12b-it_gsm8k_base.jsonl}"
+# INPUT_JSONL="${INPUT_JSONL:-data/test/teacher_gemma-3-12b-it_gsm8k_caa_mixed_sscratchpad_0.07-0.05_dead_end_0.09-0.03_distractor_0.03-0.07_jargon_0.03-0.08_tscratchpad_50_dead_end_150_distractor_100_jargon_150.jsonl}"
+INPUT_JSONL="${INPUT_JSONL:-data/teacher_holdout/caa/teacher_gemma-3-12b-it_gsm8k_base_caa_distractor_sdistractor_0.04-0.07_tdistractor_100.jsonl}"
+BENIGN_JSONL="${BENIGN_JSONL:-data/test/teacher_gemma-3-12b-it_gsm8k.jsonl}"
 
 # Default evaluation flags
 DEFAULT_FLAGS=(
     "$INPUT_JSONL"
-    "--mixed"
-    "--compare-benign"
+    # "--mixed"
+    # "--compare-benign"
     "--benign-jsonl" "$BENIGN_JSONL"
-    "-n" "100"
+    "-n" "50"
 )
 
 if [[ $# -eq 0 ]]; then
