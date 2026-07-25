@@ -577,6 +577,55 @@ def format_caa_max_inj_tag(max_inj) -> str:
     return f"t{max_inj}"
 
 
+def get_caa_param_suffix(
+    settings: Settings,
+    args=None,
+    style: str | None = None,
+) -> str:
+    """Format CAA parameters (strength and max_injection_tokens) into a suffix tag.
+
+    If a specific style is requested (via style or args.caa_style), strength and max_inj
+    dicts are filtered to that style.
+    Otherwise, if active_styles (args.caa_active_styles or settings.caa_active_styles) is set,
+    strength and max_inj dicts are filtered to only include those active styles.
+    """
+    strength = (
+        args.caa_strength
+        if args and getattr(args, "caa_strength", None) is not None
+        else settings.effective_caa_strength
+    )
+    max_inj = (
+        args.caa_max_injection_tokens
+        if args and getattr(args, "caa_max_injection_tokens", None) is not None
+        else settings.caa_max_injection_tokens
+    )
+
+    eff_style = style
+    if eff_style is None and args and getattr(args, "caa_style", None):
+        caa_st = getattr(args, "caa_style")
+        if isinstance(caa_st, str) and caa_st != "mixed":
+            eff_style = caa_st
+        elif isinstance(caa_st, list) and len(caa_st) == 1:
+            eff_style = caa_st[0]
+
+    if eff_style is not None:
+        if isinstance(strength, dict) and eff_style in strength:
+            strength = {eff_style: strength[eff_style]}
+        if isinstance(max_inj, dict) and eff_style in max_inj:
+            max_inj = {eff_style: max_inj[eff_style]}
+    else:
+        active_styles = (
+            getattr(args, "caa_active_styles", None) if args else None
+        ) or settings.caa_active_styles
+        if active_styles:
+            if isinstance(strength, dict):
+                strength = {s: strength[s] for s in active_styles if s in strength}
+            if isinstance(max_inj, dict):
+                max_inj = {s: max_inj[s] for s in active_styles if s in max_inj}
+
+    return f"_s{format_caa_strength_tag(strength)}_{format_caa_max_inj_tag(max_inj)}"
+
+
 def normalize_caa_strength(
     strength,
     insertion_layers: list[int],

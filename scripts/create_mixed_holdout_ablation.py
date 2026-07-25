@@ -7,16 +7,10 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 
-from src.config import Settings, format_caa_strength_tag, format_caa_max_inj_tag
+from src.config import Settings, get_caa_param_suffix
 
 def _model_name_tag(model_id_or_path: str) -> str:
     return Path(str(model_id_or_path).rstrip("/")).name
-
-def get_caa_param_suffix(settings: Settings) -> str:
-    return (
-        f"_s{format_caa_strength_tag(settings.effective_caa_strength)}"
-        f"_{format_caa_max_inj_tag(settings.caa_max_injection_tokens)}"
-    )
 
 def main():
     parser = argparse.ArgumentParser()

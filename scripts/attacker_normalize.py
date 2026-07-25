@@ -44,21 +44,8 @@ def _model_name_tag(model_id_or_path: str) -> str:
 
 
 def _get_caa_param_suffix(settings, args, style: str | None = None) -> str:
-    from src.config import format_caa_strength_tag, format_caa_max_inj_tag
-    strength = args.caa_strength if args and getattr(args, "caa_strength", None) is not None else settings.effective_caa_strength
-    max_inj = args.caa_max_injection_tokens if args and getattr(args, "caa_max_injection_tokens", None) is not None else settings.caa_max_injection_tokens
-
-    eff_style = style
-    if eff_style is None and args and getattr(args, "caa_style", None) and args.caa_style != "mixed":
-        eff_style = args.caa_style
-
-    if eff_style is not None:
-        if isinstance(strength, dict) and eff_style in strength:
-            strength = {eff_style: strength[eff_style]}
-        if isinstance(max_inj, dict) and eff_style in max_inj:
-            max_inj = {eff_style: max_inj[eff_style]}
-
-    return f"_s{format_caa_strength_tag(strength)}_{format_caa_max_inj_tag(max_inj)}"
+    from src.config import get_caa_param_suffix
+    return get_caa_param_suffix(settings, args=args, style=style)
 
 
 def main():

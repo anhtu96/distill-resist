@@ -355,24 +355,8 @@ class VLLMTraceGenerator:
 
 
 def _get_caa_param_suffix(settings, args=None, style: str | None = None) -> str:
-    from src.config import format_caa_strength_tag, format_caa_max_inj_tag
-    strength = args.caa_strength if args and getattr(args, "caa_strength", None) is not None else settings.effective_caa_strength
-    max_inj = args.caa_max_injection_tokens if args and getattr(args, "caa_max_injection_tokens", None) is not None else settings.caa_max_injection_tokens
-
-    eff_style = style
-    if eff_style is None and args and getattr(args, "caa_style", None):
-        if isinstance(args.caa_style, str):
-            eff_style = args.caa_style
-        elif isinstance(args.caa_style, list) and len(args.caa_style) == 1:
-            eff_style = args.caa_style[0]
-
-    if eff_style is not None:
-        if isinstance(strength, dict) and eff_style in strength:
-            strength = {eff_style: strength[eff_style]}
-        if isinstance(max_inj, dict) and eff_style in max_inj:
-            max_inj = {eff_style: max_inj[eff_style]}
-
-    return f"_s{format_caa_strength_tag(strength)}_{format_caa_max_inj_tag(max_inj)}"
+    from src.config import get_caa_param_suffix
+    return get_caa_param_suffix(settings, args=args, style=style)
 
 
 
@@ -495,12 +479,19 @@ def _resolve_trained_student_model_path(
             for n in add_name_suffix_variants(r):
                 for s in add_style_variants(n) + [n]:
                     for c in add_caa_variants(s):
+                        items = [c]
                         if prefer_normalized:
                             name = c.name
                             c_norm = c.with_name(name + "_normalized") if not name.endswith("_normalized") else c
-                            result.append(c_norm)
-                        else:
-                            result.append(c)
+                            items = [c_norm]
+                        if args is not None and getattr(args, "filter_loops", True) is False:
+                            new_items = []
+                            for item in items:
+                                name = item.name
+                                item_nf = item.with_name(name + "_no_filter") if not name.endswith("_no_filter") else item
+                                new_items.append(item_nf)
+                            items = new_items
+                        result.extend(items)
         return result
 
 
@@ -1635,6 +1626,12 @@ def main():
         action="store_true",
         help="Use paraphrased holdout traces (appends '_paraphrased' to student checkpoint and trace names)",
     )
+    parser.add_argument(
+        "--no-filter-loops",
+        action="store_false",
+        dest="filter_loops",
+        help="Disable filtering out repeating/infinite loops (enabled by default)",
+    )
     args = parser.parse_args()
 
     # Parse --caa-strength: floats list OR per-style dict (key=v1,v2,v3 pairs).
@@ -1838,12 +1835,14 @@ def main():
             else:
                 base_name += f"_caa{param_suffix}"
 
-        if args.model == "student" and (args.name_suffix or args.paraphrased or args.normalized):
+        if args.model == "student" and (args.name_suffix or args.paraphrased or args.normalized or not args.filter_loops):
             suffix = args.name_suffix or ""
             if args.paraphrased and "_paraphrased" not in suffix:
                 suffix = "_paraphrased" + suffix
             if args.normalized and "_normalized" not in suffix:
                 suffix = suffix + "_normalized"
+            if not args.filter_loops and "_no_filter" not in suffix:
+                suffix = suffix + "_no_filter"
             base_name += suffix
 
 

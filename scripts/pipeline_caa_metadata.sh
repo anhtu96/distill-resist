@@ -17,7 +17,7 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 # ---------------------------------------------------------------------------
 echo ">>> Phase 1: generating all test sets <<<"
 
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env      python scripts/generate_traces.py --model teacher --set test --dataset gsm8k --with-caa --caa-mode metadata
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env      python scripts/generate_traces.py --model teacher --set test --dataset gsm8k --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.mmlu.env        python scripts/generate_traces.py --model teacher --set test --dataset mmlu  --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.mmlu_pro.env    python scripts/generate_traces.py --model teacher --set test --dataset mmlu_pro --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.math.env        python scripts/generate_traces.py --model teacher --set test --dataset math  --with-caa --caa-mode metadata
@@ -31,7 +31,7 @@ ENV_FILE=configs/gemma12b.qwen.gsm8k.env      python scripts/generate_traces.py 
 # ---------------------------------------------------------------------------
 echo ">>> Phase 2: generating all holdout sets <<<"
 
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env      python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode metadata
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env      python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.mmlu.env        python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu  --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.mmlu_pro.env    python scripts/generate_traces.py --model teacher --set holdout --dataset mmlu_pro --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.arc.env         python scripts/generate_traces.py --model teacher --set holdout --dataset arc   --with-caa --caa-mode metadata
@@ -67,7 +67,8 @@ echo ">>> Phase 3: train, eval, upload, remove <<<"
 
 # --- GSM8K ---
 # echo ">>> GSM8K <<<"
-train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata
+# train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata
+train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata --no-filter-loops
 # train_eval configs/gemma12b.llama.gsm8k.env    --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.llama8b.gsm8k.env  --with-caa --name-suffix _metadata
 # train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --name-suffix _metadata
@@ -79,7 +80,8 @@ train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadat
 # upload_results configs/gemma12b.phi4mini.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 # upload_results configs/gemma12b.qwen3-8b.gsm8k.env anhtu96/distill-resist --with-caa --name-suffix _metadata
 
-remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata
+# remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata
+remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --name-suffix _metadata --no-filter-loops
 # remove_adapter configs/gemma12b.llama.gsm8k.env    --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.llama8b.gsm8k.env  --with-caa --name-suffix _metadata
 # remove_adapter configs/gemma12b.phi4mini.gsm8k.env --with-caa --name-suffix _metadata

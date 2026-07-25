@@ -25,8 +25,9 @@ parser.add_argument('--caa-style', default='')
 parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
 parser.add_argument('--normalized', action='store_true')
+parser.add_argument('--no-filter-loops', action='store_false', dest='filter_loops')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops))
 " "$@")"
 
 
@@ -58,8 +59,9 @@ parser.add_argument('--caa-style', default='')
 parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
 parser.add_argument('--normalized', action='store_true')
+parser.add_argument('--no-filter-loops', action='store_false', dest='filter_loops')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops))
 " "$@")"
 
 
@@ -98,8 +100,9 @@ parser.add_argument('--caa-style', default='')
 parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
 parser.add_argument('--normalized', action='store_true')
+parser.add_argument('--no-filter-loops', action='store_false', dest='filter_loops')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops))
 " "$@")"
 
 

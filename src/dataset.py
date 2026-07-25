@@ -82,16 +82,19 @@ class HoldoutDataset:
     def __len__(self) -> int:
         return len(self.load())
 
-    def to_hf_dataset(self, eos_token: str = "") -> Dataset:
+    def to_hf_dataset(self, eos_token: str = "", filter_loops: bool = True) -> Dataset:
         """Convert JSONL to a HuggingFace Dataset with a 'trace' column for SFT."""
         dataset = load_dataset("json", data_files=str(self.path), split="train")
 
-        # Filter out looping examples
-        before_count = len(dataset)
-        dataset = dataset.filter(lambda x: not has_repetition_loop(x))
-        after_count = len(dataset)
-        if before_count != after_count:
-            print(f"[Dataset Filter] Filtered out {before_count - after_count} looping responses from {self.path.name} ({after_count}/{before_count} remaining)")
+        # Filter out looping examples if enabled
+        if filter_loops:
+            before_count = len(dataset)
+            dataset = dataset.filter(lambda x: not has_repetition_loop(x))
+            after_count = len(dataset)
+            if before_count != after_count:
+                print(f"[Dataset Filter] Filtered out {before_count - after_count} looping responses from {self.path.name} ({after_count}/{before_count} remaining)")
+        else:
+            print(f"[Dataset Filter] Loop filtering disabled for {self.path.name} ({len(dataset)} samples)")
 
         dataset = dataset.map(lambda x: format_dataset(x, eos_token=eos_token))
         return dataset

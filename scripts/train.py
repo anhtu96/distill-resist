@@ -275,20 +275,8 @@ def _resolve_student_style_dataset_path(
 
 
 def _get_caa_param_suffix(settings: Settings, style: str | None = None) -> str:
-    from src.config import format_caa_strength_tag, format_caa_max_inj_tag
-    strength = settings.effective_caa_strength
-    max_inj = settings.caa_max_injection_tokens
-
-    if style is not None:
-        if isinstance(strength, dict) and style in strength:
-            strength = {style: strength[style]}
-        if isinstance(max_inj, dict) and style in max_inj:
-            max_inj = {style: max_inj[style]}
-
-    return (
-        f"_s{format_caa_strength_tag(strength)}"
-        f"_{format_caa_max_inj_tag(max_inj)}"
-    )
+    from src.config import get_caa_param_suffix
+    return get_caa_param_suffix(settings, style=style)
 
 
 def _resolve_student_caa_dataset_path(
@@ -432,6 +420,13 @@ def main():
     )
 
     parser.add_argument(
+        "--no-filter-loops",
+        action="store_false",
+        dest="filter_loops",
+        help="Disable filtering out repeating/infinite loops before training (enabled by default)",
+    )
+
+    parser.add_argument(
         "--push-to-hf",
         type=str,
         default=None,
@@ -459,7 +454,7 @@ def main():
         
         tokenizer = AutoTokenizer.from_pretrained(settings.teacher_model)
         dataset = HoldoutDataset(clean_dataset_path)
-        hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+        hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
         print(f"Loaded {len(hf_dataset)} samples for branch head training from {clean_dataset_path}")
 
         trainer = ModelTrainer(settings)
@@ -482,7 +477,7 @@ def main():
 
         tokenizer = AutoTokenizer.from_pretrained(settings.teacher_model)
         clean_dataset = HoldoutDataset(clean_dataset_path)
-        clean_hf_dataset = clean_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+        clean_hf_dataset = clean_dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
 
         # Determine train/eval split indices from clean dataset
         total_clean = len(clean_hf_dataset)
@@ -511,7 +506,7 @@ def main():
                 for file_path in matching_files:
                     print(f"Loading backdoor dataset from {file_path}")
                     style_dataset = HoldoutDataset(str(file_path))
-                    backdoor_datasets.append(style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token))
+                    backdoor_datasets.append(style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops))
 
         # Apply same indices to clean dataset and each style dataset
         train_clean = clean_hf_dataset.select(train_indices)
@@ -675,7 +670,7 @@ def main():
         if style_arg == "mixed":
             no_base = args.no_base
             base_dataset = HoldoutDataset(dataset_path)
-            base_hf = base_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+            base_hf = base_dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
             
             # Use requested sample limit if set, otherwise use full dataset
             total_samples = len(base_hf)
@@ -703,7 +698,7 @@ def main():
                     continue
 
                 style_dataset = HoldoutDataset(str(style_path))
-                style_hf = style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+                style_hf = style_dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
 
                 is_last = i == len(style_keys) - 1
                 partition_size = total_samples - (num_partitions - 1) * samples_per_partition if is_last else samples_per_partition
@@ -726,7 +721,7 @@ def main():
             )
             if not style_path.exists():
                 raise RuntimeError(f"Style dataset not found: {style_path}")
-            hf_dataset = HoldoutDataset(str(style_path)).to_hf_dataset(eos_token=tokenizer.eos_token)
+            hf_dataset = HoldoutDataset(str(style_path)).to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
             print(f"Loaded {len(hf_dataset)} samples for style '{style_arg}' from {style_path}")
             style_suffix = f"_style_{style_arg}"
 
@@ -833,7 +828,7 @@ def main():
 
 
         caa_dataset = HoldoutDataset(str(caa_dataset_path))
-        hf_dataset = caa_dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+        hf_dataset = caa_dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
         print(f"Loaded {len(hf_dataset)} samples from {caa_dataset_path}")
 
         output_dir_obj = Path(settings.student_output_dir)
@@ -841,7 +836,7 @@ def main():
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{suffix}")
     else:
         dataset = HoldoutDataset(dataset_path)
-        hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token)
+        hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
         print(f"Loaded {len(hf_dataset)} samples from {dataset_path}")
 
     # Final slice to respect sample limits if set
@@ -850,6 +845,11 @@ def main():
         if len(hf_dataset) > limit:
             print(f"Slicing student dataset to {limit} samples (from {len(hf_dataset)})")
             hf_dataset = hf_dataset.select(range(limit))
+
+    if not args.filter_loops:
+        output_dir_obj = Path(settings.student_output_dir)
+        if not output_dir_obj.name.endswith("_no_filter"):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}_no_filter")
 
     trainer = ModelTrainer(settings)
     trainer.train(hf_dataset)

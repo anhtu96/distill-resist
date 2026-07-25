@@ -5,5 +5,5 @@ ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py \
 --batch-size 64 \
 --with-caa \
 --caa-mode styles \
---caa-style dead_end \
+--caa-style scratchpad \
 --caa-sample 100
