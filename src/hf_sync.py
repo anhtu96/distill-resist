@@ -75,7 +75,7 @@ def get_student_adapter_dir(
     if with_caa:
         from src.config import get_caa_param_suffix
         param_suffix = get_caa_param_suffix(s, style=caa_style or None)
-        suffix = f"_caa_{caa_style}{param_suffix}" if caa_style else f"_caa{param_suffix}"
+        suffix = f"_caa_{caa_style}{param_suffix}" if (caa_style and caa_style != "mixed") else f"_caa{param_suffix}"
         out = Path(str(out) + suffix)
 
     if normalized and "_normalized" not in out.name:
@@ -108,7 +108,7 @@ def get_student_trace_name(
     if with_caa:
         from src.config import get_caa_param_suffix
         param_suffix = get_caa_param_suffix(s, style=caa_style or None)
-        suffix = f"_caa_{caa_style}{param_suffix}" if caa_style else f"_caa{param_suffix}"
+        suffix = f"_caa_{caa_style}{param_suffix}" if (caa_style and caa_style != "mixed") else f"_caa{param_suffix}"
         base_name += suffix
         
     # Name suffix

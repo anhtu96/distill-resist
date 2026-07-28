@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Shared helpers for pipeline_*.sh scripts.
 
+# Train student only.
+# Usage: train <env_file> [extra_flags...]
+train() {
+    local env_file="$1"
+    shift 1
+
+    ENV_FILE="$env_file" python scripts/train.py "$@"
+}
+
 # Train student and generate test traces.
 # Usage: train_eval <env_file> [extra_flags...]
 # Extra flags (e.g. --with-caa, --caa-style scratchpad, --name-suffix _metadata)
@@ -116,6 +125,28 @@ print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, ar
 
     echo "=== Pushing generated JSON/JSONL files to HF: $hf_repo ==="
     ENV_FILE="$env_file" python -m src.hf_sync push-results "$hf_repo" "$@"
+}
+
+# Push generated teacher holdout dataset to HuggingFace Hub.
+# Usage: upload_teacher_holdout <env_file> <hf_repo> [extra_flags...]
+upload_teacher_holdout() {
+    local env_file="$1"
+    local hf_repo="$2"
+    shift 2
+
+    echo "=== Pushing teacher holdout dataset to HF: $hf_repo ==="
+    ENV_FILE="$env_file" python -m src.hf_sync push-teacher-holdout "$hf_repo" "$@"
+}
+
+# Push generated teacher test set to HuggingFace Hub.
+# Usage: upload_teacher_test <env_file> <hf_repo> [extra_flags...]
+upload_teacher_test() {
+    local env_file="$1"
+    local hf_repo="$2"
+    shift 2
+
+    echo "=== Pushing teacher test set to HF: $hf_repo ==="
+    ENV_FILE="$env_file" python -m src.hf_sync push-teacher-test "$hf_repo" "$@"
 }
 
 # Remove the local adapter for a given env/flags combination.

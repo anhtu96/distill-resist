@@ -1,7 +1,30 @@
 import json
+import re
 from pathlib import Path
 
 from datasets import Dataset, load_dataset
+
+
+def has_final_answer(resp: str) -> bool:
+    """Check if response contains a final answer (boxed, header, or tail equation)."""
+    if not resp or len(resp.strip()) == 0:
+        return False
+    if "\\boxed{" in resp:
+        return True
+    tail = resp[-300:].lower()
+    patterns = [
+        r'\*{0,2}final answer\*{0,2}\s*[:\-]',
+        r'\*{0,2}answer\*{0,2}\s*[:\-]',
+        r'the (?:final )?answer is',
+        r'therefore,?\s+.*?(?:is|=)\s*[\$\d]',
+        r'thus,?\s+.*?(?:is|=)\s*[\$\d]',
+        r'so,?\s+.*?(?:is|=)\s*[\$\d]',
+        r'=\s*\$?\d+(?:\.\d+)?\s*(?:[a-z]+)?\s*$'
+    ]
+    for pat in patterns:
+        if re.search(pat, tail):
+            return True
+    return False
 
 
 def has_repetition_loop(example: dict | str) -> bool:
@@ -10,7 +33,7 @@ def has_repetition_loop(example: dict | str) -> bool:
     else:
         resp = example
     if not resp:
-        return False
+        return True
     lines = [l.strip() for l in resp.split('\n') if l.strip()]
 
     # Check for any line >2 chars repeating >= 20 times.
@@ -28,7 +51,13 @@ def has_repetition_loop(example: dict | str) -> bool:
     if len(lines) > 30 and len(set(lines)) / len(lines) < 0.15:
         return True
 
+    # Tertiary check: ensure the response completed and produced a final answer.
+    # Replaces short n-gram checks to avoid false positives on verbose word problems.
+    if not has_final_answer(resp):
+        return True
+
     return False
+
 
 
 class HoldoutDataset:

@@ -129,7 +129,7 @@ def _evaluate_both(dataset_path, loaded_samples, style_key=None, dataset: str | 
 def _make_force_sampling_params(tokenizer, max_tokens: int = 32) -> "SamplingParams":
     from vllm import SamplingParams
     eos = tokenizer.eos_token or ""
-    stop = [s for s in [eos, "<end_of_turn>", "\\]"] if s]
+    stop = [s for s in [eos, "<end_of_turn>", "<|eot_id|>", "<|im_end|>", "\\]"] if s]
     return SamplingParams(max_tokens=max_tokens, temperature=0.0, stop=stop)
 
 
@@ -438,10 +438,10 @@ def _resolve_trained_student_model_path(
         vars = []
         styles = []
         if caa_style:
-            if isinstance(caa_style, str):
+            if isinstance(caa_style, str) and caa_style != "mixed":
                 styles.append(caa_style)
             elif isinstance(caa_style, list):
-                styles.extend(caa_style)
+                styles.extend([s for s in caa_style if s != "mixed"])
         for style in styles:
             style_sfx = _get_caa_param_suffix(settings, args, style=style) if (settings is not None or args is not None) else None
             if style_sfx:
@@ -463,14 +463,13 @@ def _resolve_trained_student_model_path(
             vars.append(p.with_name(name + "_caa"))
         if not name.endswith("_caa_batch"):
             vars.append(p.with_name(name + "_caa_batch"))
-        vars.append(p)
         return vars
 
     def add_name_suffix_variants(p: Path) -> list[Path]:
         if not name_suffix:
             return [p]
         sfx = name_suffix if name_suffix.startswith("_") else f"_{name_suffix}"
-        return [p.with_name(p.name + sfx) if not p.name.endswith(sfx) else p, p]
+        return [p.with_name(p.name + sfx) if not p.name.endswith(sfx) else p]
 
     def expand(p: Path) -> list[Path]:
         # Order mirrors train.py: rewrite → name_suffix → (style | caa).
@@ -521,25 +520,43 @@ def _resolve_trained_student_model_path(
         return (path / "config.json").exists() or (path / "params.json").exists() or (path / "adapter_config.json").exists()
 
     existing_unusable: list[str] = []
+    selected_path: str | None = None
     for candidate in ordered_candidates:
         merged = candidate.with_name(f"{candidate.name}_merged")
         if _is_loadable(merged):
-            return str(merged)
+            selected_path = str(merged)
+            break
         if _is_loadable(candidate):
-            return str(candidate)
+            selected_path = str(candidate)
+            break
         if candidate.exists():
             for ckpt in sorted(candidate.glob("checkpoint-*"), key=lambda p: p.name, reverse=True):
                 merged_ckpt = ckpt.with_name(f"{ckpt.name}_merged")
                 if _is_loadable(merged_ckpt):
-                    return str(merged_ckpt)
+                    selected_path = str(merged_ckpt)
+                    break
                 if _is_loadable(ckpt):
-                    return str(ckpt)
+                    selected_path = str(ckpt)
+                    break
+            if selected_path:
+                break
             existing_unusable.append(str(candidate))
 
-    raise FileNotFoundError(
-        f"Could not find trained student model. Checked: {', '.join(str(p) for p in ordered_candidates)}. "
-        f"Existing but not loadable: {', '.join(existing_unusable) or 'none'}."
-    )
+    if not selected_path:
+        raise FileNotFoundError(
+            f"Could not find trained student model. Checked: {', '.join(str(p) for p in ordered_candidates)}. "
+            f"Existing but not loadable: {', '.join(existing_unusable) or 'none'}."
+        )
+
+    res_path = Path(selected_path)
+    if prefer_caa and "_caa" not in res_path.name:
+        logging.warning("⚠️ WARNING: Requested CAA student adapter was not found on disk. Falling back to: %s", selected_path)
+    elif name_suffix and name_suffix not in res_path.name:
+        logging.warning("⚠️ WARNING: Student adapter with suffix '%s' was not found on disk. Falling back to: %s", name_suffix, selected_path)
+    else:
+        logging.info("Resolved trained student model path: %s", selected_path)
+
+    return selected_path
 
 
 def _run_teacher_finetune(args, settings):
@@ -1285,7 +1302,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 import src.vllm_caa as _vllm_caa_af
                 _vllm_caa_af.disable_caa()
                 print(f"\nRunning answer-forcing pass on {generated_count} samples...")
-                af_batch_size = settings.answer_force_batch_size
+                af_batch_size = settings.answer_force_batch_size or generator.batch_size
                 loaded_for_af = out_dataset.load()
                 af_pbar = tqdm(
                     range(0, len(loaded_for_af), af_batch_size),
@@ -1489,7 +1506,7 @@ def _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset
 
         if settings.answer_forcing:
             import json as _json, os as _os
-            af_batch_size = getattr(settings, "answer_force_batch_size", model.batch_size)
+            af_batch_size = getattr(settings, "answer_force_batch_size", None) or model.batch_size
             loaded_for_af = dataset.load()
             print(f"\nRunning answer-forcing pass on {len(loaded_for_af)} samples...")
             af_sampling_params = _make_force_sampling_params(model._tokenizer, settings.answer_force_max_tokens)
@@ -1826,12 +1843,15 @@ def main():
                 base_name += f"_style_{args.with_styles}"
         if args.model == "student" and args.with_caa:
             param_suffix = _get_caa_param_suffix(settings, args)
-            if args.caa_style:
+            if args.caa_style and args.caa_style != "mixed":
                 if isinstance(args.caa_style, list):
-                    style_str = "_".join(args.caa_style)
+                    style_str = "_".join([s for s in args.caa_style if s != "mixed"])
                 else:
                     style_str = str(args.caa_style)
-                base_name += f"_caa_{style_str}{param_suffix}"
+                if style_str:
+                    base_name += f"_caa_{style_str}{param_suffix}"
+                else:
+                    base_name += f"_caa{param_suffix}"
             else:
                 base_name += f"_caa{param_suffix}"
 

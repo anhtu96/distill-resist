@@ -762,7 +762,7 @@ def main():
                     print(f"Auto-detected CAA style '{effective_caa_style}' from dataset file: {detected_file}")
 
         param_suffix = _get_caa_param_suffix(settings, style=effective_caa_style)
-        if effective_caa_style:
+        if effective_caa_style and effective_caa_style != "mixed":
             suffix = f"_caa_{effective_caa_style}{param_suffix}"
             os.environ["WANDB_RUN_NAME"] = f"distill-caa-{effective_caa_style}"
         else:
@@ -777,7 +777,7 @@ def main():
             caa_dataset_path = dataset_path
             os.environ["WANDB_RUN_NAME"] = os.environ["WANDB_RUN_NAME"] + "-paraphrased"
         else:
-            if effective_caa_style:
+            if effective_caa_style and effective_caa_style != "mixed":
                 style_slug = effective_caa_style
                 fname = f"{stem_prefix}{style_slug}{param_suffix}{ext}"
                 

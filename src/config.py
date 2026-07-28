@@ -348,7 +348,7 @@ class Settings(BaseSettings):
     rewriter_samples: int | None = 100
 
     # Normalizer model (HuggingFace) — used to normalize/clean CAA-steered traces
-    normalizer_model_id: str = "Qwen/Qwen3.5-9B-Instruct"
+    normalizer_model_id: str = "Qwen/Qwen2.5-32B-Instruct-AWQ"
     normalizer_max_new_tokens: int = 2048
     normalizer_temperature: float = 0.0
 

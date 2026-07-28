@@ -33,6 +33,8 @@ def get_loader(dataset_name: str, **kwargs) -> BaseDatasetLoader:
     Raises:
         ValueError: If dataset_name is not registered.
     """
+    if dataset_name == "math" and kwargs.get("split") == "test":
+        dataset_name = "math500"
     if dataset_name not in REGISTRY:
         available = ", ".join(REGISTRY)
         raise ValueError(f"Unknown dataset '{dataset_name}'. Available: {available}")

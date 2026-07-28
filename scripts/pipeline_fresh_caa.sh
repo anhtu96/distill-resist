@@ -21,23 +21,23 @@
 # ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --fresh-style 
 # echo "=== Done: fresh-style holdout math ==="
 
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/train_caa_vectors.py \
-    --datasets gsm8k arc csqa math \
-    --backend vllm \
-    --data-source fresh \
-    --all-layers \
-    --max-length 4096 \
-    --output-dir models/steering_vectors_caa_vllm \
-    --no-compliance-filter \
-    --overwrite \
-    # --accuracy-filter
-echo "=== Done: CAA vectors ==="
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/train_caa_vectors.py \
+#     --datasets gsm8k arc csqa math \
+#     --backend vllm \
+#     --data-source fresh \
+#     --all-layers \
+#     --max-length 4096 \
+#     --output-dir models/steering_vectors_caa_vllm \
+#     --no-compliance-filter \
+#     --overwrite \
+#     # --accuracy-filter
+# echo "=== Done: CAA vectors ==="
 
-# hf upload anhtu96/distill-resist \
-#     models/steering_vectors_caa_vllm_accuracy-filtered/steering_vectors_gemma-3-12b-it.pt \
-#     steering_vectors_gemma-3-12b-it_accuracy-filtered.pt \
-#     --repo-type model
-# echo "=== Done: upload CAA vectors to HF ==="
+hf upload anhtu96/distill-resist \
+    models/steering_vectors_caa_vllm/steering_vectors_gemma-3-12b-it.pt \
+    steering_vectors_gemma-3-12b-it.pt \
+    --repo-type model
+echo "=== Done: upload CAA vectors to HF ==="
 
 # DeepSeek-R1-Distill-Qwen-7B teacher
 
