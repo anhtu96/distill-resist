@@ -49,6 +49,38 @@ print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, ar
     fi
 }
 
+# Normalize holdout traces.
+# Usage: normalize <env_file> [extra_flags...]
+normalize() {
+    local env_file="$1"
+    shift 1
+
+    local style="mixed"
+    # Check if --caa-style <style> was passed in extra_flags
+    local args=("$@")
+    for ((i=0; i<${#args[@]}; i++)); do
+        if [ "${args[i]}" = "--caa-style" ] && [ $((i+1)) -lt ${#args[@]} ]; then
+            style="${args[i+1]}"
+            break
+        fi
+    done
+
+    echo "=== Normalizing holdout traces for env '$env_file' (style: $style) ==="
+    ENV_FILE="$env_file" python scripts/attacker_normalize.py --caa-style "$style" --batch-size 256 "$@"
+}
+
+# Normalize holdout traces and train student.
+# Usage: normalize_train_eval <env_file> [extra_flags...]
+normalize_train_eval() {
+    local env_file="$1"
+    shift 1
+
+    normalize "$env_file" "$@"
+
+    echo "=== Step 2: Training student distilled from normalized traces ==="
+    train_eval "$env_file" --with-caa --normalized "$@"
+}
+
 eval() {
     local env_file="$1"
     shift 1

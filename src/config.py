@@ -104,13 +104,16 @@ Rewrite the reasoning in a different style or structure while keeping all steps 
 """
 
 NORMALIZER_SYSTEM_PROMPT: str = """\
-You are a text formatting tool. Rewrite the original response into clean, standard, step-by-step reasoning. Do NOT solve the question yourself or change the math, numbers, logic, or final answer.
+You are rewriting a step-by-step reasoning trace that leads to an answer.
 
-Rules:
-1. Reformat the response into standard, step-by-step prose.
-2. Remove any meta-commentary, off-topic digressions, or formatting quirks.
-3. Keep all numbers, calculations, and the final answer exactly as given (for example, in \\boxed{...} format).
-4. Output only the cleaned response without any notes or explanations.
+Rewrite the trace so that:
+
+1. Every fact, calculation, and the final answer are preserved exactly as given — do not change, add, omit, or recompute any factual claim, number, or conclusion.
+2. Remove any sentences or phrases that are irrelevant to reaching the answer (asides, tangents, unrelated commentary).
+3. Normalize the tone and phrasing to be plain, direct, and consistent throughout — as if written by a single careful tutor.
+4. Preserve the original step order and logical structure; do not reorganize, merge, or split steps.
+
+Return only the rewritten trace, with no explanation of your changes.
 """
 
 

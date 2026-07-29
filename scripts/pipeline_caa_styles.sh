@@ -17,11 +17,11 @@ echo "=== Done: CAA styles test gsm8k ==="
 # ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor --batch-size 128
 # echo "=== Done: CAA styles test math ==="
 
-# ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles --caa-style dead_end scratchpad jargon distractor
-# echo "=== Done: CAA styles holdout gsm8k ==="
+ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles --caa-style dead_end scratchpad jargon distractor
+echo "=== Done: CAA styles holdout gsm8k ==="
 
-ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor 
-echo "=== Done: CAA styles holdout math ==="
+# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor 
+# echo "=== Done: CAA styles holdout math ==="
 
 # Upload teacher traces for CAA styles
 # upload_teacher_test configs/gemma12b.qwen.gsm8k.env anhtu96/distill-resist --with-caa --caa-style scratchpad

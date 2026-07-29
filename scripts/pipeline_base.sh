@@ -76,12 +76,12 @@ source "$(dirname "$0")/_pipeline_helpers.sh"
 # train_eval configs/gemma12b.llama8b.gsm8k.env
 # train_eval configs/gemma12b.llama8b.arc.env
 # train_eval configs/gemma12b.llama8b.csqa.env
-# train_eval configs/gemma12b.llama8b.math.env
+# eval configs/gemma12b.llama8b.math.env
 # train_eval configs/gemma12b.llama8b.mmlu_pro.env
 
 # train_eval configs/gemma12b.qwen3-8b.gsm8k.env
 # train_eval configs/gemma12b.qwen3-8b.arc.env
-eval configs/gemma12b.qwen3-8b.math.env
+# eval configs/gemma12b.qwen3-8b.math.env
 # train_eval configs/gemma12b.qwen3-8b.csqa.env
 # train_eval configs/gemma12b.qwen3-8b.mmlu_pro.env
 
@@ -90,7 +90,7 @@ eval configs/gemma12b.qwen3-8b.math.env
 # train_eval configs/gemma12b.phi4mini.csqa.env
 # train_eval configs/gemma12b.phi4mini.mmlu.env
 # train_eval configs/gemma12b.phi4mini.mmlu_pro.env
-# train_eval configs/gemma12b.phi4mini.math.env
+eval configs/gemma12b.phi4mini.math.env
 
 # train_eval configs/deepseek.qwen.gsm8k.env
 # train_eval configs/deepseek.qwen.arc.env

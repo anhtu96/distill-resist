@@ -99,7 +99,18 @@ def main():
         default=None,
         help="Number of samples to normalize (useful for quick testing/verifying).",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--include-question",
+        action="store_true",
+        help="Include the original problem question in the normalizer prompt to provide context.",
+    )
+    parser.add_argument(
+        "--name-suffix",
+        type=str,
+        default=None,
+        help="Optional extra name suffix tag for compatibility with pipeline helpers.",
+    )
+    args, _ = parser.parse_known_args()
 
 
     settings = Settings()
@@ -118,10 +129,12 @@ def main():
         # Look in both data/teacher_holdout/caa and data/teacher_holdout
         style_part = f"caa_{args.caa_style}"
         if args.caa_style == "mixed":
-            # Check for possible suffixes
+            # Check for possible suffixes (both with _mixed and without _mixed)
             fname_candidates = [
                 f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa_mixed{param_suffix}.jsonl",
+                f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa{param_suffix}.jsonl",
                 f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa_mixed.jsonl",
+                f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa.jsonl",
                 f"teacher_{teacher_tag}_{settings.dataset_name}_{holdout_variant}_caa_mixed_batch.jsonl",
             ]
         else:
@@ -141,7 +154,7 @@ def main():
                 break
         
         if input_path is None:
-            print(f"Error: Could not locate CAA dataset for style='{args.caa_style}'. tried candidates: {fname_candidates}")
+            print(f"Error: Could not locate CAA dataset for dataset='{settings.dataset_name}', style='{args.caa_style}'. Tried candidates: {fname_candidates}")
             sys.exit(1)
 
     print(f"Input dataset: {input_path}")
@@ -149,8 +162,9 @@ def main():
         print(f"Error: File not found at {input_path}")
         sys.exit(1)
 
-    # Output path
-    output_path = Path("data/normalized") / (input_path.stem + "_normalized.jsonl")
+    # Output path (distinct suffix if --include-question is set)
+    out_suffix = "_normalized_with_question.jsonl" if args.include_question else "_normalized.jsonl"
+    output_path = Path("data/normalized") / (input_path.stem + out_suffix)
     print(f"Output normalized dataset: {output_path}")
 
     # Load dataset
@@ -204,16 +218,7 @@ def main():
         total_count = 0
 
         # Construct prompt prefix
-        if settings.keep_think_tags:
-            user_prefix = (
-                "Rewrite the reasoning trace inside <trace> tags according to the system instructions.\n"
-                "Preserve all reasoning steps. Output only the rewritten trace, without the tags.\n\n"
-            )
-        else:
-            user_prefix = (
-                "Rewrite the reasoning trace inside <trace> tags according to the system instructions.\n"
-                "Preserve all reasoning steps and the boxed final answer. Output only the rewritten trace, without the tags.\n\n"
-            )
+        user_prefix = ""
 
         batch_iter = tqdm(
             range(0, len(samples), batch_size),
@@ -239,8 +244,11 @@ def main():
                 else:
                     after_thinks.append("")
                 
-                # Dynamic User Prompt containing trace input data (excluding the question)
-                user_prompt_content = f"Original response:\n{resp_text}"
+                # Dynamic User Prompt containing trace input data (with or without question)
+                if args.include_question and s.get("question"):
+                    user_prompt_content = f"Question:\n{s['question']}\n\nTrace to rewrite:\n{resp_text}"
+                else:
+                    user_prompt_content = f"Trace to rewrite:\n{resp_text}"
                 batch_responses.append(user_prompt_content)
 
             raw_normalized_batch = []

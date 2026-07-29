@@ -49,9 +49,9 @@ echo ">>> Phase 3: train, eval, upload, remove <<<"
 # echo ">>> MATH <<<"
 # eval configs/gemma12b.qwen.math.env     --with-caa --caa-style mixed --name-suffix _metadata
 # eval configs/gemma12b.llama.math.env    --with-caa --caa-style mixed --name-suffix _metadata
-eval configs/gemma12b.llama8b.math.env  --with-caa --caa-style mixed --name-suffix _metadata
-# train_eval configs/gemma12b.phi4mini.math.env --with-caa --caa-style mixed --name-suffix _metadata
-eval configs/gemma12b.qwen3-8b.math.env --with-caa --caa-style mixed --name-suffix _metadata
+# eval configs/gemma12b.llama8b.math.env  --with-caa --caa-style mixed --name-suffix _metadata
+eval configs/gemma12b.phi4mini.math.env --with-caa --caa-style mixed --name-suffix _metadata
+# eval configs/gemma12b.qwen3-8b.math.env --with-caa --caa-style mixed --name-suffix _metadata
 
 # upload_results configs/gemma12b.qwen.math.env     anhtu96/distill-resist --with-caa --caa-style mixed --name-suffix _metadata
 # upload_results configs/gemma12b.llama.math.env    anhtu96/distill-resist --with-caa --caa-style mixed --name-suffix _metadata
