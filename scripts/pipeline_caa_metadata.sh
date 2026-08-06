@@ -24,7 +24,14 @@ echo ">>> Phase 1: generating all test sets <<<"
 # ENV_FILE=configs/gemma12b.qwen.arc.env         python scripts/generate_traces.py --model teacher --set test --dataset arc   --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.csqa.env        python scripts/generate_traces.py --model teacher --set test --dataset csqa  --with-caa --caa-mode metadata
 
-# echo "=== Done: all test sets ==="
+upload_teacher_test configs/gemma12b.qwen.gsm8k.env    anhtu96/distill-resist --with-caa --caa-style mixed
+upload_teacher_test configs/gemma12b.qwen.math.env     anhtu96/distill-resist --with-caa --caa-style mixed
+# upload_teacher_test configs/gemma12b.qwen.arc.env      anhtu96/distill-resist --with-caa --caa-style mixed
+# upload_teacher_test configs/gemma12b.qwen.csqa.env     anhtu96/distill-resist --with-caa --caa-style mixed
+# upload_teacher_test configs/gemma12b.qwen.mmlu.env     anhtu96/distill-resist --with-caa --caa-style mixed
+# upload_teacher_test configs/gemma12b.qwen.mmlu_pro.env anhtu96/distill-resist --with-caa --caa-style mixed
+
+echo "=== Done: all test sets ==="
 
 # ---------------------------------------------------------------------------
 # Phase 2: Generate all holdout sets
@@ -38,6 +45,13 @@ echo ">>> Phase 2: generating all holdout sets <<<"
 # ENV_FILE=configs/gemma12b.qwen.csqa.env        python scripts/generate_traces.py --model teacher --set holdout --dataset csqa  --with-caa --caa-mode metadata
 # ENV_FILE=configs/gemma12b.qwen.math.env        python scripts/generate_traces.py --model teacher --set holdout --dataset math  --with-caa --caa-mode metadata
 
+upload_teacher_holdout configs/gemma12b.qwen.gsm8k.env    anhtu96/distill-resist --with-caa --caa-style mixed
+upload_teacher_holdout configs/gemma12b.qwen.math.env     anhtu96/distill-resist --with-caa --caa-style mixed
+# upload_teacher_holdout configs/gemma12b.qwen.arc.env      anhtu96/distill-resist --with-caa --caa-style mixed
+# upload_teacher_holdout configs/gemma12b.qwen.csqa.env     anhtu96/distill-resist --with-caa --caa-style mixed
+# upload_teacher_holdout configs/gemma12b.qwen.mmlu.env     anhtu96/distill-resist --with-caa --caa-style mixed
+# upload_teacher_holdout configs/gemma12b.qwen.mmlu_pro.env anhtu96/distill-resist --with-caa --caa-style mixed
+
 echo "=== Done: all holdout sets ==="
 
 # ---------------------------------------------------------------------------
@@ -50,7 +64,7 @@ echo ">>> Phase 3: train, eval, upload, remove <<<"
 # eval configs/gemma12b.qwen.math.env     --with-caa --caa-style mixed --name-suffix _metadata
 # eval configs/gemma12b.llama.math.env    --with-caa --caa-style mixed --name-suffix _metadata
 # eval configs/gemma12b.llama8b.math.env  --with-caa --caa-style mixed --name-suffix _metadata
-eval configs/gemma12b.phi4mini.math.env --with-caa --caa-style mixed --name-suffix _metadata
+# eval configs/gemma12b.phi4mini.math.env --with-caa --caa-style mixed --name-suffix _metadata
 # eval configs/gemma12b.qwen3-8b.math.env --with-caa --caa-style mixed --name-suffix _metadata
 
 # upload_results configs/gemma12b.qwen.math.env     anhtu96/distill-resist --with-caa --caa-style mixed --name-suffix _metadata
@@ -67,11 +81,11 @@ eval configs/gemma12b.phi4mini.math.env --with-caa --caa-style mixed --name-suff
 
 # --- GSM8K ---
 # echo ">>> GSM8K <<<"
-# train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style mixed --name-suffix _metadata
+# eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style mixed --name-suffix _metadata
 # train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style mixed --name-suffix _metadata --no-filter-loops
-# train_eval configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style mixed --name-suffix _metadata
+# eval configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style mixed --name-suffix _metadata
 # eval configs/gemma12b.llama8b.gsm8k.env  --with-caa --caa-style mixed --name-suffix _metadata
-# train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style mixed --name-suffix _metadata
+# eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style mixed --name-suffix _metadata
 # eval configs/gemma12b.qwen3-8b.gsm8k.env --with-caa --caa-style mixed --name-suffix _metadata
 
 # upload_results configs/gemma12b.qwen.gsm8k.env     anhtu96/distill-resist --with-caa --caa-style mixed --name-suffix _metadata

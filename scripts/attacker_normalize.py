@@ -110,6 +110,12 @@ def main():
         default=None,
         help="Optional extra name suffix tag for compatibility with pipeline helpers.",
     )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="Override max_model_len for the normalizer vLLM generator.",
+    )
     args, _ = parser.parse_known_args()
 
 
@@ -207,6 +213,7 @@ def main():
         temperature=normalizer_temp,
         system_prompt=normalizer_system_prompt,
         batch_size=args.batch_size or settings.teacher_batch_size,
+        max_model_len=args.max_model_len,
     )
 
     try:
@@ -260,17 +267,8 @@ def main():
                     )
                 )
 
-            # Optional answer forcing if not keeping think tags
-            if settings.answer_forcing and not settings.keep_think_tags:
-                af_prompts = [norm.strip() + ANSWER_FORCE_STRING for norm in raw_normalized_batch]
-                af_sampling_params = _make_force_sampling_params(normalizer._tokenizer, settings.answer_force_max_tokens)
-                af_outputs = normalizer.generate(af_prompts, af_sampling_params, use_tqdm=False)
-                af_normalized_batch = [
-                    prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
-                    for prompt, out in zip(af_prompts, af_outputs)
-                ]
-            else:
-                af_normalized_batch = [None] * len(raw_normalized_batch)
+            # Answer forcing is disabled for normalization
+            af_normalized_batch = [None] * len(raw_normalized_batch)
 
             eos_token = normalizer._tokenizer.eos_token or ""
             pad_token = normalizer._tokenizer.pad_token or ""
@@ -291,10 +289,8 @@ def main():
                 else:
                     resp = normalized_text
 
-                # Validate: check if the normalized response actually contains a boxed answer.
-                # If not, it means the normalizer output was truncated or failed to solve the problem.
-                if "boxed" not in resp:
-                    logger.warning(f"Skipping truncated/invalid normalized trace for prompt: {sample.get('user_prompt')[:60]}...")
+                if not resp or not resp.strip():
+                    logger.warning(f"Skipping empty normalized trace for prompt: {sample.get('user_prompt')[:60]}...")
                     continue
 
                 new_sample = {

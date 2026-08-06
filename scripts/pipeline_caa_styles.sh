@@ -6,21 +6,21 @@
 set -e
 source "$(dirname "$0")/_pipeline_helpers.sh"
 
-STYLES=(distractor jargon)
+STYLES=(scratchpad dead_end jargon distractor)
 
 # --- Generate per-style CAA holdout traces (one run generates all styles) ---
 
 # Gemma3-12B teacher
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set test --dataset gsm8k --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor
-echo "=== Done: CAA styles test gsm8k ==="
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set test --dataset gsm8k --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor
+# echo "=== Done: CAA styles test gsm8k ==="
 
-# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor --batch-size 128
+# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set test --dataset math --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor 
 # echo "=== Done: CAA styles test math ==="
 
-ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles --caa-style dead_end scratchpad jargon distractor
-echo "=== Done: CAA styles holdout gsm8k ==="
+# ENV_FILE=configs/gemma12b.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles --caa-style dead_end scratchpad jargon distractor
+# echo "=== Done: CAA styles holdout gsm8k ==="
 
-# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor 
+# ENV_FILE=configs/gemma12b.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles --caa-style jargon distractor 
 # echo "=== Done: CAA styles holdout math ==="
 
 # Upload teacher traces for CAA styles
@@ -32,23 +32,17 @@ echo "=== Done: CAA styles holdout gsm8k ==="
 
 # ENV_FILE=configs/gemma12b.qwen.arc.env python scripts/generate_traces.py --model teacher --set holdout --dataset arc --with-caa --caa-mode styles --caa-style scratchpad dead_end jargon distractor 
 # echo "=== Done: CAA styles holdout arc ==="
-# DeepSeek-R1-Distill-Qwen-7B teacher
-# ENV_FILE=configs/deepseek.qwen.gsm8k.env python scripts/generate_traces.py --model teacher --set holdout --dataset gsm8k --with-caa --caa-mode styles
-# echo "=== Done: deepseek CAA styles holdout gsm8k ==="
-
-# ENV_FILE=configs/deepseek.qwen.math.env python scripts/generate_traces.py --model teacher --set holdout --dataset math --with-caa --caa-mode styles
-# echo "=== Done: deepseek CAA styles holdout math ==="
 
 # --- Train and eval one student per style ---
 
 # for STYLE in "${STYLES[@]}"; do
-#     train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
+    # eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
 #     # train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE" --no-filter-loops
 
 #     # train_eval configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style "$STYLE"
-#     # train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
-#     # train_eval configs/gemma12b.llama8b.gsm8k.env    --with-caa --caa-style "$STYLE"
-#     # train_eval configs/gemma12b.qwen3-8b.gsm8k.env     --with-caa --caa-style "$STYLE"
+    # eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style "$STYLE"
+    # eval configs/gemma12b.llama8b.gsm8k.env    --with-caa --caa-style "$STYLE"
+    # eval configs/gemma12b.qwen3-8b.gsm8k.env     --with-caa --caa-style "$STYLE"
 
 #     remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE"
 #     # remove_adapter configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style "$STYLE" --no-filter-loops
@@ -60,24 +54,24 @@ echo "=== Done: CAA styles holdout gsm8k ==="
 # done
 
 
-# for STYLE in "${STYLES[@]}"; do
-#     train_eval configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
+for STYLE in "${STYLES[@]}"; do
+    # eval configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
 
 #     train_eval configs/gemma12b.llama.math.env      --with-caa --caa-style "$STYLE"
 
-#     train_eval configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
+    # eval configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
 
-#     train_eval configs/gemma12b.llama8b.math.env      --with-caa --caa-style "$STYLE"
+    # eval configs/gemma12b.llama8b.math.env      --with-caa --caa-style "$STYLE"
 
-#     train_eval configs/gemma12b.qwen3-8b.math.env       --with-caa --caa-style "$STYLE"
+    eval configs/gemma12b.qwen3-8b.math.env       --with-caa --caa-style "$STYLE"
 
-#     remove_adapter configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
+    # remove_adapter configs/gemma12b.qwen.math.env       --with-caa --caa-style "$STYLE"
 
 #     remove_adapter configs/gemma12b.llama.math.env      --with-caa --caa-style "$STYLE"
 
-#     remove_adapter configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
+    # remove_adapter configs/gemma12b.phi4mini.math.env   --with-caa --caa-style "$STYLE"
 
-#     remove_adapter configs/gemma12b.qwen3-8b.math.env       --with-caa --caa-style "$STYLE"
+    remove_adapter configs/gemma12b.qwen3-8b.math.env       --with-caa --caa-style "$STYLE"
 
-#     remove_adapter configs/gemma12b.llama8b.math.env      --with-caa --caa-style "$STYLE"
-# done
+    # remove_adapter configs/gemma12b.llama8b.math.env      --with-caa --caa-style "$STYLE"
+done

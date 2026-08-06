@@ -459,7 +459,22 @@ class VLLMCAATraceGenerator:
         saved_state = vllm_caa._load_caa_state()
         vllm_caa.disable_caa()
         try:
-            af_prompts = [resp.strip() + ANSWER_FORCE_STRING for resp in responses]
+            # Use the settings value that was used to initialize the LLM instance,
+            # rather than introspecting self._llm.llm_engine which can silently
+            # fall back to 4096 even when the engine was configured with a higher value.
+            max_model_len = self.settings.vllm_max_model_len or 8192
+            max_allowed_input = max(512, max_model_len - self._force_sampling_params.max_tokens - 16)
+
+            af_prompts = []
+            for resp in responses:
+                full_prompt = resp.strip() + ANSWER_FORCE_STRING
+                tokens = self._tokenizer.encode(full_prompt)
+                if len(tokens) > max_allowed_input:
+                    tokens = tokens[-max_allowed_input:]
+                    full_prompt = self._tokenizer.decode(tokens)
+                    print(f"[force_answers] Truncated prompt from {len(self._tokenizer.encode(resp.strip() + ANSWER_FORCE_STRING))} to {len(tokens)} tokens (max_allowed={max_allowed_input})")
+                af_prompts.append(full_prompt)
+
             outputs = self._llm.generate(
                 af_prompts, self._force_sampling_params, use_tqdm=False,
             )

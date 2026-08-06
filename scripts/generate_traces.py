@@ -166,6 +166,7 @@ class VLLMTraceGenerator:
         batch_size: int | None = None,
         caa_weight_mode: str = "softmax",
         lora_path: str | None = None,
+        max_model_len: int | None = None,
     ):
         from vllm import LLM, SamplingParams
 
@@ -175,6 +176,7 @@ class VLLMTraceGenerator:
         self.temperature = temperature
         self.system_prompt = system_prompt or settings.teacher_system_prompt
         self.batch_size = batch_size or settings.teacher_batch_size
+        self.max_model_len = max_model_len or settings.vllm_max_model_len or 4096
         self._use_llama_markers = self._is_llama_model(model_id)
         self._lora_request = None
         if lora_path:
@@ -206,7 +208,7 @@ class VLLMTraceGenerator:
             enforce_eager=False,
             gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
             max_num_seqs=settings.vllm_max_num_seqs,
-            max_model_len=settings.vllm_max_model_len,
+            max_model_len=self.max_model_len,
             quantization=settings.vllm_quantization or None,
             load_format=settings.vllm_load_format,
             enable_lora=lora_path is not None,
@@ -331,7 +333,21 @@ class VLLMTraceGenerator:
                 for i, prompt in enumerate(prompts)
             ]
         rendered_prompts = [self._render_chat_prompt(messages) for messages in batch_messages]
-        outputs = self.generate(rendered_prompts, self._sampling_params, use_tqdm=False)
+
+        max_prompt_tokens = max(512, self.max_model_len - min(self.max_new_tokens, 512))
+        safe_prompts = []
+        for p in rendered_prompts:
+            tokens = self._tokenizer.encode(p, add_special_tokens=False)
+            if len(tokens) > max_prompt_tokens:
+                logging.warning(
+                    "Prompt token length (%d) exceeds max allowed input tokens (%d) for max_model_len=%d; truncating input prompt.",
+                    len(tokens), max_prompt_tokens, self.max_model_len
+                )
+                tokens = tokens[-max_prompt_tokens:]
+                p = self._tokenizer.decode(tokens, skip_special_tokens=False)
+            safe_prompts.append(p)
+
+        outputs = self.generate(safe_prompts, self._sampling_params, use_tqdm=False)
         return [
             self._trim_to_first_turn(out.outputs[0].text) if out.outputs else ""
             for out in outputs
@@ -465,6 +481,28 @@ def _resolve_trained_student_model_path(
             vars.append(p.with_name(name + "_caa_batch"))
         return vars
 
+    def add_doge_variants(p: Path) -> list[Path]:
+        if args is None or not getattr(args, "with_doge", False):
+            return [p]
+        coef = getattr(args, "doge_coef", 1e-4)
+        doge_sfx = f"_doge_coef{coef}"
+        name = p.name
+        if not name.endswith(doge_sfx):
+            return [p.with_name(name + doge_sfx), p]
+        return [p]
+
+    def add_ads_variants(p: Path) -> list[Path]:
+        if args is None or not getattr(args, "with_ads", False):
+            return [p]
+        tau = getattr(args, "tau", 0.7)
+        lam = getattr(args, "lam", 0.01)
+        eps = getattr(args, "eps", 0.01)
+        ads_sfx = f"_ads_tau{tau}_lam{lam}_eps{eps}"
+        name = p.name
+        if not name.endswith(ads_sfx):
+            return [p.with_name(name + ads_sfx), p]
+        return [p]
+
     def add_name_suffix_variants(p: Path) -> list[Path]:
         if not name_suffix:
             return [p]
@@ -472,25 +510,27 @@ def _resolve_trained_student_model_path(
         return [p.with_name(p.name + sfx) if not p.name.endswith(sfx) else p]
 
     def expand(p: Path) -> list[Path]:
-        # Order mirrors train.py: rewrite → name_suffix → (style | caa).
+        # Order mirrors train.py: rewrite → doge → ads → name_suffix → (style | caa).
         result = []
         for r in add_rewrite_variants(p) + [p]:
-            for n in add_name_suffix_variants(r):
-                for s in add_style_variants(n) + [n]:
-                    for c in add_caa_variants(s):
-                        items = [c]
-                        if prefer_normalized:
-                            name = c.name
-                            c_norm = c.with_name(name + "_normalized") if not name.endswith("_normalized") else c
-                            items = [c_norm]
-                        if args is not None and getattr(args, "filter_loops", True) is False:
-                            new_items = []
-                            for item in items:
-                                name = item.name
-                                item_nf = item.with_name(name + "_no_filter") if not name.endswith("_no_filter") else item
-                                new_items.append(item_nf)
-                            items = new_items
-                        result.extend(items)
+            for d in add_doge_variants(r):
+                for a in add_ads_variants(d):
+                    for n in add_name_suffix_variants(a):
+                        for s in add_style_variants(n) + [n]:
+                            for c in add_caa_variants(s):
+                                items = [c]
+                                if prefer_normalized:
+                                    name = c.name
+                                    c_norm = c.with_name(name + "_normalized") if not name.endswith("_normalized") else c
+                                    items = [c_norm]
+                                if args is not None and getattr(args, "filter_loops", True) is False:
+                                    new_items = []
+                                    for item in items:
+                                        name = item.name
+                                        item_nf = item.with_name(name + "_no_filter") if not name.endswith("_no_filter") else item
+                                        new_items.append(item_nf)
+                                    items = new_items
+                                result.extend(items)
         return result
 
 
@@ -1649,6 +1689,13 @@ def main():
         dest="filter_loops",
         help="Disable filtering out repeating/infinite loops (enabled by default)",
     )
+    parser.add_argument("--with-doge", action="store_true", help="Use student trained on DOGe traces")
+    parser.add_argument("--doge-coef", type=float, default=1e-4, help="DOGe anti-KD coefficient")
+    parser.add_argument("--doge-temp", type=float, default=0.7, help="DOGe temperature")
+    parser.add_argument("--with-ads", action="store_true", help="Use student trained on ADS traces")
+    parser.add_argument("--tau", type=float, default=0.7, help="Sampling temperature parameter for ADS")
+    parser.add_argument("--lam", type=float, default=0.01, help="Lambda parameter for ADS")
+    parser.add_argument("--eps", type=float, default=0.01, help="Epsilon parameter for ADS")
     args = parser.parse_args()
 
     # Parse --caa-strength: floats list OR per-style dict (key=v1,v2,v3 pairs).
@@ -1855,14 +1902,28 @@ def main():
             else:
                 base_name += f"_caa{param_suffix}"
 
-        if args.model == "student" and (args.name_suffix or args.paraphrased or args.normalized or not args.filter_loops):
-            suffix = args.name_suffix or ""
-            if args.paraphrased and "_paraphrased" not in suffix:
-                suffix = "_paraphrased" + suffix
-            if args.normalized and "_normalized" not in suffix:
-                suffix = suffix + "_normalized"
-            if not args.filter_loops and "_no_filter" not in suffix:
-                suffix = suffix + "_no_filter"
+        if args.model == "student" and args.name_suffix:
+            if not base_name.endswith(args.name_suffix):
+                base_name += args.name_suffix
+
+        if args.model == "student" and args.with_doge:
+            doge_sfx = f"_doge_coef{args.doge_coef}"
+            if not base_name.endswith(doge_sfx):
+                base_name += doge_sfx
+
+        if args.model == "student" and args.with_ads:
+            ads_sfx = f"_ads_tau{args.tau}_lam{args.lam}_eps{args.eps}"
+            if not base_name.endswith(ads_sfx):
+                base_name += ads_sfx
+
+        if args.model == "student" and (args.paraphrased or args.normalized or not args.filter_loops):
+            suffix = ""
+            if args.paraphrased and "_paraphrased" not in base_name:
+                suffix += "_paraphrased"
+            if args.normalized and "_normalized" not in base_name:
+                suffix += "_normalized"
+            if not args.filter_loops and "_no_filter" not in base_name:
+                suffix += "_no_filter"
             base_name += suffix
 
 

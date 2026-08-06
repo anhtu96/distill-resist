@@ -124,6 +124,30 @@ def parse_args():
         action="store_true",
         help="Skip LLM judge evaluation.",
     )
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        default=True,
+        help="Push evaluation metrics to Weights & Biases (default: True).",
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_false",
+        dest="use_wandb",
+        help="Disable pushing metrics to Weights & Biases.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=os.getenv("WANDB_PROJECT", "distill-resist"),
+        help="W&B project name for logging (default: distill-resist).",
+    )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="Optional custom W&B run name.",
+    )
     return parser.parse_args()
 
 
@@ -504,6 +528,102 @@ def save_judge_csv(samples: list[dict], output_path: str) -> None:
     print(f"Saved LLM judge CSV report to: {output_path}")
 
 
+def log_quality_metrics_to_wandb(
+    samples: list[dict],
+    jsonl_path: str,
+    wandb_project: str = "distill-resist",
+    wandb_run_name: str | None = None,
+    computed_ppl: bool = True,
+    computed_judge: bool = True,
+) -> None:
+    try:
+        import wandb
+    except ImportError:
+        print("[W&B Warning] wandb package is not installed. Skipping W&B metric logging.")
+        return
+
+    base_stem = Path(jsonl_path).stem
+    run_name = wandb_run_name or f"quality_eval_{base_stem}"
+
+    metrics = {}
+
+    # 1. Perplexity metrics
+    if computed_ppl:
+        style_ppls = {}
+        for s in samples:
+            st = s.get("style", "NA")
+            ppl_val = s.get("perplexity")
+            if isinstance(ppl_val, (int, float)) and not math.isnan(ppl_val):
+                style_ppls.setdefault(st, []).append(ppl_val)
+
+        all_ppls = []
+        for st, list_ppl in style_ppls.items():
+            if list_ppl:
+                avg_ppl = sum(list_ppl) / len(list_ppl)
+                all_ppls.extend(list_ppl)
+                metrics[f"quality/ppl/{st}_avg"] = avg_ppl
+
+        if all_ppls:
+            metrics["quality/ppl/overall_avg"] = sum(all_ppls) / len(all_ppls)
+
+    # 2. LLM Judge metrics
+    if computed_judge:
+        style_scores = {}
+        for s in samples:
+            st = s.get("style", "NA")
+            c = s.get("coherence_score")
+            n = s.get("naturalness_score")
+            r = s.get("readability_score")
+            if all(isinstance(v, (int, float)) for v in (c, n, r)):
+                style_scores.setdefault(st, []).append((c, n, r))
+
+        all_scores = []
+        for st, tuple_list in style_scores.items():
+            if tuple_list:
+                c_avg = sum(t[0] for t in tuple_list) / len(tuple_list)
+                n_avg = sum(t[1] for t in tuple_list) / len(tuple_list)
+                r_avg = sum(t[2] for t in tuple_list) / len(tuple_list)
+                overall_grp = (c_avg + n_avg + r_avg) / 3.0
+                all_scores.extend(tuple_list)
+                metrics[f"quality/judge/{st}_coherence"] = c_avg
+                metrics[f"quality/judge/{st}_naturalness"] = n_avg
+                metrics[f"quality/judge/{st}_readability"] = r_avg
+                metrics[f"quality/judge/{st}_overall"] = overall_grp
+
+        if all_scores:
+            c_all = sum(t[0] for t in all_scores) / len(all_scores)
+            n_all = sum(t[1] for t in all_scores) / len(all_scores)
+            r_all = sum(t[2] for t in all_scores) / len(all_scores)
+            metrics["quality/judge/overall_coherence"] = c_all
+            metrics["quality/judge/overall_naturalness"] = n_all
+            metrics["quality/judge/overall_readability"] = r_all
+            metrics["quality/judge/overall_avg_score"] = (c_all + n_all + r_all) / 3.0
+
+    if not metrics:
+        print("[W&B Notice] No valid metrics computed to push to W&B.")
+        return
+
+    config = {
+        "jsonl_path": str(jsonl_path),
+        "num_samples": len(samples),
+    }
+
+    try:
+        run = wandb.init(
+            project=wandb_project,
+            name=run_name,
+            config=config,
+            reinit=True,
+        )
+        wandb.log(metrics)
+        print(f"\n[W&B Logged] Pushed metrics to project '{wandb_project}' (run: {run_name}):")
+        for k, v in sorted(metrics.items()):
+            print(f"  - {k}: {v:.4f}")
+        wandb.finish()
+    except Exception as e:
+        print(f"[W&B Error] Failed to log metrics to W&B: {e}")
+
+
 def main():
     args = parse_args()
 
@@ -543,6 +663,17 @@ def main():
             api_key=args.api_key,
         )
         save_judge_csv(eval_samples, judge_csv_path)
+
+    # 4. Push metrics to W&B
+    if args.use_wandb:
+        log_quality_metrics_to_wandb(
+            samples=eval_samples,
+            jsonl_path=jsonl_path,
+            wandb_project=args.wandb_project,
+            wandb_run_name=args.wandb_name,
+            computed_ppl=not args.skip_ppl,
+            computed_judge=not args.skip_judge,
+        )
 
     print("\n=== Trace Quality Evaluation Completed Successfully ===")
 

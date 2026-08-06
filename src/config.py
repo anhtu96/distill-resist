@@ -117,6 +117,8 @@ Return only the rewritten trace, with no explanation of your changes.
 """
 
 
+
+
 REWRITE_SYSTEM_PROMPT_VARIANTS: dict[str, str] = {
     "scratchpad": """\
 You are an expert at rewriting reasoning traces in a scratchpad style.
@@ -329,7 +331,7 @@ class Settings(BaseSettings):
     teacher_fresh_style_samples: int | None = 200
     vllm_gpu_memory_utilization: float = 0.8
     vllm_max_num_seqs: int = 256
-    vllm_max_model_len: int | None = 4096
+    vllm_max_model_len: int | None = 8192
     vllm_quantization: str | None = None
     vllm_load_format: str = "auto"
     vllm_dtype: str = "bfloat16"
@@ -351,7 +353,7 @@ class Settings(BaseSettings):
     rewriter_samples: int | None = 100
 
     # Normalizer model (HuggingFace) — used to normalize/clean CAA-steered traces
-    normalizer_model_id: str = "Qwen/Qwen2.5-32B-Instruct-AWQ"
+    normalizer_model_id: str = "Qwen/Qwen2.5-14B-Instruct-AWQ"
     normalizer_max_new_tokens: int = 2048
     normalizer_temperature: float = 0.0
 

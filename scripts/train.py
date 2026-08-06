@@ -223,19 +223,31 @@ def _resolve_student_caa_paraphrased_dataset_path(
     teacher_for_tag = settings.teacher_holdout_model if use_trained_teacher else settings.teacher_model
     preferred_stem = f"teacher_{_model_name_tag(teacher_for_tag)}_{settings.dataset_name}_{holdout_variant}"
 
-    param_suffix = _get_caa_param_suffix(settings)
+    param_suffix = _get_caa_param_suffix(settings, style=caa_style)
     root = Path("data/paraphrased")
 
     if caa_style:
         fname = f"{preferred_stem}_caa_{caa_style}{param_suffix}_paraphrased.jsonl"
-        return root / fname
+        candidate = root / fname
+        if candidate.exists():
+            return candidate
+        pattern = f"{preferred_stem}_caa_{caa_style}_*_paraphrased.jsonl"
+        if root.exists():
+            matches = sorted(root.glob(pattern))
+            if matches:
+                return matches[0]
+        return candidate
     else:
         # Try the same suffix variants as _resolve_student_caa_dataset_path
         for caa_suffix in (f"_caa_mixed{param_suffix}", "_caa_mixed", "_caa_mixed_batch"):
             candidate = root / f"{preferred_stem}{caa_suffix}_paraphrased.jsonl"
             if candidate.exists():
                 return candidate
-        # Return default preferred path if none found
+        pattern = f"{preferred_stem}_caa_mixed_*_paraphrased.jsonl"
+        if root.exists():
+            matches = sorted(root.glob(pattern))
+            if matches:
+                return matches[0]
         return root / f"{preferred_stem}_caa_mixed{param_suffix}_paraphrased.jsonl"
 
 
@@ -362,6 +374,21 @@ def main():
         action="store_true",
         help="When training student model, use CAA-steered holdout dataset",
     )
+    parser.add_argument(
+        "--with-ads",
+        action="store_true",
+        help="When training student model, use Antidistillation Sampling (ADS) trace dataset from data/teacher_holdout/ads/",
+    )
+    parser.add_argument("--tau", type=float, default=0.0, help="Sampling temperature parameter for ADS")
+    parser.add_argument("--lam", type=float, default=1.0e-03, help="Lambda parameter for ADS")
+    parser.add_argument("--eps", type=float, default=0.01, help="Epsilon parameter for ADS")
+    parser.add_argument(
+        "--with-doge",
+        action="store_true",
+        help="When training student model, use DOGe trace dataset from data/teacher_holdout/doge/",
+    )
+    parser.add_argument("--doge-coef", type=float, default=1e-4, help="DOGe anti-KD coefficient")
+    parser.add_argument("--doge-temp", type=float, default=0.7, help="DOGe temperature")
     parser.add_argument(
         "--ad",
         action="store_true",
@@ -730,6 +757,55 @@ def main():
         output_dir_obj = Path(settings.student_output_dir)
         if not output_dir_obj.name.endswith(style_suffix):
             settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{style_suffix}")
+    elif args.with_ads:
+        teacher_tag = _model_name_tag(
+            settings.teacher_holdout_model if effective_use_trained_teacher else settings.teacher_model
+        )
+        ads_filename = f"teacher_{teacher_tag}_{settings.dataset_name}_base_ads_tau{args.tau}_lam{args.lam}_eps{args.eps}.jsonl"
+        ads_path = Path("data/teacher_holdout/ads") / ads_filename
+        if not ads_path.exists():
+            # Try pattern fallback
+            pattern = f"teacher_{teacher_tag}_{settings.dataset_name}_base_ads_*.jsonl"
+            matches = sorted(Path("data/teacher_holdout/ads").glob(pattern))
+            if matches:
+                ads_path = matches[0]
+                print(f"Found ADS dataset via pattern matching: {ads_path}")
+            else:
+                raise RuntimeError(f"ADS trace dataset not found at {ads_path}")
+
+        print(f"Loading ADS trace dataset from {ads_path}")
+        dataset = HoldoutDataset(str(ads_path))
+        hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
+
+        os.environ["WANDB_RUN_NAME"] = f"distill-ads-tau{args.tau}-lam{args.lam}"
+        output_dir_obj = Path(settings.student_output_dir)
+        ads_suffix = f"_ads_tau{args.tau}_lam{args.lam}_eps{args.eps}"
+        if not output_dir_obj.name.endswith(ads_suffix):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{ads_suffix}")
+    elif args.with_doge:
+        teacher_tag = _model_name_tag(
+            settings.teacher_holdout_model if effective_use_trained_teacher else settings.teacher_model
+        )
+        doge_filename = f"teacher_{teacher_tag}_{settings.dataset_name}_base_doge_coef{args.doge_coef}_temp{args.doge_temp}.jsonl"
+        doge_path = Path("data/teacher_holdout/doge") / doge_filename
+        if not doge_path.exists():
+            pattern = f"teacher_{teacher_tag}_{settings.dataset_name}_base_doge_*.jsonl"
+            matches = sorted(Path("data/teacher_holdout/doge").glob(pattern))
+            if matches:
+                doge_path = matches[0]
+                print(f"Found DOGe dataset via pattern matching: {doge_path}")
+            else:
+                raise RuntimeError(f"DOGe trace dataset not found at {doge_path}")
+
+        print(f"Loading DOGe trace dataset from {doge_path}")
+        dataset = HoldoutDataset(str(doge_path))
+        hf_dataset = dataset.to_hf_dataset(eos_token=tokenizer.eos_token, filter_loops=args.filter_loops)
+
+        os.environ["WANDB_RUN_NAME"] = f"distill-doge-coef{args.doge_coef}"
+        output_dir_obj = Path(settings.student_output_dir)
+        doge_suffix = f"_doge_coef{args.doge_coef}"
+        if not output_dir_obj.name.endswith(doge_suffix):
+            settings.student_output_dir = str(output_dir_obj.parent / f"{output_dir_obj.name}{doge_suffix}")
     elif args.with_caa:
         effective_caa_style = args.caa_style
         holdout_variant = "trained" if effective_use_trained_teacher else "base"

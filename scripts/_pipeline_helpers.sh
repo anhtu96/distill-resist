@@ -35,17 +35,57 @@ parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
 parser.add_argument('--normalized', action='store_true')
 parser.add_argument('--no-filter-loops', action='store_false', dest='filter_loops')
+parser.add_argument('--with-doge', action='store_true')
+parser.add_argument('--doge-coef', type=float, default=1e-4)
+parser.add_argument('--doge-temp', type=float, default=0.7)
+parser.add_argument('--with-ads', action='store_true')
+parser.add_argument('--tau', type=float, default=0.7)
+parser.add_argument('--lam', type=float, default=0.01)
+parser.add_argument('--eps', type=float, default=0.01)
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps))
 " "$@")"
 
 
     local trace_file="data/test/${trace_name}.jsonl"
+    if [ ! -f "$trace_file" ]; then
+        local fallback
+        fallback=$(ls data/test/${trace_name}*.jsonl 2>/dev/null | head -n 1 || true)
+        if [ -n "$fallback" ]; then
+            trace_file="$fallback"
+        fi
+    fi
+
     if [ -f "$trace_file" ]; then
         echo "=== Running evaluation on $trace_file ==="
-        ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file"
+        ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file" --wandb
     else
         echo "Warning: Trace file not found at $trace_file"
+    fi
+}
+
+# Paraphrase holdout traces.
+# Usage: paraphrase <env_file> [extra_flags...]
+paraphrase() {
+    local env_file="$1"
+    shift 1
+
+    local style="mixed"
+    local has_batch_size=false
+    local args=("$@")
+    for ((i=0; i<${#args[@]}; i++)); do
+        if [ "${args[i]}" = "--caa-style" ] && [ $((i+1)) -lt ${#args[@]} ]; then
+            style="${args[i+1]}"
+        elif [ "${args[i]}" = "--batch-size" ]; then
+            has_batch_size=true
+        fi
+    done
+
+    echo "=== Paraphrasing holdout traces for env '$env_file' (style: $style) ==="
+    if [ "$has_batch_size" = true ]; then
+        ENV_FILE="$env_file" python scripts/paraphrase_dataset.py --with-caa --skip-existing "$@"
+    else
+        ENV_FILE="$env_file" python scripts/paraphrase_dataset.py --with-caa --batch-size 256 --skip-existing "$@"
     fi
 }
 
@@ -66,7 +106,7 @@ normalize() {
     done
 
     echo "=== Normalizing holdout traces for env '$env_file' (style: $style) ==="
-    ENV_FILE="$env_file" python scripts/attacker_normalize.py --caa-style "$style" --batch-size 256 "$@"
+    ENV_FILE="$env_file" python scripts/attacker_normalize.py --caa-style "$style" --batch-size 256 --max-model-len 8192 "$@"
 }
 
 # Normalize holdout traces and train student.
@@ -101,12 +141,27 @@ parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
 parser.add_argument('--normalized', action='store_true')
 parser.add_argument('--no-filter-loops', action='store_false', dest='filter_loops')
+parser.add_argument('--with-doge', action='store_true')
+parser.add_argument('--doge-coef', type=float, default=1e-4)
+parser.add_argument('--doge-temp', type=float, default=0.7)
+parser.add_argument('--with-ads', action='store_true')
+parser.add_argument('--tau', type=float, default=0.7)
+parser.add_argument('--lam', type=float, default=0.01)
+parser.add_argument('--eps', type=float, default=0.01)
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps))
 " "$@")"
 
 
     local trace_file="data/test/${trace_name}.jsonl"
+    if [ ! -f "$trace_file" ]; then
+        local fallback
+        fallback=$(ls data/test/${trace_name}*.jsonl 2>/dev/null | head -n 1 || true)
+        if [ -n "$fallback" ]; then
+            trace_file="$fallback"
+        fi
+    fi
+
     if [ -f "$trace_file" ]; then
         echo "=== Running evaluation on $trace_file ==="
         ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file"
@@ -142,12 +197,27 @@ parser.add_argument('--name-suffix', default='')
 parser.add_argument('--paraphrased', action='store_true')
 parser.add_argument('--normalized', action='store_true')
 parser.add_argument('--no-filter-loops', action='store_false', dest='filter_loops')
+parser.add_argument('--with-doge', action='store_true')
+parser.add_argument('--doge-coef', type=float, default=1e-4)
+parser.add_argument('--doge-temp', type=float, default=0.7)
+parser.add_argument('--with-ads', action='store_true')
+parser.add_argument('--tau', type=float, default=0.7)
+parser.add_argument('--lam', type=float, default=0.01)
+parser.add_argument('--eps', type=float, default=0.01)
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps))
 " "$@")"
 
 
     local trace_file="data/test/${trace_name}.jsonl"
+    if [ ! -f "$trace_file" ]; then
+        local fallback
+        fallback=$(ls data/test/${trace_name}*.jsonl 2>/dev/null | head -n 1 || true)
+        if [ -n "$fallback" ]; then
+            trace_file="$fallback"
+        fi
+    fi
+
     if [ -f "$trace_file" ]; then
         echo "=== Running evaluation on $trace_file ==="
         ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file"
