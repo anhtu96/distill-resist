@@ -58,7 +58,7 @@ print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, ar
 
     if [ -f "$trace_file" ]; then
         echo "=== Running evaluation on $trace_file ==="
-        ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file" --wandb
+        ENV_FILE="$env_file" python scripts/evaluate.py "$trace_file"
     else
         echo "Warning: Trace file not found at $trace_file"
     fi

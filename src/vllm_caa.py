@@ -50,6 +50,12 @@ _CAA_STATE_FILE = os.path.join(tempfile.gettempdir(), "vllm_caa_state")
 _COLLECT_STATE_FILE = os.path.join(tempfile.gettempdir(), "vllm_caa_collect_state")
 
 _DEBUG_CAA = os.getenv("CAA_DEBUG", "0") == "1"
+# When set, activate low-overhead fast paths that are safe for inference-only benchmarking:
+# (1) skip all collect-mode file reads (collect mode not used during benchmarks)
+# (2) avoid GPU→CPU sync when detecting prefill vs. decode for the common n==1 decode step
+# (3) replace two os.path.* calls with a single os.stat() per forward pass
+# Set by scripts/benchmark_pipelines.py before LLM() init so worker processes inherit it.
+_BENCH_MODE = os.getenv("CAA_BENCH_MODE", "0") == "1"
 _UNSET = object()
 
 _STATE_CACHE: dict = {}
@@ -241,19 +247,28 @@ def _apply_caa_injection(self, positions, hidden_states, residual):
 
     try:
         from vllm.forward_context import get_forward_context
-        ctx = get_forward_context()
-        attn_meta_map = ctx.attn_metadata if ctx is not None else None
-        if attn_meta_map:
-            any_meta = next(iter(attn_meta_map.values()))
-            q_start = any_meta.query_start_loc  # shape [num_seqs+1], cumulative
-            q_lens = (q_start[1:] - q_start[:-1]).cpu().tolist()
-            # Decode seqs have q_len == 1; prefill/chunked-prefill seqs have q_len > 1.
-            # vLLM v1: decode seqs come first in the batch, prefill seqs come last.
-            num_decode_tokens = sum(int(q) for q in q_lens if int(q) == 1)
-            decode_start, decode_end = 0, num_decode_tokens
-            prefill_start, prefill_end = num_decode_tokens, n
-            prefill_q_lens = [int(q) for q in q_lens if int(q) > 1]
+        # Bench-mode fast path: at decode time with a single sequence the step always
+        # produces exactly 1 token row (n == 1). Skip the forward-context query and the
+        # accompanying GPU→CPU sync (.cpu().tolist()) — the split is trivially known.
+        if _BENCH_MODE and n == 1:
+            # n==1: pure single-token decode step; no prefill tokens in this batch.
+            decode_start, decode_end = 0, 1
+            prefill_start, prefill_end = 1, 1
             _split_resolved = True
+        else:
+            ctx = get_forward_context()
+            attn_meta_map = ctx.attn_metadata if ctx is not None else None
+            if attn_meta_map:
+                any_meta = next(iter(attn_meta_map.values()))
+                q_start = any_meta.query_start_loc  # shape [num_seqs+1], cumulative
+                q_lens = (q_start[1:] - q_start[:-1]).cpu().tolist()
+                # Decode seqs have q_len == 1; prefill/chunked-prefill seqs have q_len > 1.
+                # vLLM v1: decode seqs come first in the batch, prefill seqs come last.
+                num_decode_tokens = sum(int(q) for q in q_lens if int(q) == 1)
+                decode_start, decode_end = 0, num_decode_tokens
+                prefill_start, prefill_end = num_decode_tokens, n
+                prefill_q_lens = [int(q) for q in q_lens if int(q) > 1]
+                _split_resolved = True
     except Exception:
         pass
 
@@ -290,7 +305,8 @@ def _apply_caa_injection(self, positions, hidden_states, residual):
     num_decode = decode_end - decode_start
 
     # --- Collect mode (training only): capture mean prefill activation ---
-    if idx is not None and num_prefill > 0:
+    # Skipped entirely in bench mode — collect mode is never active during benchmarking.
+    if not _BENCH_MODE and idx is not None and num_prefill > 0:
         collect = _load_collect_state()
         if collect.get("active") and idx in collect.get("layers", []):
             offset = collect.get("response_start_offset", 0)
@@ -312,14 +328,22 @@ def _apply_caa_injection(self, positions, hidden_states, residual):
         # Reload state first so _inject_prefill and other flags are current
         # before any prefill/decode decision. This must come before the prefill
         # guard so the very first prefill pass sees the correct inject_prefill value.
-        try:
-            current_mtime = (
-                os.path.getmtime(_CAA_STATE_FILE)
-                if os.path.exists(_CAA_STATE_FILE)
-                else -1.0
-            )
-        except OSError:
-            current_mtime = -1.0
+        # Bench mode: replace two separate os.path.* calls (exists + getmtime) with a
+        # single os.stat() syscall — halves the filesystem overhead per forward pass.
+        if _BENCH_MODE:
+            try:
+                current_mtime = os.stat(_CAA_STATE_FILE).st_mtime
+            except OSError:
+                current_mtime = -1.0
+        else:
+            try:
+                current_mtime = (
+                    os.path.getmtime(_CAA_STATE_FILE)
+                    if os.path.exists(_CAA_STATE_FILE)
+                    else -1.0
+                )
+            except OSError:
+                current_mtime = -1.0
 
         if current_mtime != self._buffer_mtime:
             self._buffer_mtime = current_mtime

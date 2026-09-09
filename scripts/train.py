@@ -764,14 +764,7 @@ def main():
         ads_filename = f"teacher_{teacher_tag}_{settings.dataset_name}_base_ads_tau{args.tau}_lam{args.lam}_eps{args.eps}.jsonl"
         ads_path = Path("data/teacher_holdout/ads") / ads_filename
         if not ads_path.exists():
-            # Try pattern fallback
-            pattern = f"teacher_{teacher_tag}_{settings.dataset_name}_base_ads_*.jsonl"
-            matches = sorted(Path("data/teacher_holdout/ads").glob(pattern))
-            if matches:
-                ads_path = matches[0]
-                print(f"Found ADS dataset via pattern matching: {ads_path}")
-            else:
-                raise RuntimeError(f"ADS trace dataset not found at {ads_path}")
+            raise RuntimeError(f"ADS trace dataset not found at {ads_path}")
 
         print(f"Loading ADS trace dataset from {ads_path}")
         dataset = HoldoutDataset(str(ads_path))
@@ -786,16 +779,21 @@ def main():
         teacher_tag = _model_name_tag(
             settings.teacher_holdout_model if effective_use_trained_teacher else settings.teacher_model
         )
-        doge_filename = f"teacher_{teacher_tag}_{settings.dataset_name}_base_doge_coef{args.doge_coef}_temp{args.doge_temp}.jsonl"
+        def _fmt_float(v: float) -> str:
+            """Format a float matching shell convention: compact exponent, no trailing .0 (e.g. 3e-5, 2, 0.7)."""
+            import re as _re
+            if v != 0 and abs(v) < 1e-3:
+                # force scientific notation for small values like 1e-4
+                s = f"{v:.0e}"  # e.g. '1e-04'
+            else:
+                s = f"{v:g}"  # removes trailing zeros / .0
+            # Fix exponent zero-padding: 1e-04 -> 1e-4
+            s = _re.sub(r'e([+-])0+(\d)', r'e\1\2', s)
+            return s
+        doge_filename = f"teacher_{teacher_tag}_{settings.dataset_name}_base_doge_coef{_fmt_float(args.doge_coef)}_temp{_fmt_float(args.doge_temp)}.jsonl"
         doge_path = Path("data/teacher_holdout/doge") / doge_filename
         if not doge_path.exists():
-            pattern = f"teacher_{teacher_tag}_{settings.dataset_name}_base_doge_*.jsonl"
-            matches = sorted(Path("data/teacher_holdout/doge").glob(pattern))
-            if matches:
-                doge_path = matches[0]
-                print(f"Found DOGe dataset via pattern matching: {doge_path}")
-            else:
-                raise RuntimeError(f"DOGe trace dataset not found at {doge_path}")
+            raise RuntimeError(f"DOGe trace dataset not found at {doge_path}")
 
         print(f"Loading DOGe trace dataset from {doge_path}")
         dataset = HoldoutDataset(str(doge_path))
@@ -871,17 +869,7 @@ def main():
                         break
 
                 if caa_dataset_path is None:
-                    # Pattern match fallback
-                    pattern = f"{stem_prefix}{style_slug}_*{ext}"
-                    search_dirs = [Path("data/normalized")] if args.normalized else []
-                    search_dirs.extend([Path("data/teacher_holdout/caa"), Path("data/teacher_holdout")])
-                    for c_dir in search_dirs:
-                        if c_dir.exists():
-                            matches = sorted(c_dir.glob(pattern))
-                            if matches:
-                                caa_dataset_path = matches[0]
-                                print(f"Found per-style CAA dataset via pattern matching: {caa_dataset_path}")
-                                break
+                    pass  # No fallback: will raise below
 
                 if caa_dataset_path is None:
                     raise RuntimeError(f"Per-style CAA dataset not found for style '{style_slug}': tried {candidates}")

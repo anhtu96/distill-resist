@@ -18,14 +18,15 @@ set -e
 source "$(dirname "$0")/_pipeline_helpers.sh"
 
 # Defaults
-dataset="gsm8k"
+dataset="math"
 tau="0.7"
-lam="0.015"
+lam="0.017"
 eps="0.01"
 student_only="false"
 resume="true"
-half="second"
-target="train"
+half="all"
+target="test"
+extra_flags=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --train-only)           target="train";       shift ;;
         --student-only)         student_only="true";  shift ;;
         --no-resume)            resume="false";       shift ;;
+        --no-filter-loops)      extra_flags+=("--no-filter-loops"); shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -49,35 +51,36 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "================================================================================"
 echo "End-to-End Antidistillation Sampling (ADS) Pipeline"
-echo "Dataset: ${dataset} | Tau: ${tau} | Lam: ${lam} | Eps: ${eps} | Half: ${half} | Target: ${target} | Student Only: ${student_only} | Resume: ${resume}"
+echo "Dataset: ${dataset} | Tau: ${tau} | Lam: ${lam} | Eps: ${eps} | Half: ${half} | Target: ${target} | Student Only: ${student_only} | Resume: ${resume} | Extra Flags: ${extra_flags[*]}"
 echo "================================================================================"
 
-# if [ "${student_only}" != "true" ]; then
-#     echo ">>> Step 1: Generating ADS Traces (half: ${half}, target: ${target}) <<<"
-#     cd "${ROOT_DIR}/other_works/antidistillation-sampling"
-#     bash pipeline_generate_ads.sh "${dataset}" "${tau}" "${lam}" "${eps}" "${resume}" "${half}" "${target}"
-#     cd "${ROOT_DIR}"
-# else
-#     echo ">>> Skipping Step 1: Using existing ADS traces <<<"
-# fi
+if [ "${student_only}" != "true" ]; then
+    echo ">>> Step 1: Generating ADS Traces (half: ${half}, target: ${target}) <<<"
+    cd "${ROOT_DIR}/other_works/antidistillation-sampling"
+    bash pipeline_generate_ads.sh "${dataset}" "${tau}" "${lam}" "${eps}" "${resume}" "${half}" "${target}"
+    cd "${ROOT_DIR}"
+else
+    echo ">>> Skipping Step 1: Using existing ADS traces <<<"
+fi
 
-# if [ "${target}" == "test" ]; then
-#     echo "================================================================================"
-#     echo "ADS Test Trace Generation Complete!"
-#     echo "================================================================================"
-#     exit 0
-# fi
+if [ "${target}" == "test" ]; then
+    echo "================================================================================"
+    echo "ADS Test Trace Generation Complete!"
+    echo "================================================================================"
+    exit 0
+fi
 
 # --- Step 2: Distill & Evaluate Student Model ---
 echo ">>> Step 2: Distilling Student Model on ADS Traces <<<"
 if [ "${dataset}" == "gsm8k" ]; then
-    # eval configs/gemma12b.phi4mini.gsm8k.env --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}" --batch-size 2048
-    eval configs/gemma12b.qwen3-8b.gsm8k.env --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}" --batch-size 2048
+    train_eval configs/gemma12b.phi4mini.gsm8k.env --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}" "${extra_flags[@]}"
+    train_eval configs/gemma12b.qwen3-8b.gsm8k.env --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}" "${extra_flags[@]}"
 elif [ "${dataset}" == "math" ]; then
-    eval configs/gemma12b.qwen.math.env --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}"
+    train_eval configs/gemma12b.phi4mini.math.env --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}" "${extra_flags[@]}"
+    train_eval configs/gemma12b.qwen3-8b.math.env --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}" "${extra_flags[@]}"
 else
     echo "Distilling on custom config for ${dataset}..."
-    eval "configs/gemma12b.qwen.${dataset}.env" --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}"
+    eval "configs/gemma12b.qwen.${dataset}.env" --with-ads --tau "${tau}" --lam "${lam}" --eps "${eps}" "${extra_flags[@]}"
 fi
 
 echo "================================================================================"

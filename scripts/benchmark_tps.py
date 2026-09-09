@@ -106,7 +106,7 @@ def run_benchmark(
     samples = loader.load()[:num_examples]
     prompts = [_render_prompt(tokenizer, s["user_prompt"], dataset) for s in samples]
 
-    sp = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    sp = SamplingParams(max_tokens=max_tokens, temperature=0.7)
 
     results = {"steered": [], "normal": []}
 

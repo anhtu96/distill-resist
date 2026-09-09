@@ -6,14 +6,22 @@ vLLM does not support residual-stream forward hooks, so this is HF-only.
 """
 
 import gc
+import os
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import ANSWER_FORCE_STRING, Settings, normalize_caa_strength
 from .loaders import get_loader
+
+_DEBUG_CAA = os.getenv("CAA_DEBUG", "0") == "1"
+
+
+def _is_bench_mode() -> bool:
+    return os.getenv("CAA_BENCH_MODE", "0") == "1"
 
 
 def _get_layer(model, layer_idx: int):
@@ -162,6 +170,8 @@ class HFCAATraceGenerator:
                 "inject_prefill": settings.caa_inject_prefill,
                 "inject_prefill_last_n": None,
                 "cap_logged": False,
+                "vector_gpu": None,
+                "sv_gpu": None,
             }
 
             def make_hook(s, layer_idx=layer_idx):
@@ -172,18 +182,28 @@ class HFCAATraceGenerator:
                     # Skip prefill if not explicitly enabled.
                     if hidden.shape[1] > 1:
                         if not s["inject_prefill"]:
-                            print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
+                            if _DEBUG_CAA:
+                                print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
                             return output
                         last_n = s["inject_prefill_last_n"]
-                        print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT last_n={last_n}")
-                        v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
+                        if _DEBUG_CAA:
+                            print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT last_n={last_n}")
+                        v = (
+                            s["vector_gpu"]
+                            if (s.get("vector_gpu") is not None and s["vector_gpu"].device == hidden.device and s["vector_gpu"].dtype == hidden.dtype)
+                            else s["vector"].to(hidden.device, hidden.dtype)
+                        )
                         if last_n is not None:
                             h_tail = hidden[:, -last_n:, :]
                             if s["relative"]:
                                 per_token_norm = h_tail.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
                                 delta = s["b"] * per_token_norm * v
                             else:
-                                delta = s["b"] * v
+                                delta = (
+                                    s["sv_gpu"]
+                                    if (s.get("sv_gpu") is not None and s["sv_gpu"].device == hidden.device and s["sv_gpu"].dtype == hidden.dtype)
+                                    else s["b"] * v
+                                )
                             hidden = hidden.clone()
                             hidden[:, -last_n:, :] = h_tail + delta
                         else:
@@ -191,7 +211,11 @@ class HFCAATraceGenerator:
                                 per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
                                 delta = s["b"] * per_token_norm * v
                             else:
-                                delta = s["b"] * v
+                                delta = (
+                                    s["sv_gpu"]
+                                    if (s.get("sv_gpu") is not None and s["sv_gpu"].device == hidden.device and s["sv_gpu"].dtype == hidden.dtype)
+                                    else s["b"] * v
+                                )
                             hidden = hidden + delta
                         return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
                     else:
@@ -199,18 +223,34 @@ class HFCAATraceGenerator:
                         if s["max_inject"] is not None:
                             if s["decode_count"] >= s["max_inject"]:
                                 if not s["cap_logged"]:
-                                    print(f"[CAA] injection cap reached at token {s['max_inject']} — steering disabled for remainder of generation")
+                                    if _DEBUG_CAA:
+                                        print(f"[CAA] injection cap reached at token {s['max_inject']} — steering disabled for remainder of generation")
                                     s["cap_logged"] = True
-                                print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} SKIP (cap={s['max_inject']})")
+                                if _DEBUG_CAA:
+                                    print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} SKIP (cap={s['max_inject']})")
                                 return output
                             s["decode_count"] += 1
-                        print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} INJECT")
-                    v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
-                    if s["relative"]:
-                        per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
-                        sv = s["b"] * per_token_norm * v
+                        if _DEBUG_CAA:
+                            print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} INJECT")
+
+                    # Decode token injection (hidden.shape[1] == 1):
+                    # In bench mode, avoid per-token .to(device, dtype) and scalar multiplication
+                    if s.get("sv_gpu") is not None and s["sv_gpu"].device == hidden.device and s["sv_gpu"].dtype == hidden.dtype:
+                        if s["relative"]:
+                            per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
+                            sv = per_token_norm * s["sv_gpu"]
+                        else:
+                            sv = s["sv_gpu"]
                     else:
-                        sv = s["b"] * v
+                        v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
+                        if _is_bench_mode():
+                            s["vector_gpu"] = v
+                            s["sv_gpu"] = s["b"] * v
+                        if s["relative"]:
+                            per_token_norm = hidden.float().norm(dim=-1, keepdim=True).to(hidden.dtype)
+                            sv = s["b"] * per_token_norm * v
+                        else:
+                            sv = s["b"] * v
                     hidden = hidden + sv
                     return (hidden,) + output[1:] if isinstance(output, tuple) else hidden
                 return _hook
@@ -218,6 +258,23 @@ class HFCAATraceGenerator:
             _get_layer(self._model, layer_idx).register_forward_hook(make_hook(state))
             self._states.append(state)
         print(f"Loaded CAA checkpoint: layers={self.insertion_layers}, styles={self.styles}")
+
+    def _cache_state_vectors(self, state: dict, layer_idx: int) -> None:
+        """Pre-cache steering vector on GPU in device/dtype to eliminate per-forward overhead."""
+        if _is_bench_mode() and state.get("vector") is not None:
+            try:
+                layer_module = _get_layer(self._model, layer_idx)
+                param = next(layer_module.parameters())
+                dev, dt = param.device, param.dtype
+                v_gpu = state["vector"].to(device=dev, dtype=dt)
+                state["vector_gpu"] = v_gpu
+                state["sv_gpu"] = state["b"] * v_gpu
+            except Exception:
+                state["vector_gpu"] = None
+                state["sv_gpu"] = None
+        else:
+            state["vector_gpu"] = None
+            state["sv_gpu"] = None
 
     def _resolve_layer_strengths(
         self, weights_or_style: "str | dict[str, float]"
@@ -362,6 +419,7 @@ class HFCAATraceGenerator:
             state["inject_prefill_last_n"] = last_n
             state["decode_count"] = 0
             state["cap_logged"] = False
+            self._cache_state_vectors(state, layer_idx)
 
     def set_random_per_layer_vectors(self) -> dict[int, dict[str, float]]:
         from .prf import random_per_layer_caa_vectors
@@ -395,6 +453,7 @@ class HFCAATraceGenerator:
             state["inject_prefill_last_n"] = last_n
             state["decode_count"] = 0
             state["cap_logged"] = False
+            self._cache_state_vectors(state, layer_idx)
         return per_layer_weights, max_inj, last_n
 
     def set_vector_from_metadata(
@@ -442,12 +501,15 @@ class HFCAATraceGenerator:
             state["inject_prefill_last_n"] = last_n
             state["decode_count"] = 0
             state["cap_logged"] = False
+            self._cache_state_vectors(state, layer_idx)
 
         return style_weights, strength_scale, max_inj, last_n
 
     def disable_steering(self) -> None:
         for state in self._states:
             state["active"] = False
+            state["vector_gpu"] = None
+            state["sv_gpu"] = None
 
     def _render(self, prompt: str, system_prompt: str) -> str:
         messages = [
@@ -468,6 +530,7 @@ class HFCAATraceGenerator:
         rendered = [self._render(p, sys_prompt) for p in prompts]
 
         results: list[str] = []
+        ctx = torch.inference_mode() if hasattr(torch, "inference_mode") else torch.no_grad()
         for i in range(0, len(rendered), self.batch_size):
             batch = rendered[i : i + self.batch_size]
             for s in self._states:
@@ -477,7 +540,7 @@ class HFCAATraceGenerator:
                 batch, return_tensors="pt", padding=True, truncation=False,
             ).to(self._model.device)
 
-            with torch.no_grad():
+            with ctx:
                 outputs = self._model.generate(
                     **inputs,
                     max_new_tokens=self.max_new_tokens,
@@ -486,9 +549,7 @@ class HFCAATraceGenerator:
                     pad_token_id=self._tokenizer.pad_token_id,
                 )
 
-            # Report how many decode steps were steered for this sub-batch.
-            # All layers share the same count (they fire in sync), so layer 0 is representative.
-            if self._states:
+            if self._states and _DEBUG_CAA:
                 injected = self._states[0]["decode_count"]
                 cap = self._states[0]["max_inject"]
                 cap_str = f"/{cap}" if cap is not None else " (no cap)"

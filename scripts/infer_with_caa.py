@@ -8,6 +8,7 @@ following the original CAA paper (Panickssery et al. 2023).
 """
 
 import sys
+import os
 import argparse
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from src.config import DATASET_SYSTEM_PROMPTS, Settings
 from src.loaders.registry import get_loader
 
 _settings = Settings()
+_DEBUG_CAA = os.getenv("CAA_DEBUG", "0") == "1"
 
 
 def _get_layer(model, layer_idx: int):
@@ -62,10 +64,12 @@ def register_hooks(model, insertion_layers: list, relative_strength: bool = Fals
                 # Skip prefill if not explicitly enabled.
                 if hidden.shape[1] > 1:
                     if not s["inject_prefill"]:
-                        print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
+                        if _DEBUG_CAA:
+                            print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
                         return output
                     last_n = s["inject_prefill_last_n"]
-                    print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT last_n={last_n}")
+                    if _DEBUG_CAA:
+                        print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT last_n={last_n}")
                     v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
                     if last_n is not None:
                         h_tail = hidden[:, -last_n:, :]  # [B, last_n, H]
@@ -88,10 +92,12 @@ def register_hooks(model, insertion_layers: list, relative_strength: bool = Fals
                     # Token cap (only applies during decode steps, i.e. hidden.shape[1] == 1)
                     if s["max_inject"] is not None:
                         if s["decode_count"] >= s["max_inject"]:
-                            print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} SKIP (cap={s['max_inject']})")
+                            if _DEBUG_CAA:
+                                print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} SKIP (cap={s['max_inject']})")
                             return output
                         s["decode_count"] += 1
-                    print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} INJECT")
+                    if _DEBUG_CAA:
+                        print(f"[CAA dbg] layer={layer_idx} token={s['decode_count']} INJECT")
 
                 v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
                 if s["relative"]:
