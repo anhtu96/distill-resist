@@ -6,7 +6,7 @@
 # Usage:
 #   bash scripts/pipeline_ads.sh [--dataset DATASET] [--tau TAU] [--lam LAM] [--eps EPS]
 #                                [--half first|second|all] [--target train|test|both]
-#                                [--student-only] [--no-resume]
+#                                [--student-only] [--no-resume] [--filter-loops]
 #
 # Examples:
 #   bash scripts/pipeline_ads.sh
@@ -25,7 +25,8 @@ eps="0.01"
 student_only="false"
 resume="true"
 half="all"
-target="test"
+target="train"
+no_filter_loops="true"
 extra_flags=()
 
 while [[ $# -gt 0 ]]; do
@@ -42,10 +43,15 @@ while [[ $# -gt 0 ]]; do
         --train-only)           target="train";       shift ;;
         --student-only)         student_only="true";  shift ;;
         --no-resume)            resume="false";       shift ;;
-        --no-filter-loops)      extra_flags+=("--no-filter-loops"); shift ;;
+        --no-filter-loops)      no_filter_loops="true"; shift ;;
+        --filter-loops)         no_filter_loops="false"; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
+
+if [ "${no_filter_loops}" == "true" ]; then
+    extra_flags+=("--no-filter-loops")
+fi
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 

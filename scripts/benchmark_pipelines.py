@@ -669,7 +669,7 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
             if args.caa_mode == "metadata":
                 print("[Style Steering] Mode: metadata (HMAC-PRF vector derivation matching pipeline_caa_metadata.sh)")
             else:
-                active_style = args.caa_styles[0] if args.caa_styles else "scratchpad"
+                active_style = args.caa_styles[0] if args.caa_styles else "distractor"
                 if active_style in gen.styles:
                     print(f"[Style Steering] Activating CAA style: '{active_style}' (styles configured: {args.caa_styles})")
                     gen.set_style(active_style)
@@ -1180,7 +1180,7 @@ def parse_args() -> argparse.Namespace:
         "--caa-styles",
         type=str,
         nargs="+",
-        default=["scratchpad", "dead_end", "jargon", "distractor"],
+        default=["distractor"],
         help="CAA styles list (default: scratchpad dead_end jargon distractor, from pipeline_caa_styles.sh)",
     )
     parser.add_argument(
@@ -1212,7 +1212,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-samples",
         type=int,
-        default=2,
+        default=10,
         help="Number of prompts to benchmark (default: 16)",
     )
     parser.add_argument(

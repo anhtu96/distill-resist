@@ -513,6 +513,9 @@ class Settings(BaseSettings):
     keep_think_tags: bool = False  # preserve <think>...</think> in saved responses (for reasoning models)
     concat_system_to_user: bool = False  # prepend system prompt to user message instead of using system role
 
+    # Reproducibility
+    seed: int = 42  # Shared seed for train/eval split and SFTConfig training
+
     # Sync / logging
     hf_repo: str | None = None          # HuggingFace repo to push merged student model to after training
     wandb_project: str = "distill-resist"  # W&B project for student eval logging

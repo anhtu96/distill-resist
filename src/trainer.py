@@ -38,7 +38,7 @@ class ModelTrainer:
             logger.warning("Dataset has fewer than 2 samples; skipping eval split.")
             return dataset, None
 
-        split = dataset.train_test_split(test_size=split_ratio, seed=42, shuffle=True)
+        split = dataset.train_test_split(test_size=split_ratio, seed=self.settings.seed, shuffle=True)
         train_dataset = split["train"]
         eval_dataset = split["test"]
         logger.info(
@@ -212,6 +212,7 @@ class ModelTrainer:
 
         sft_config = SFTConfig(
             output_dir=output_dir,
+            seed=s.seed,
             num_train_epochs=getattr(s, f"{prefix}_num_train_epochs"),
             per_device_train_batch_size=per_device_train_batch_size,
             per_device_eval_batch_size=getattr(s, f"{prefix}_per_device_eval_batch_size"),
@@ -289,6 +290,7 @@ class ModelTrainer:
 
         sft_config = SFTConfig(
             output_dir=output_dir,
+            seed=s.seed,
             num_train_epochs=getattr(s, f"{prefix}_num_train_epochs"),
             per_device_train_batch_size=getattr(s, f"{prefix}_per_device_train_batch_size"),
             per_device_eval_batch_size=getattr(s, f"{prefix}_per_device_eval_batch_size"),
@@ -466,6 +468,7 @@ class ModelTrainer:
 
         sft_config = SFTConfig(
             output_dir=output_dir,
+            seed=s.seed,
             num_train_epochs=getattr(s, f"{prefix}_num_train_epochs"),
             per_device_train_batch_size=getattr(s, f"{prefix}_per_device_train_batch_size"),
             per_device_eval_batch_size=getattr(s, f"{prefix}_per_device_eval_batch_size"),
