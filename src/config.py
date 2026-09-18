@@ -634,6 +634,26 @@ def get_caa_param_suffix(
     return f"_s{format_caa_strength_tag(strength)}_{format_caa_max_inj_tag(max_inj)}"
 
 
+def get_pcaa_suffix(settings: Settings) -> str:
+    """Format CAA activation probability into a suffix tag.
+
+    Returns:
+        '_pcaa_{value}' (e.g. '_pcaa_0.75') if caa_p_active < 1.0, otherwise ''
+    """
+    p = getattr(settings, "caa_p_active", 1.0)
+    if p is None:
+        return ""
+    try:
+        p_val = float(p)
+    except (ValueError, TypeError):
+        return ""
+    if p_val >= 1.0:
+        return ""
+    s = f"{p_val:.4f}".rstrip("0").rstrip(".")
+    return f"_pcaa_{s}"
+
+
+
 def normalize_caa_strength(
     strength,
     insertion_layers: list[int],

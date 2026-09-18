@@ -291,6 +291,11 @@ def _get_caa_param_suffix(settings: Settings, style: str | None = None) -> str:
     return get_caa_param_suffix(settings, style=style)
 
 
+def _get_pcaa_suffix(settings: Settings) -> str:
+    from src.config import get_pcaa_suffix
+    return get_pcaa_suffix(settings)
+
+
 def _resolve_student_caa_dataset_path(
     settings: Settings,
     use_trained_teacher: bool,
@@ -305,12 +310,30 @@ def _resolve_student_caa_dataset_path(
     root = Path("data/teacher_holdout")
     subdir = root / "caa"
     param_suffix = _get_caa_param_suffix(settings, style=caa_style)
+    pcaa_sfx = _get_pcaa_suffix(settings)
     preferred = None
 
     if caa_style:
-        suffixes = (f"_caa_{caa_style}{param_suffix}", f"_caa_{caa_style}")
+        if pcaa_sfx:
+            suffixes = (
+                f"_caa_{caa_style}{param_suffix}{pcaa_sfx}",
+                f"_caa_{caa_style}{pcaa_sfx}",
+                f"_caa_{caa_style}{param_suffix}",
+                f"_caa_{caa_style}",
+            )
+        else:
+            suffixes = (f"_caa_{caa_style}{param_suffix}", f"_caa_{caa_style}")
     else:
-        suffixes = (f"_caa_mixed{param_suffix}", "_caa_mixed", "_caa_mixed_batch")
+        if pcaa_sfx:
+            suffixes = (
+                f"_caa_mixed{param_suffix}{pcaa_sfx}",
+                f"_caa_mixed{pcaa_sfx}",
+                f"_caa_mixed{param_suffix}",
+                "_caa_mixed",
+                "_caa_mixed_batch",
+            )
+        else:
+            suffixes = (f"_caa_mixed{param_suffix}", "_caa_mixed", "_caa_mixed_batch")
 
     for suffix in suffixes:
         for search_path in (subdir / f"{preferred_stem}{suffix}.jsonl", root / f"{preferred_stem}{suffix}.jsonl"):
@@ -836,12 +859,13 @@ def main():
                     print(f"Auto-detected CAA style '{effective_caa_style}' from dataset file: {detected_file}")
 
         param_suffix = _get_caa_param_suffix(settings, style=effective_caa_style)
+        pcaa_sfx = _get_pcaa_suffix(settings)
         if effective_caa_style and effective_caa_style != "mixed":
-            suffix = f"_caa_{effective_caa_style}{param_suffix}"
-            os.environ["WANDB_RUN_NAME"] = f"distill-caa-{effective_caa_style}"
+            suffix = f"_caa_{effective_caa_style}{param_suffix}{pcaa_sfx}"
+            os.environ["WANDB_RUN_NAME"] = f"distill-caa-{effective_caa_style}{pcaa_sfx}"
         else:
-            suffix = f"_caa{param_suffix}"
-            os.environ["WANDB_RUN_NAME"] = "distill-caa"
+            suffix = f"_caa{param_suffix}{pcaa_sfx}"
+            os.environ["WANDB_RUN_NAME"] = f"distill-caa{pcaa_sfx}"
 
         if args.normalized:
             suffix = suffix + "_normalized"
@@ -853,14 +877,20 @@ def main():
         else:
             if effective_caa_style and effective_caa_style != "mixed":
                 style_slug = effective_caa_style
-                fname = f"{stem_prefix}{style_slug}{param_suffix}{ext}"
+                fnames = []
+                if pcaa_sfx:
+                    fnames.append(f"{stem_prefix}{style_slug}{param_suffix}{pcaa_sfx}{ext}")
+                    fnames.append(f"{stem_prefix}{style_slug}{pcaa_sfx}{ext}")
+                fnames.append(f"{stem_prefix}{style_slug}{param_suffix}{ext}")
+                fnames.append(f"{stem_prefix}{style_slug}{ext}")
                 
                 # Check candidate paths
                 candidates = []
-                if args.normalized:
-                    candidates.append(Path("data/normalized") / fname)
-                candidates.append(Path("data/teacher_holdout/caa") / fname)
-                candidates.append(Path("data/teacher_holdout") / fname)
+                for fn in fnames:
+                    if args.normalized:
+                        candidates.append(Path("data/normalized") / fn)
+                    candidates.append(Path("data/teacher_holdout/caa") / fn)
+                    candidates.append(Path("data/teacher_holdout") / fn)
                 
                 caa_dataset_path = None
                 for candidate in candidates:

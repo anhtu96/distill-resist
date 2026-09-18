@@ -98,9 +98,10 @@ def get_student_adapter_dir(
         out = Path(str(out) + "_paraphrased")
 
     if with_caa:
-        from src.config import get_caa_param_suffix
+        from src.config import get_caa_param_suffix, get_pcaa_suffix
         param_suffix = get_caa_param_suffix(s, style=caa_style or None)
-        suffix = f"_caa_{caa_style}{param_suffix}" if (caa_style and caa_style != "mixed") else f"_caa{param_suffix}"
+        pcaa_sfx = get_pcaa_suffix(s)
+        suffix = f"_caa_{caa_style}{param_suffix}{pcaa_sfx}" if (caa_style and caa_style != "mixed") else f"_caa{param_suffix}{pcaa_sfx}"
         out = Path(str(out) + suffix)
 
     if with_doge:
@@ -148,9 +149,10 @@ def get_student_trace_name(
     
     # CAA parameters
     if with_caa:
-        from src.config import get_caa_param_suffix
+        from src.config import get_caa_param_suffix, get_pcaa_suffix
         param_suffix = get_caa_param_suffix(s, style=caa_style or None)
-        suffix = f"_caa_{caa_style}{param_suffix}" if (caa_style and caa_style != "mixed") else f"_caa{param_suffix}"
+        pcaa_sfx = get_pcaa_suffix(s)
+        suffix = f"_caa_{caa_style}{param_suffix}{pcaa_sfx}" if (caa_style and caa_style != "mixed") else f"_caa{param_suffix}{pcaa_sfx}"
         base_name += suffix
         
     # Name suffix

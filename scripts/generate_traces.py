@@ -375,6 +375,11 @@ def _get_caa_param_suffix(settings, args=None, style: str | None = None) -> str:
     return get_caa_param_suffix(settings, args=args, style=style)
 
 
+def _get_pcaa_suffix(settings) -> str:
+    from src.config import get_pcaa_suffix
+    return get_pcaa_suffix(settings)
+
+
 
 def _resolve_trained_student_model_path(
     base_output_dir: str,
@@ -458,23 +463,43 @@ def _resolve_trained_student_model_path(
                 styles.append(caa_style)
             elif isinstance(caa_style, list):
                 styles.extend([s for s in caa_style if s != "mixed"])
+        pcaa_sfx = _get_pcaa_suffix(settings) if settings is not None else ""
         for style in styles:
             style_sfx = _get_caa_param_suffix(settings, args, style=style) if (settings is not None or args is not None) else None
             if style_sfx:
+                if pcaa_sfx:
+                    sfx = f"_caa_{style}{style_sfx}{pcaa_sfx}"
+                    if not name.endswith(sfx):
+                        vars.append(p.with_name(name + sfx))
                 sfx = f"_caa_{style}{style_sfx}"
                 if not name.endswith(sfx):
                     vars.append(p.with_name(name + sfx))
             if caa_param_suffix:
+                if pcaa_sfx:
+                    sfx = f"_caa_{style}{caa_param_suffix}{pcaa_sfx}"
+                    if not name.endswith(sfx):
+                        vars.append(p.with_name(name + sfx))
                 sfx = f"_caa_{style}{caa_param_suffix}"
                 if not name.endswith(sfx):
                     vars.append(p.with_name(name + sfx))
+            if pcaa_sfx:
+                sfx_pcaa = f"_caa_{style}{pcaa_sfx}"
+                if not name.endswith(sfx_pcaa):
+                    vars.append(p.with_name(name + sfx_pcaa))
             sfx_no_param = f"_caa_{style}"
             if not name.endswith(sfx_no_param):
                 vars.append(p.with_name(name + sfx_no_param))
         if caa_param_suffix:
+            if pcaa_sfx:
+                sfx = f"_caa{caa_param_suffix}{pcaa_sfx}"
+                if not name.endswith(sfx):
+                    vars.append(p.with_name(name + sfx))
             sfx = f"_caa{caa_param_suffix}"
             if not name.endswith(sfx):
                 vars.append(p.with_name(name + sfx))
+        if pcaa_sfx:
+            if not name.endswith(f"_caa{pcaa_sfx}"):
+                vars.append(p.with_name(name + f"_caa{pcaa_sfx}"))
         if not name.endswith("_caa"):
             vars.append(p.with_name(name + "_caa"))
         if not name.endswith("_caa_batch"):
@@ -1235,7 +1260,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
             import uuid
             import time
             param_suffix = _get_caa_param_suffix(settings, args)
-            suffix = f"_caa_mixed{param_suffix}.jsonl"
+            pcaa_sfx = _get_pcaa_suffix(settings) if target_set == "holdout" else ""
+            suffix = f"_caa_mixed{param_suffix}{pcaa_sfx}.jsonl"
             out_dataset = HoldoutDataset(str(_out_dir / f"{_stem}{suffix}"))
             first_write = True
             generated_count = 0
@@ -1257,9 +1283,12 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 _sw_vals = np.ones(len(_sw_styles), dtype=float)
             _sw_vals /= _sw_vals.sum()
             _n_batches = (total + batch_size - 1) // batch_size
-            _exact = _sw_vals * _n_batches
+            _p_active = float(settings.caa_p_active) if settings.caa_p_active is not None else 1.0
+            _n_active_batches = int(_n_batches * _p_active) if _p_active < 1.0 else _n_batches
+            _n_benign_batches = _n_batches - _n_active_batches
+            _exact = _sw_vals * _n_active_batches
             _counts = np.floor(_exact).astype(int)
-            _remainder = _n_batches - _counts.sum()
+            _remainder = _n_active_batches - _counts.sum()
             _top = np.argsort(_exact - _counts)[::-1][:_remainder]
             _counts[_top] += 1
             _style_assignments: list[str] = []
@@ -1267,6 +1296,7 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 _style_assignments.extend([_s] * int(_c))
             _seed = hmac_seed_from_metadata({"user_id": args.caa_user_id or "synthetic"})
             np.random.default_rng(_seed).shuffle(_style_assignments)
+            print(f"[CAA] n_active_batches={_n_active_batches}, n_benign_batches={_n_benign_batches}")
             print(f"[CAA] Style assignment counts: { {s: _style_assignments.count(s) for s in _sw_styles} }")
 
             batch_iter = tqdm(range(0, total, batch_size), desc="Generating (metadata-batch)")
@@ -1276,24 +1306,45 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
                 batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
                 metadata = {"user_id": args.caa_user_id or "synthetic", "batch_id": batch_idx}
-                generator.caa_active_styles = [_style_assignments[batch_count]]
-                if args.caa_random_per_layer:
-                    per_layer_weights, max_inj, last_n = generator.set_random_per_layer_vectors()
-                    styles = list(next(iter(per_layer_weights.values())))
-                    layers_in_order = list(per_layer_weights.keys())
-                    weight_record = {
-                        f"w_{s}": [per_layer_weights[l][s] for l in layers_in_order]
-                        for s in styles
-                    }
-                    weight_record["w_layers"] = layers_in_order
-                    weight_record["max_injection_tokens"] = max_inj
-                    weight_record["inject_prefill_last_n"] = last_n
+                is_active_batch = batch_count < _n_active_batches
+                if is_active_batch:
+                    generator.caa_active_styles = [_style_assignments[batch_count]]
+                    if args.caa_random_per_layer:
+                        per_layer_weights, max_inj, last_n = generator.set_random_per_layer_vectors()
+                        styles = list(next(iter(per_layer_weights.values())))
+                        layers_in_order = list(per_layer_weights.keys())
+                        weight_record = {
+                            f"w_{s}": [per_layer_weights[l][s] for l in layers_in_order]
+                            for s in styles
+                        }
+                        weight_record["w_layers"] = layers_in_order
+                        weight_record["max_injection_tokens"] = max_inj
+                        weight_record["inject_prefill_last_n"] = last_n
+                    else:
+                        _orig_p_active = generator.settings.caa_p_active
+                        generator.settings.caa_p_active = 1.0
+                        try:
+                            style_weights, strength_scale, max_inj, last_n = generator.set_vector_from_metadata(metadata)
+                        finally:
+                            generator.settings.caa_p_active = _orig_p_active
+                        weight_record = {f"w_{s}": w for s, w in style_weights.items()}
+                        weight_record["strength_scale"] = strength_scale
+                        weight_record["max_injection_tokens"] = max_inj
+                        weight_record["inject_prefill_last_n"] = last_n
                 else:
-                    style_weights, strength_scale, max_inj, last_n = generator.set_vector_from_metadata(metadata)
-                    weight_record = {f"w_{s}": w for s, w in style_weights.items()}
-                    weight_record["strength_scale"] = strength_scale
-                    weight_record["max_injection_tokens"] = max_inj
-                    weight_record["inject_prefill_last_n"] = last_n
+                    generator.disable_steering()
+                    if args.caa_random_per_layer:
+                        layers_in_order = list(generator.insertion_layers)
+                        weight_record = {
+                            f"w_{s}": [0.0] * len(layers_in_order)
+                            for s in generator.styles
+                        }
+                        weight_record["w_layers"] = layers_in_order
+                    else:
+                        weight_record = {f"w_{s}": 0.0 for s in generator.styles}
+                    weight_record["strength_scale"] = 0.0
+                    weight_record["max_injection_tokens"] = None
+                    weight_record["inject_prefill_last_n"] = None
                 
                 raw_responses = generator.sample_batch(prompt_batch)
                 # NOTE: answer forcing temporarily disabled in metadata mode
@@ -1370,7 +1421,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
             if target_set == "test":
                 import wandb
                 model_tag = Path(model_id_to_use).name
-                run_name = f"eval-caa-metadata-{model_tag}-{settings.dataset_name}"
+                pcaa_sfx = _get_pcaa_suffix(settings)
+                run_name = f"eval-caa-metadata-{model_tag}-{settings.dataset_name}{pcaa_sfx}"
                 metrics = {
                     "eval/accuracy": results["accuracy"],
                     "eval/correct": results["correct"],
@@ -1400,7 +1452,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 print(f"\n=== Generating CAA-steered traces for style='{style}' ===")
                 generator.set_style(style)
                 param_suffix = _get_caa_param_suffix(settings, args, style=style)
-                styled_output_path = str(_out_dir / f"{_stem}_caa_{style}{param_suffix}.jsonl")
+                pcaa_sfx = _get_pcaa_suffix(settings) if target_set == "holdout" else ""
+                styled_output_path = str(_out_dir / f"{_stem}_caa_{style}{param_suffix}{pcaa_sfx}.jsonl")
                 styled_dataset = HoldoutDataset(styled_output_path)
                 style_stats[style] = []
                 first_write = True
@@ -1454,7 +1507,8 @@ def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_t
                 if target_set == "test":
                     import wandb
                     model_tag = Path(model_id_to_use).name
-                    run_name = f"eval-caa-{style}-{model_tag}-{settings.dataset_name}"
+                    pcaa_sfx = _get_pcaa_suffix(settings)
+                    run_name = f"eval-caa-{style}-{model_tag}-{settings.dataset_name}{pcaa_sfx}"
                     metrics = {
                         "eval/accuracy": results["accuracy"],
                         "eval/correct": results["correct"],
@@ -1890,17 +1944,18 @@ def main():
                 base_name += f"_style_{args.with_styles}"
         if args.model == "student" and args.with_caa:
             param_suffix = _get_caa_param_suffix(settings, args)
+            pcaa_sfx = _get_pcaa_suffix(settings)
             if args.caa_style and args.caa_style != "mixed":
                 if isinstance(args.caa_style, list):
                     style_str = "_".join([s for s in args.caa_style if s != "mixed"])
                 else:
                     style_str = str(args.caa_style)
                 if style_str:
-                    base_name += f"_caa_{style_str}{param_suffix}"
+                    base_name += f"_caa_{style_str}{param_suffix}{pcaa_sfx}"
                 else:
-                    base_name += f"_caa{param_suffix}"
+                    base_name += f"_caa{param_suffix}{pcaa_sfx}"
             else:
-                base_name += f"_caa{param_suffix}"
+                base_name += f"_caa{param_suffix}{pcaa_sfx}"
 
         if args.model == "student" and args.name_suffix:
             if not base_name.endswith(args.name_suffix):
