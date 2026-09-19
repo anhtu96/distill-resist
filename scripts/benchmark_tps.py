@@ -25,7 +25,6 @@ from pathlib import Path
 import statistics
 import subprocess
 import sys
-import threading
 import time
 from typing import Optional
 
@@ -57,8 +56,8 @@ class BenchmarkResult:
     throughput_tokens_per_sec: float        # mean tok/s across loops
     throughput_samples_per_sec: float       # mean samples/s across loops
     avg_latency_sec: float
-    peak_gpu_mem_mb: float
-    gpu_mem_at_end_mb: float
+    peak_gpu_mem_mb: float = 0.0
+    gpu_mem_at_end_mb: float = 0.0
     num_loops: int = 1
     loop_throughputs_tokens: list[float] = field(default_factory=list)  # tok/s per loop
     throughput_tokens_std: float = 0.0      # std dev across loops
@@ -85,10 +84,26 @@ class FirstTokenTimer(StoppingCriteria):
         return False  # never stop early
 
 
+def _get_eos_token_ids(tokenizer) -> list[int] | None:
+    if tokenizer is None:
+        return None
+    eos_ids = []
+    if tokenizer.eos_token_id is not None:
+        if isinstance(tokenizer.eos_token_id, list):
+            eos_ids.extend(tokenizer.eos_token_id)
+        else:
+            eos_ids.append(tokenizer.eos_token_id)
+    eot_id = tokenizer.convert_tokens_to_ids("<end_of_turn>")
+    if eot_id is not None and eot_id != tokenizer.unk_token_id and eot_id not in eos_ids:
+        eos_ids.append(eot_id)
+    return eos_ids if eos_ids else None
+
+
 def _generate_with_ttft_hf(
     model,
     inputs: dict,
     gen_kwargs: dict,
+    tokenizer=None,
 ) -> tuple[torch.Tensor, float, float]:
     """Run model.generate() and return (gen_out, elapsed_total, ttft_sec).
 
@@ -97,6 +112,10 @@ def _generate_with_ttft_hf(
     """
     timer = FirstTokenTimer()
     kwargs = dict(gen_kwargs)
+    if "eos_token_id" not in kwargs and tokenizer is not None:
+        eos_ids = _get_eos_token_ids(tokenizer)
+        if eos_ids:
+            kwargs["eos_token_id"] = eos_ids
     existing_criteria = kwargs.pop("stopping_criteria", None)
     if existing_criteria is not None:
         criteria_list = list(existing_criteria) + [timer]
@@ -139,64 +158,6 @@ def _extract_ttft_vllm(output) -> float:
     except Exception:
         pass
     return 0.0
-
-
-# ============================================================================
-# GPU MEMORY UTILITIES
-# ============================================================================
-
-def get_gpu_memory_used_mb(device_index: int = 0) -> float:
-    """Read current GPU memory used in MB via pynvml or nvidia-smi fallback."""
-    try:
-        import pynvml
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
-        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        return info.used / (1024 ** 2)
-    except Exception:
-        try:
-            out = subprocess.check_output(
-                ["nvidia-smi", f"--id={device_index}", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-                text=True,
-            ).strip()
-            return float(out.split("\n")[0])
-        except Exception:
-            if torch.cuda.is_available():
-                return torch.cuda.memory_allocated(device_index) / (1024 ** 2)
-            return 0.0
-
-
-class GPUMemoryMonitor:
-    """Background polling thread for tracking peak GPU memory usage (useful for vLLM)."""
-
-    def __init__(self, device_index: int = 0, interval_sec: float = 0.05):
-        self.device_index = device_index
-        self.interval_sec = interval_sec
-        self.stop_event = threading.Event()
-        self.peak_mb = 0.0
-        self.thread: Optional[threading.Thread] = None
-
-    def _poll(self):
-        while not self.stop_event.is_set():
-            used = get_gpu_memory_used_mb(self.device_index)
-            if used > self.peak_mb:
-                self.peak_mb = used
-            time.sleep(self.interval_sec)
-
-    def start(self):
-        self.peak_mb = get_gpu_memory_used_mb(self.device_index)
-        self.stop_event.clear()
-        self.thread = threading.Thread(target=self._poll, daemon=True)
-        self.thread.start()
-
-    def stop(self) -> float:
-        self.stop_event.set()
-        if self.thread:
-            self.thread.join(timeout=1.0)
-        final_used = get_gpu_memory_used_mb(self.device_index)
-        if final_used > self.peak_mb:
-            self.peak_mb = final_used
-        return self.peak_mb
 
 
 # ============================================================================
@@ -414,9 +375,6 @@ def run_baseline(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResul
             stop=[s for s in [_eos, "<end_of_turn>"] if s],
         )
 
-        monitor = GPUMemoryMonitor()
-        monitor.start()
-
         loop_throughputs_tokens: list[float] = []
         loop_throughputs_samples: list[float] = []
         all_example_stats: list[dict] = []
@@ -433,8 +391,12 @@ def run_baseline(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResul
             loop_generated = 0
 
             for idx, prompt in enumerate(formatted_prompts):
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 t_b0 = time.perf_counter()
                 outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 elapsed = time.perf_counter() - t_b0
                 out = outputs[0] if outputs else None
                 toks = len(out.outputs[0].token_ids) if (out and out.outputs) else 0
@@ -472,8 +434,8 @@ def run_baseline(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResul
             time_label = "excl. TTFT" if not args.no_ttft_exclude else "total"
             print(f"  [baseline] Loop {loop_idx + 1}: {loop_tps:.2f} tok/s ({loop_tokens} tokens, {loop_elapsed_excl:.2f}s {time_label})", flush=True)
 
-        peak_gpu_mem_mb = monitor.stop()
-        gpu_mem_at_end_mb = get_gpu_memory_used_mb()
+        peak_gpu_mem_mb = 0.0
+        gpu_mem_at_end_mb = 0.0
 
     else:
         # HF backend
@@ -494,7 +456,6 @@ def run_baseline(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResul
         formatted_prompts = [format_chat_prompt(tokenizer, p, dataset=args.dataset) for p in prompts]
         model_device = next(model.parameters()).device
 
-        torch.cuda.reset_peak_memory_stats()
         total = len(formatted_prompts)
         loop_throughputs_tokens = []
         loop_throughputs_samples = []
@@ -518,6 +479,7 @@ def run_baseline(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResul
                 gen_out, elapsed, ttft = _generate_with_ttft_hf(
                     model=model,
                     inputs=inputs,
+                    tokenizer=tokenizer,
                     gen_kwargs=dict(
                         max_new_tokens=args.max_new_tokens,
                         pad_token_id=tokenizer.pad_token_id,
@@ -568,8 +530,8 @@ def run_baseline(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResul
             time_label = "excl. TTFT" if not args.no_ttft_exclude else "total"
             print(f"  [baseline] Loop {loop_idx + 1}: {loop_tps:.2f} tok/s ({loop_tokens} tokens, {loop_elapsed_excl:.2f}s {time_label})", flush=True)
 
-        peak_gpu_mem_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
-        gpu_mem_at_end_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+        peak_gpu_mem_mb = 0.0
+        gpu_mem_at_end_mb = 0.0
 
     mean_tps = float(statistics.mean(loop_throughputs_tokens)) if loop_throughputs_tokens else 0.0
     std_tps = float(statistics.stdev(loop_throughputs_tokens)) if len(loop_throughputs_tokens) > 1 else 0.0
@@ -632,9 +594,6 @@ def run_doge(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResult:
             stop=[s for s in [_eos, "<end_of_turn>"] if s],
         )
 
-        monitor = GPUMemoryMonitor()
-        monitor.start()
-
         loop_throughputs_tokens: list[float] = []
         loop_throughputs_samples: list[float] = []
         all_example_stats: list[dict] = []
@@ -651,8 +610,12 @@ def run_doge(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResult:
             loop_generated = 0
 
             for idx, prompt in enumerate(formatted_prompts):
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 t_b0 = time.perf_counter()
                 outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 elapsed = time.perf_counter() - t_b0
                 out = outputs[0] if outputs else None
                 toks = len(out.outputs[0].token_ids) if (out and out.outputs) else 0
@@ -690,8 +653,8 @@ def run_doge(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResult:
             time_label = "excl. TTFT" if not args.no_ttft_exclude else "total"
             print(f"  [doge] Loop {loop_idx + 1}: {loop_tps:.2f} tok/s ({loop_tokens} tokens, {loop_elapsed_excl:.2f}s {time_label})", flush=True)
 
-        peak_gpu_mem_mb = monitor.stop()
-        gpu_mem_at_end_mb = get_gpu_memory_used_mb()
+        peak_gpu_mem_mb = 0.0
+        gpu_mem_at_end_mb = 0.0
 
     else:
         # HF backend
@@ -712,7 +675,6 @@ def run_doge(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResult:
         formatted_prompts = [format_chat_prompt(tokenizer, p, dataset=args.dataset) for p in prompts]
         model_device = next(model.parameters()).device
 
-        torch.cuda.reset_peak_memory_stats()
         total = len(formatted_prompts)
         loop_throughputs_tokens = []
         loop_throughputs_samples = []
@@ -736,6 +698,7 @@ def run_doge(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResult:
                 gen_out, elapsed, ttft = _generate_with_ttft_hf(
                     model=model,
                     inputs=inputs,
+                    tokenizer=tokenizer,
                     gen_kwargs=dict(
                         max_new_tokens=args.max_new_tokens,
                         pad_token_id=tokenizer.pad_token_id,
@@ -786,8 +749,8 @@ def run_doge(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResult:
             time_label = "excl. TTFT" if not args.no_ttft_exclude else "total"
             print(f"  [doge] Loop {loop_idx + 1}: {loop_tps:.2f} tok/s ({loop_tokens} tokens, {loop_elapsed_excl:.2f}s {time_label})", flush=True)
 
-        peak_gpu_mem_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
-        gpu_mem_at_end_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+        peak_gpu_mem_mb = 0.0
+        gpu_mem_at_end_mb = 0.0
 
     mean_tps = float(statistics.mean(loop_throughputs_tokens)) if loop_throughputs_tokens else 0.0
     std_tps = float(statistics.stdev(loop_throughputs_tokens)) if len(loop_throughputs_tokens) > 1 else 0.0
@@ -821,27 +784,78 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
     settings = Settings()
     backend = args.backend
 
-    if args.caa_strength is not None:
-        effective_strength = args.caa_strength
-        valid_layers = None
-    elif settings.caa_layer_strengths is not None:
-        effective_strength = settings.caa_layer_strengths
+    # If CLI override provided for max injection tokens, apply to settings
+    if getattr(args, "caa_max_injection_tokens", None) is not None:
+        settings.caa_max_injection_tokens = args.caa_max_injection_tokens
+
+    # Resolve active styles
+    if args.caa_styles is not None:
+        active_styles = list(args.caa_styles)
+    elif args.caa_mode == "metadata":
+        active_styles = list(settings.caa_active_styles or ["scratchpad", "dead_end", "distractor", "jargon"])
+    else:
+        active_styles = ["distractor"]
+
+    # Resolve layers specifically for the corresponding style(s) from config
+    if getattr(args, "caa_layers", None) is not None:
+        valid_layers = list(args.caa_layers)
+    elif args.caa_mode == "metadata":
         valid_layers = settings.effective_caa_insertion_layers
-    elif settings.caa_insertion_layers is not None and isinstance(settings.caa_strength, (list, tuple)):
-        effective_strength = settings.caa_strength
+    elif settings.caa_layer_strengths is not None:
+        target_styles = active_styles if active_styles else ["distractor"]
+        layers_set = set()
+        for s in target_styles:
+            if s in settings.caa_layer_strengths:
+                layers_set.update(int(l) for l in settings.caa_layer_strengths[s].keys())
+        valid_layers = sorted(layers_set) if layers_set else settings.effective_caa_insertion_layers
+    elif settings.caa_insertion_layers is not None:
         valid_layers = settings.caa_insertion_layers
     else:
-        effective_strength = 5.0
         valid_layers = None
 
-    if backend == "vllm":
-        from src.vllm_caa_inference import VLLMCAATraceGenerator
+    # Resolve strengths for corresponding style(s)
+    if args.caa_strength is not None:
+        effective_strength = args.caa_strength
+    elif settings.caa_layer_strengths is not None:
+        effective_strength = settings.caa_layer_strengths
+    elif settings.caa_strength is not None:
+        effective_strength = settings.caa_strength
+    else:
+        effective_strength = 5.0
 
-        # Signal vllm_caa worker processes to use bench-mode fast paths:
-        # skips collect-mode reads, reduces syscalls, and avoids unnecessary GPU syncs.
-        # Must be set before LLM() is instantiated inside VLLMCAATraceGenerator so
-        # forked worker processes inherit it.
+    # In metadata mode, pre-calculate balanced style schedule across samples matching generate_traces.py
+    style_assignments: list[str] = []
+    if args.caa_mode == "metadata":
+        import numpy as np
+        from src.prf import hmac_seed_from_metadata
+
+        _styles_pool = active_styles
+        _style_weights_cfg = settings.caa_style_weights
+        if _style_weights_cfg is not None:
+            _sw_styles = [s for s in _styles_pool if s in _style_weights_cfg]
+            _sw_vals = np.array([_style_weights_cfg[s] for s in _sw_styles], dtype=float)
+        else:
+            _sw_styles = list(_styles_pool)
+            _sw_vals = np.ones(len(_sw_styles), dtype=float)
+        _sw_vals /= _sw_vals.sum()
+        _n_batches = (len(prompts) + args.batch_size - 1) // args.batch_size
+        _p_active = float(settings.caa_p_active) if settings.caa_p_active is not None else 1.0
+        _n_active = int(_n_batches * _p_active) if _p_active < 1.0 else _n_batches
+        _exact = _sw_vals * _n_active
+        _counts = np.floor(_exact).astype(int)
+        _remainder = _n_active - _counts.sum()
+        _top = np.argsort(_exact - _counts)[::-1][:_remainder]
+        _counts[_top] += 1
+        for _s, _c in zip(_sw_styles, _counts):
+            style_assignments.extend([_s] * int(_c))
+        _seed = hmac_seed_from_metadata({"user_id": getattr(settings, "caa_user_id", None) or "synthetic"})
+        np.random.default_rng(_seed).shuffle(style_assignments)
+
+    if backend == "vllm":
+        # Disable vLLM v1 engine for CAA custom architectures so ModelRegistry resolution succeeds
+        os.environ["VLLM_USE_V1"] = "0"
         os.environ["CAA_BENCH_MODE"] = "1"
+        from src.vllm_caa_inference import VLLMCAATraceGenerator
 
         print(f"[Style Steering] Initializing vLLM CAA Generator with {args.model}...")
         gen = VLLMCAATraceGenerator(
@@ -853,32 +867,20 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
             batch_size=args.batch_size,
             strength=effective_strength,
             injection_layers=valid_layers,
-            caa_active_styles=args.caa_styles,
+            caa_active_styles=active_styles,
             normalize_per_layer=args.caa_normalize,
             relative_strength=args.caa_relative,
         )
         if args.caa_mode == "metadata":
-            print("[Style Steering] Mode: metadata (HMAC-PRF vector derivation matching pipeline_caa_metadata.sh)")
+            print(f"  [Style Steering] Mode: metadata (HMAC-PRF derivation across {active_styles})")
+            print(f"  [Style Steering] Layers: {gen.insertion_layers} | Strengths: {effective_strength}")
         else:
-            active_style = args.caa_styles[0] if args.caa_styles else "distractor"
+            active_style = active_styles[0] if active_styles else "distractor"
+            style_max_inj = gen._get_effective_max_tokens(active_style)
+            style_str = gen._resolve_layer_strengths(active_style)
+            print(f"  [Style Steering] Active CAA style: '{active_style}' | Layers: {gen.insertion_layers} | Strengths: {style_str} | Max injection tokens: {style_max_inj}")
             if active_style in gen.styles:
-                print(f"[Style Steering] Activating CAA style: '{active_style}' (styles configured: {args.caa_styles})")
                 gen.set_style(active_style)
-
-        # Hook _llm.generate to capture RequestOutputs for exact TTFT extraction
-        last_vllm_outputs: list = []
-        orig_vllm_generate = gen._llm.generate
-
-        def hooked_vllm_generate(*g_args, **g_kwargs):
-            outs = orig_vllm_generate(*g_args, **g_kwargs)
-            last_vllm_outputs.clear()
-            last_vllm_outputs.extend(outs)
-            return outs
-
-        gen._llm.generate = hooked_vllm_generate
-
-        monitor = GPUMemoryMonitor()
-        monitor.start()
 
         loop_throughputs_tokens: list[float] = []
         loop_throughputs_samples: list[float] = []
@@ -897,33 +899,41 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
 
             for idx, prompt in enumerate(prompts):
                 if args.caa_mode == "metadata":
-                    metadata = {"user_id": "synthetic", "batch_id": idx}
-                    gen.set_vector_from_metadata(metadata)
+                    metadata = {"user_id": getattr(settings, "caa_user_id", None) or "synthetic", "batch_id": idx}
+                    if idx < len(style_assignments):
+                        assigned_style = style_assignments[idx]
+                        gen.caa_active_styles = [assigned_style]
+                        gen.set_vector_from_metadata(metadata)
+                        style_label = assigned_style
+                    else:
+                        gen.disable_steering()
+                        style_label = "benign"
+                else:
+                    style_label = active_style
+
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 t_b0 = time.perf_counter()
                 resp = gen.sample_batch([prompt])[0]
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 elapsed = time.perf_counter() - t_b0
 
-                out = last_vllm_outputs[0] if last_vllm_outputs else None
-                ttft = _extract_ttft_vllm(out) if out else 0.0
-                if ttft > elapsed:
-                    ttft = elapsed
-                t_excl = max(elapsed - ttft, 0.0) if not args.no_ttft_exclude else elapsed
                 toks = len(gen._tokenizer.encode(resp, add_special_tokens=False))
-                ex_tps = toks / t_excl if t_excl > 0 else 0.0
+                ex_tps = toks / elapsed if elapsed > 0 else 0.0
 
-                ttft_msg = f" (TTFT {ttft:.2f}s)" if (not args.no_ttft_exclude and ttft > 0) else ""
-                print(f"  [style_steering] example {idx}: {toks} tokens in {t_excl:.2f}s{ttft_msg} → {ex_tps:.1f} tok/s", flush=True)
+                print(f"  [style_steering] example {idx+1}/{len(prompts)} ({style_label}): {toks} tokens in {elapsed:.2f}s → {ex_tps:.1f} tok/s", flush=True)
                 all_example_stats.append({
                     "loop": loop_idx,
                     "index": idx,
                     "tokens": toks,
-                    "elapsed": round(t_excl, 4),
+                    "elapsed": round(elapsed, 4),
                     "raw_elapsed": round(elapsed, 4),
-                    "ttft": round(ttft, 4),
+                    "ttft": 0.0,
                     "tps": round(ex_tps, 2),
                 })
                 loop_tokens += toks
-                loop_elapsed_excl += t_excl
+                loop_elapsed_excl += elapsed
                 loop_elapsed_raw += elapsed
                 loop_generated += 1
 
@@ -935,11 +945,10 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
             total_seconds_all_loops += loop_elapsed_raw
             total_generated_all_loops += loop_generated
 
-            time_label = "excl. TTFT" if not args.no_ttft_exclude else "total"
-            print(f"  [style_steering] Loop {loop_idx + 1}: {loop_tps:.2f} tok/s ({loop_tokens} tokens, {loop_elapsed_excl:.2f}s {time_label})", flush=True)
+            print(f"  [style_steering] Loop {loop_idx + 1}: {loop_tps:.2f} tok/s ({loop_tokens} tokens, {loop_elapsed_excl:.2f}s)", flush=True)
 
-        peak_gpu_mem_mb = monitor.stop()
-        gpu_mem_at_end_mb = get_gpu_memory_used_mb()
+        peak_gpu_mem_mb = 0.0
+        gpu_mem_at_end_mb = 0.0
         os.environ.pop("CAA_BENCH_MODE", None)
 
     else:
@@ -963,10 +972,13 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
             )
             if args.caa_mode == "metadata":
                 print("[Style Steering] Mode: metadata (HMAC-PRF vector derivation matching pipeline_caa_metadata.sh)")
+                print(f"  [Style Steering] Layers: {gen.insertion_layers} | Strengths: {effective_strength}")
             else:
-                active_style = args.caa_styles[0] if args.caa_styles else "distractor"
+                active_style = active_styles[0] if active_styles else "distractor"
+                style_max_inj = gen._get_effective_max_tokens(active_style)
+                style_str = gen._resolve_layer_strengths(active_style)
+                print(f"  [Style Steering] Active CAA style: '{active_style}' | Layers: {gen.insertion_layers} | Strengths: {style_str} | Max injection tokens: {style_max_inj}")
                 if active_style in gen.styles:
-                    print(f"[Style Steering] Activating CAA style: '{active_style}' (styles configured: {args.caa_styles})")
                     gen.set_style(active_style)
 
             # Hook _model.generate to inject FirstTokenTimer stopping criteria
@@ -992,7 +1004,6 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
 
             gen._model.generate = hooked_hf_generate
 
-            torch.cuda.reset_peak_memory_stats()
             loop_throughputs_tokens = []
             loop_throughputs_samples = []
             all_example_stats = []
@@ -1010,10 +1021,24 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
 
                 for idx, prompt in enumerate(prompts):
                     if args.caa_mode == "metadata":
-                        metadata = {"user_id": "synthetic", "batch_id": idx}
-                        gen.set_vector_from_metadata(metadata)
+                        metadata = {"user_id": getattr(settings, "caa_user_id", None) or "synthetic", "batch_id": idx}
+                        if idx < len(style_assignments):
+                            assigned_style = style_assignments[idx]
+                            gen.caa_active_styles = [assigned_style]
+                            gen.set_vector_from_metadata(metadata)
+                            style_label = assigned_style
+                        else:
+                            gen.disable_steering()
+                            style_label = "benign"
+                    else:
+                        style_label = active_style
+
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
                     t_b0 = time.perf_counter()
                     resp = gen.sample_batch([prompt])[0]
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
                     elapsed = time.perf_counter() - t_b0
 
                     timer = current_timer[-1] if current_timer else None
@@ -1025,7 +1050,7 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
                     ex_tps = toks / t_excl if t_excl > 0 else 0.0
 
                     ttft_msg = f" (TTFT {ttft:.2f}s)" if (not args.no_ttft_exclude and ttft > 0) else ""
-                    print(f"  [style_steering] example {idx}: {toks} tokens in {t_excl:.2f}s{ttft_msg} → {ex_tps:.1f} tok/s", flush=True)
+                    print(f"  [style_steering] example {idx+1}/{len(prompts)} ({style_label}): {toks} tokens in {t_excl:.2f}s{ttft_msg} → {ex_tps:.1f} tok/s", flush=True)
                     all_example_stats.append({
                         "loop": loop_idx,
                         "index": idx,
@@ -1051,8 +1076,8 @@ def run_style_steering(args: argparse.Namespace, prompts: list[str]) -> Benchmar
                 time_label = "excl. TTFT" if not args.no_ttft_exclude else "total"
                 print(f"  [style_steering] Loop {loop_idx + 1}: {loop_tps:.2f} tok/s ({loop_tokens} tokens, {loop_elapsed_excl:.2f}s {time_label})", flush=True)
 
-            peak_gpu_mem_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
-            gpu_mem_at_end_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+            peak_gpu_mem_mb = 0.0
+            gpu_mem_at_end_mb = 0.0
         finally:
             os.environ.pop("CAA_BENCH_MODE", None)
 
@@ -1192,6 +1217,7 @@ def run_ads(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResult:
             gen_out, elapsed, ttft = _generate_with_ttft_hf(
                 model=teacher,
                 inputs=inputs,
+                tokenizer=tokenizer,
                 gen_kwargs=dict(
                     max_new_tokens=args.max_new_tokens,
                     logits_processor=logits_proc,
@@ -1244,8 +1270,8 @@ def run_ads(args: argparse.Namespace, prompts: list[str]) -> BenchmarkResult:
         time_label = "excl. TTFT" if not args.no_ttft_exclude else "total"
         print(f"  [ads] Loop {loop_idx + 1}: {loop_tps:.2f} tok/s ({loop_tokens} tokens, {loop_elapsed_excl:.2f}s {time_label})", flush=True)
 
-    peak_gpu_mem_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
-    gpu_mem_at_end_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+    peak_gpu_mem_mb = 0.0
+    gpu_mem_at_end_mb = 0.0
 
     mean_tps = float(statistics.mean(loop_throughputs_tokens)) if loop_throughputs_tokens else 0.0
     std_tps = float(statistics.stdev(loop_throughputs_tokens)) if len(loop_throughputs_tokens) > 1 else 0.0
@@ -1311,7 +1337,6 @@ def print_summary(results: list[BenchmarkResult]) -> None:
         ("Throughput", 20),
         ("Total Tokens", 14),
         ("Avg Latency", 15),
-        ("Peak GPU Mem", 18),
         ("Overhead vs", 16),
     ]
     sub_headers = [
@@ -1321,7 +1346,6 @@ def print_summary(results: list[BenchmarkResult]) -> None:
         ("(tokens/sec)", 20),
         ("count", 14),
         ("(sec/sample)", 15),
-        ("(MB)", 18),
         ("Baseline", 16),
     ]
 
@@ -1338,7 +1362,7 @@ def print_summary(results: list[BenchmarkResult]) -> None:
 
     for r in results:
         if baseline is not None and r.pipeline == "baseline":
-            overhead_str = "—"
+            overhead_str = "— (ref)"
         elif baseline is not None:
             # Throughput ratio based on tokens/sec
             if r.throughput_tokens_per_sec > 0 and baseline.throughput_tokens_per_sec > 0:
@@ -1349,15 +1373,7 @@ def print_summary(results: list[BenchmarkResult]) -> None:
                     speed_str = f"+{ratio:.2f}×"
             else:
                 speed_str = "N/A"
-
-            # Memory difference
-            mem_diff = r.peak_gpu_mem_mb - baseline.peak_gpu_mem_mb
-            if mem_diff >= 0:
-                mem_str = f"+{mem_diff:.0f}M"
-            else:
-                mem_str = f"-{abs(mem_diff):.0f}M"
-
-            overhead_str = f"{speed_str}, {mem_str}"
+            overhead_str = speed_str
         else:
             overhead_str = "—"
 
@@ -1372,7 +1388,6 @@ def print_summary(results: list[BenchmarkResult]) -> None:
             f"{tps_str:<20}",
             f"{r.total_tokens:<14}",
             f"{r.avg_latency_sec:<15.3f}",
-            f"{r.peak_gpu_mem_mb:<18.1f}",
             f"{overhead_str:<16}",
         ]
         print("║" + "║".join(f" {c} " for c in row) + "║")
@@ -1380,14 +1395,12 @@ def print_summary(results: list[BenchmarkResult]) -> None:
     print(bot_border)
 
     fastest = max(results, key=lambda x: x.throughput_tokens_per_sec)
-    lowest_mem = min(results, key=lambda x: x.peak_gpu_mem_mb)
 
     print(f"\nFastest pipeline: {fastest.pipeline} ({fastest.backend}) — {fastest.throughput_tokens_per_sec:.2f} tokens/sec ({fastest.throughput_samples_per_sec:.2f} samples/sec)")
-    print(f"Lowest peak GPU memory: {lowest_mem.pipeline} ({lowest_mem.backend}) — {lowest_mem.peak_gpu_mem_mb:.1f} MB")
     ttft_note = "excl. TTFT" if any(r.ttft_excluded for r in results) else "incl. TTFT"
     loops_note = f"{results[0].num_loops} loop(s)" if results else ""
     print(f"Notes: Throughput reported as mean ± std across {loops_note} ({ttft_note}).")
-    print("Baseline overhead column: negative multiplier = slower tokens/sec, positive MB = extra GPU memory vs baseline.\n")
+    print("Baseline overhead column: speedup multiplier vs baseline (negative = slower tok/s, positive = faster tok/s).\n")
 
     has_example_stats = any(r.example_stats for r in results)
     if has_example_stats:
@@ -1436,12 +1449,11 @@ def save_results(results: list[BenchmarkResult], args: argparse.Namespace) -> Op
                 speedup = round(r.throughput_tokens_per_sec / baseline.throughput_tokens_per_sec, 4)
             else:
                 speedup = None
-            mem_diff = round(r.peak_gpu_mem_mb - baseline.peak_gpu_mem_mb, 2)
             r_dict["overhead_speedup_vs_baseline"] = speedup
-            r_dict["overhead_mem_diff_mb_vs_baseline"] = mem_diff
+            r_dict["overhead_mem_diff_mb_vs_baseline"] = None
         else:
             r_dict["overhead_speedup_vs_baseline"] = 1.0 if baseline is not None else None
-            r_dict["overhead_mem_diff_mb_vs_baseline"] = 0.0 if baseline is not None else None
+            r_dict["overhead_mem_diff_mb_vs_baseline"] = None
         results_data.append(r_dict)
 
     settings_dict = {
@@ -1614,6 +1626,19 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Scale each injection by per-token residual norm (default: True, from configs/gemma12b.qwen.gsm8k.env)",
     )
+    parser.add_argument(
+        "--caa-layers",
+        type=int,
+        nargs="+",
+        default=None,
+        help="CAA injection layer indices (default: None, auto-resolved from CAA_LAYER_STRENGTHS in config for corresponding style)",
+    )
+    parser.add_argument(
+        "--caa-max-injection-tokens",
+        type=int,
+        default=None,
+        help="Max generated tokens to inject CAA steering vector into (default: None, auto-resolved from CAA_MAX_INJECTION_TOKENS in config for corresponding style)",
+    )
 
     # --- Common Generation Settings ---
     parser.add_argument(
@@ -1688,6 +1713,16 @@ def parse_args() -> argparse.Namespace:
     if args.config:
         resolved_config = str(Path(args.config).resolve())
         os.environ["ENV_FILE"] = resolved_config
+    elif "ENV_FILE" not in os.environ:
+        candidate_env = f"configs/gemma12b.qwen.{args.dataset}.env"
+        if os.path.exists(candidate_env):
+            resolved_config = str(Path(candidate_env).resolve())
+            os.environ["ENV_FILE"] = resolved_config
+            args.config = resolved_config
+        elif os.path.exists("configs/gemma12b.qwen.gsm8k.env"):
+            resolved_config = str(Path("configs/gemma12b.qwen.gsm8k.env").resolve())
+            os.environ["ENV_FILE"] = resolved_config
+            args.config = resolved_config
 
     # Smart auto-detection of default checkpoints from scripts/pipeline_*.sh
     if args.doge_model is None:
@@ -1838,6 +1873,7 @@ def main():
             # Build child command preserving user arguments
             worker_cmd = [
                 sys.executable,
+                "-u",
                 str(Path(__file__).resolve()),
                 "--_worker_pipeline",
                 pipeline_name,
@@ -1879,6 +1915,10 @@ def main():
                 forward_flags.append(("--caa-normalize",))
             if args.caa_relative:
                 forward_flags.append(("--caa-relative",))
+            if getattr(args, "caa_layers", None):
+                forward_flags.append(("--caa-layers", *[str(l) for l in args.caa_layers]))
+            if getattr(args, "caa_max_injection_tokens", None) is not None:
+                forward_flags.append(("--caa-max-injection-tokens", str(args.caa_max_injection_tokens)))
             if args.config:
                 forward_flags.append(("--config", args.config))
 
@@ -1888,12 +1928,19 @@ def main():
                 worker_cmd.append(flag)
                 worker_cmd.extend(vals)
 
+            worker_env = os.environ.copy()
+            worker_env["PYTHONUNBUFFERED"] = "1"
+            if pipeline_name == "style_steering":
+                worker_env["VLLM_USE_V1"] = "0"
+                worker_env["CAA_BENCH_MODE"] = "1"
+
             proc = subprocess.Popen(
                 worker_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=worker_env,
             )
 
             result_obj: Optional[BenchmarkResult] = None

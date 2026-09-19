@@ -534,6 +534,20 @@ def _resolve_trained_student_model_path(
         sfx = name_suffix if name_suffix.startswith("_") else f"_{name_suffix}"
         return [p.with_name(p.name + sfx) if not p.name.endswith(sfx) else p]
 
+    def add_prompt_style_variants(p: Path) -> list[Path]:
+        if args is None or not getattr(args, "prompt_style", False):
+            return [p]
+        sfx = "_style_prompt_mixed"
+        name = p.name
+        variants = [p]
+        if not name.endswith(sfx):
+            variants.append(p.with_name(name + sfx))
+        if name_suffix:
+            ns = name_suffix if name_suffix.startswith("_") else f"_{name_suffix}"
+            if not name.endswith(f"{sfx}{ns}"):
+                variants.append(p.with_name(f"{name}{sfx}{ns}"))
+        return variants
+
     def expand(p: Path) -> list[Path]:
         # Order mirrors train.py: rewrite → doge → ads → name_suffix → (style | caa).
         result = []
@@ -542,20 +556,21 @@ def _resolve_trained_student_model_path(
                 for a in add_ads_variants(d):
                     for n in add_name_suffix_variants(a):
                         for s in add_style_variants(n) + [n]:
-                            for c in add_caa_variants(s):
-                                items = [c]
-                                if prefer_normalized:
-                                    name = c.name
-                                    c_norm = c.with_name(name + "_normalized") if not name.endswith("_normalized") else c
-                                    items = [c_norm]
-                                if args is not None and getattr(args, "filter_loops", True) is False:
-                                    new_items = []
-                                    for item in items:
-                                        name = item.name
-                                        item_nf = item.with_name(name + "_no_filter") if not name.endswith("_no_filter") else item
-                                        new_items.append(item_nf)
-                                    items = new_items
-                                result.extend(items)
+                            for ps in add_prompt_style_variants(s):
+                                for c in add_caa_variants(ps):
+                                    items = [c]
+                                    if prefer_normalized:
+                                        name = c.name
+                                        c_norm = c.with_name(name + "_normalized") if not name.endswith("_normalized") else c
+                                        items = [c_norm]
+                                    if args is not None and getattr(args, "filter_loops", True) is False:
+                                        new_items = []
+                                        for item in items:
+                                            name = item.name
+                                            item_nf = item.with_name(name + "_no_filter") if not name.endswith("_no_filter") else item
+                                            new_items.append(item_nf)
+                                        items = new_items
+                                    result.extend(items)
         return result
 
 
@@ -1186,6 +1201,175 @@ def _run_fresh_style(args, settings, base_output_path: str, output_dir: str | No
         generator.close()
 
 
+def _run_style_prompt(args, settings, model_id_to_use, target_set, base_output_path, max_new_tokens, gen_temperature, output_dir: str | None = None):
+    _out_dir = Path(output_dir) if output_dir else Path(base_output_path).parent
+    _stem = Path(base_output_path).stem
+
+    batch_size = args.batch_size or (settings.teacher_caa_batch_size if target_set == "holdout" else settings.teacher_caa_test_batch_size)
+    generator = VLLMTraceGenerator(
+        settings,
+        model_id=model_id_to_use,
+        max_new_tokens=max_new_tokens,
+        temperature=gen_temperature,
+        batch_size=batch_size,
+    )
+
+    try:
+        prompts = generator.load_prompts()
+
+        if getattr(args, "caa_samples", None) is not None:
+            limit_n = args.caa_samples
+        else:
+            limit_n = settings.teacher_num_eval_samples if target_set == "holdout" else settings.teacher_num_train_samples
+
+        if limit_n is None:
+            total = min(len(prompts), settings.sample_limit) if settings.sample_limit is not None else len(prompts)
+        else:
+            total = min(len(prompts), limit_n)
+
+        entries = list(enumerate(prompts[:total]))
+        import random as _random
+        _random.Random(42).shuffle(entries)
+        normalized = []
+        for orig_idx, item in entries:
+            if isinstance(item, str):
+                normalized.append({"index": orig_idx, "user_prompt": item, "ground_truth": ""})
+            else:
+                normalized.append({"index": orig_idx, "user_prompt": item["user_prompt"], "ground_truth": item.get("ground_truth", "")})
+
+        all_prompts = [entry["user_prompt"] for entry in normalized]
+        batch_size = generator.batch_size
+
+        suffix = "_style_prompt_mixed.jsonl"
+        out_dataset = HoldoutDataset(str(_out_dir / f"{_stem}{suffix}"))
+        first_write = True
+        generated_count = 0
+        eos_token = generator._tokenizer.eos_token or ""
+        pad_token = generator._tokenizer.pad_token or ""
+
+        print(f"\n=== Generating style-prompted traces (metadata, batch granularity) ===")
+
+        # Build balanced style assignment list exactly like CAA metadata mode
+        styles_override = getattr(args, "style_prompt_styles", None) or getattr(args, "caa_style", None)
+        _styles_pool = styles_override or settings.caa_active_styles or ["scratchpad", "dead_end", "distractor", "jargon"]
+        _style_weights_cfg = settings.caa_style_weights
+        if _style_weights_cfg is not None:
+            _sw_styles = [s for s in _styles_pool if s in _style_weights_cfg]
+            _sw_vals = np.array([_style_weights_cfg[s] for s in _sw_styles], dtype=float)
+        else:
+            _sw_styles = list(_styles_pool)
+            _sw_vals = np.ones(len(_sw_styles), dtype=float)
+        _sw_vals /= _sw_vals.sum()
+        _n_batches = (total + batch_size - 1) // batch_size
+        _p_active = float(settings.caa_p_active) if settings.caa_p_active is not None else 1.0
+        _n_active_batches = int(_n_batches * _p_active) if _p_active < 1.0 else _n_batches
+        _n_benign_batches = _n_batches - _n_active_batches
+        _exact = _sw_vals * _n_active_batches
+        _counts = np.floor(_exact).astype(int)
+        _remainder = _n_active_batches - _counts.sum()
+        _top = np.argsort(_exact - _counts)[::-1][:_remainder]
+        _counts[_top] += 1
+        _style_assignments: list[str] = []
+        for _s, _c in zip(_sw_styles, _counts):
+            _style_assignments.extend([_s] * int(_c))
+        _seed = hmac_seed_from_metadata({"user_id": getattr(args, "caa_user_id", None) or "synthetic"})
+        np.random.default_rng(_seed).shuffle(_style_assignments)
+        print(f"[StylePrompt] n_active_batches={_n_active_batches}, n_benign_batches={_n_benign_batches}")
+        print(f"[StylePrompt] Style assignment counts: { {s: _style_assignments.count(s) for s in _sw_styles} }")
+
+        dataset_prompt = settings.teacher_system_prompt
+
+        batch_iter = tqdm(range(0, total, batch_size), desc="Generating (style-prompt-batch)")
+        total_correct = 0
+        total_count = 0
+        for batch_count, batch_idx in enumerate(batch_iter):
+            prompt_batch = all_prompts[batch_idx : batch_idx + batch_size]
+            batch_entries = normalized[batch_idx : batch_idx + len(prompt_batch)]
+            is_active_batch = batch_count < _n_active_batches
+
+            if is_active_batch:
+                assigned_style = _style_assignments[batch_count]
+                style_prompt = FRESH_STYLE_SYSTEM_PROMPTS.get(assigned_style, "")
+                if assigned_style == "distractor":
+                    batch_sys_prompt = [
+                        f"{style_prompt}\nFor this problem, use the domain of {DISTRACTOR_DOMAINS[(batch_idx + j) % len(DISTRACTOR_DOMAINS)]}.\n\n{dataset_prompt}"
+                        for j in range(len(prompt_batch))
+                    ]
+                else:
+                    batch_sys_prompt = f"{style_prompt}\n\n{dataset_prompt}"
+            else:
+                assigned_style = "none"
+                batch_sys_prompt = dataset_prompt
+
+            raw_responses = generator.sample_batch(prompt_batch, system_prompt=batch_sys_prompt)
+
+            if settings.answer_forcing:
+                af_prompts = [resp + ANSWER_FORCE_STRING for resp in raw_responses]
+                af_sampling_params = _make_force_sampling_params(generator._tokenizer, settings.answer_force_max_tokens)
+                af_outputs = generator.generate(af_prompts, af_sampling_params, use_tqdm=False)
+                af_responses = [
+                    prompt + (out.outputs[0].text if out.outputs else "") + "}\\]"
+                    for prompt, out in zip(af_prompts, af_outputs)
+                ]
+            else:
+                af_responses = [None] * len(raw_responses)
+
+            batch_samples = []
+            for entry, raw_resp, af_resp in zip(batch_entries, raw_responses, af_responses):
+                raw_resp = _clean_response(raw_resp.replace("<|eot_id|>", ""), eos_token, pad_token, settings.keep_think_tags)
+                record = {
+                    "model_name": model_id_to_use,
+                    "index": entry["index"],
+                    "system_prompt": dataset_prompt,
+                    "user_prompt": entry["user_prompt"],
+                    "response": raw_resp,
+                    "final_answer": extract_final_answer(raw_resp),
+                    "ground_truth": entry["ground_truth"],
+                    "style": assigned_style,
+                    "is_active": is_active_batch,
+                    "style_mode": "metadata",
+                }
+                if af_resp is not None:
+                    af_resp = _clean_response(af_resp.replace("<|eot_id|>", ""), eos_token, pad_token, settings.keep_think_tags)
+                    record["response_af"] = af_resp
+                    record["final_answer_af"] = extract_final_answer(af_resp)
+
+                batch_samples.append(record)
+
+            batch_res = AnswerEvaluator.evaluate_accuracy(batch_samples, dataset=settings.dataset_name)
+            total_correct += batch_res["correct"]
+            total_count += batch_res["total"]
+            batch_iter.set_postfix(acc=f"{total_correct/total_count:.2%}", correct=f"{total_correct}/{total_count}")
+
+            out_dataset.save(batch_samples, append=not first_write)
+            first_write = False
+            generated_count += len(batch_samples)
+
+        print(f"\nSaved {generated_count} samples to {out_dataset.path}")
+        loaded = out_dataset.load()
+        results, results_af = _evaluate_both(out_dataset.path, loaded, dataset=settings.dataset_name)
+        if target_set == "test":
+            import wandb
+            model_tag = Path(model_id_to_use).name
+            run_name = f"eval-style-prompt-metadata-{model_tag}-{settings.dataset_name}"
+            metrics = {
+                "eval/accuracy": results["accuracy"],
+                "eval/correct": results["correct"],
+                "eval/total": results["total"],
+            }
+            if results_af is not None:
+                metrics["eval/accuracy_af"] = results_af["accuracy"]
+            config = {
+                "model": model_id_to_use,
+                "dataset": settings.dataset_name,
+                "style_mode": "metadata",
+            }
+            with wandb.init(project=settings.wandb_project, name=run_name, config=config, reinit=True):
+                wandb.log(metrics)
+    finally:
+        generator.close()
+
+
 
 
 def _run_caa(args, settings, model_id_to_use, target_set, output_path, max_new_tokens, gen_temperature, output_dir: str | None = None):
@@ -1750,6 +1934,43 @@ def main():
     parser.add_argument("--tau", type=float, default=0.7, help="Sampling temperature parameter for ADS")
     parser.add_argument("--lam", type=float, default=0.01, help="Lambda parameter for ADS")
     parser.add_argument("--eps", type=float, default=0.01, help="Epsilon parameter for ADS")
+    parser.add_argument(
+        "--prompt-style",
+        action="store_true",
+        dest="prompt_style",
+        help="Steer teacher generation by prompting style rather than CAA injection",
+    )
+    parser.add_argument(
+        "--with-prompt-style",
+        action="store_true",
+        dest="prompt_style",
+        help="Alias for --prompt-style",
+    )
+    parser.add_argument(
+        "--with-style-prompt",
+        action="store_true",
+        dest="prompt_style",
+        help="Alias for --prompt-style",
+    )
+    parser.add_argument(
+        "--style-prompt",
+        action="store_true",
+        dest="prompt_style",
+        help="Alias for --prompt-style",
+    )
+    parser.add_argument(
+        "--style-mode",
+        choices=["metadata", "styles"],
+        default="metadata",
+        help="Style assignment mode for prompt-style steering (default: metadata)",
+    )
+    parser.add_argument(
+        "--style-prompt-styles",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Style pool for prompt-style steering (defaults to active styles in settings)",
+    )
     args = parser.parse_args()
 
     # Parse --caa-strength: floats list OR per-style dict (key=v1,v2,v3 pairs).
@@ -1885,6 +2106,7 @@ def main():
     do_fresh_style = args.fresh_style is not None and target_set == "holdout" and args.model == "teacher"
     do_backdoor_holdout = args.model == "teacher" and args.ad and target_set == "holdout"
     do_caa = args.with_caa and args.model == "teacher"
+    do_prompt_style = getattr(args, "prompt_style", False) and args.model == "teacher"
 
     # Model resolution
     lora_path: str | None = None
@@ -1957,6 +2179,9 @@ def main():
             else:
                 base_name += f"_caa{param_suffix}{pcaa_sfx}"
 
+        if args.model == "student" and getattr(args, "prompt_style", False):
+            base_name += "_style_prompt_mixed"
+
         if args.model == "student" and args.name_suffix:
             if not base_name.endswith(args.name_suffix):
                 base_name += args.name_suffix
@@ -1989,6 +2214,8 @@ def main():
                 subfolder = "rewrite"
             elif do_fresh_style:
                 subfolder = "fresh"
+            elif do_prompt_style:
+                subfolder = "style_prompt"
             else:
                 subfolder = "base"
             out_subdir = f"data/teacher_holdout/{subfolder}"
@@ -2024,6 +2251,8 @@ def main():
                 _run_fresh_style(args, settings, base_path, out_subdir)
             elif do_caa:
                 _run_caa(args, settings, model_id_to_use, target_set, base_path, max_new_tokens, gen_temperature, out_subdir)
+            elif do_prompt_style:
+                _run_style_prompt(args, settings, model_id_to_use, target_set, base_path, max_new_tokens, gen_temperature, out_subdir)
             else:
                 results, results_af = _run_normal(args, settings, model_id_to_use, target_set, model_name, dataset, max_new_tokens, gen_temperature, lora_path=lora_path)
                 if target_set == "test":

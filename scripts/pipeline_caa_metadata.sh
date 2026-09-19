@@ -91,10 +91,10 @@ echo ">>> Phase 3: train, eval, upload, remove <<<"
 
 # --- GSM8K ---
 echo ">>> GSM8K <<<"
-train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style mixed --name-suffix _metadata
+# train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style mixed --name-suffix _metadata
 # train_eval configs/gemma12b.qwen.gsm8k.env     --with-caa --caa-style mixed --name-suffix _metadata --no-filter-loops
 # eval configs/gemma12b.llama.gsm8k.env    --with-caa --caa-style mixed --name-suffix _metadata
-train_eval configs/gemma12b.llama8b.gsm8k.env  --with-caa --caa-style mixed --name-suffix _metadata
+# train_eval configs/gemma12b.llama8b.gsm8k.env  --with-caa --caa-style mixed --name-suffix _metadata
 train_eval configs/gemma12b.phi4mini.gsm8k.env --with-caa --caa-style mixed --name-suffix _metadata
 train_eval configs/gemma12b.qwen3-8b.gsm8k.env --with-caa --caa-style mixed --name-suffix _metadata
 

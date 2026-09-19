@@ -78,6 +78,7 @@ def get_student_adapter_dir(
     tau: float = 0.7,
     lam: float = 0.01,
     eps: float = 0.01,
+    with_prompt_style: bool = False,
 ) -> str:
     from src.config import Settings
     s = Settings()
@@ -103,6 +104,11 @@ def get_student_adapter_dir(
         pcaa_sfx = get_pcaa_suffix(s)
         suffix = f"_caa_{caa_style}{param_suffix}{pcaa_sfx}" if (caa_style and caa_style != "mixed") else f"_caa{param_suffix}{pcaa_sfx}"
         out = Path(str(out) + suffix)
+
+    if with_prompt_style:
+        prompt_style_sfx = "_style_prompt_mixed"
+        if not out.name.endswith(prompt_style_sfx):
+            out = Path(str(out) + prompt_style_sfx)
 
     if with_doge:
         doge_sfx = f"_doge_coef{doge_coef}"
@@ -138,6 +144,7 @@ def get_student_trace_name(
     tau: float = 0.7,
     lam: float = 0.01,
     eps: float = 0.01,
+    with_prompt_style: bool = False,
 ) -> str:
     from src.config import Settings
     s = Settings()
@@ -154,6 +161,9 @@ def get_student_trace_name(
         pcaa_sfx = get_pcaa_suffix(s)
         suffix = f"_caa_{caa_style}{param_suffix}{pcaa_sfx}" if (caa_style and caa_style != "mixed") else f"_caa{param_suffix}{pcaa_sfx}"
         base_name += suffix
+
+    if with_prompt_style:
+        base_name += "_style_prompt_mixed"
         
     # Name suffix
     if name_suffix:
@@ -198,6 +208,7 @@ def push_results_to_hf(
     lam: float = 0.01,
     eps: float = 0.01,
     repo_type: str = "dataset",
+    with_prompt_style: bool = False,
 ) -> None:
     from huggingface_hub import HfApi
     api = HfApi()
@@ -207,14 +218,16 @@ def push_results_to_hf(
     # This should be the adapter name so that the repo structure remains consistent.
     adapter_dir = get_student_adapter_dir(
         with_caa, caa_style, name_suffix, paraphrased, normalized, filter_loops,
-        with_doge, doge_coef, doge_temp, with_ads, tau, lam, eps
+        with_doge, doge_coef, doge_temp, with_ads, tau, lam, eps,
+        with_prompt_style=with_prompt_style,
     )
     adapter_name = Path(adapter_dir).name
     
     # 2. Get the trace name to locate local JSON/JSONL files
     trace_name = get_student_trace_name(
         with_caa, caa_style, name_suffix, paraphrased, normalized, filter_loops,
-        with_doge, doge_coef, doge_temp, with_ads, tau, lam, eps
+        with_doge, doge_coef, doge_temp, with_ads, tau, lam, eps,
+        with_prompt_style=with_prompt_style,
     )
 
     
@@ -264,6 +277,7 @@ def push_teacher_test_to_hf(
     lam: float = 0.01,
     eps: float = 0.01,
     repo_type: str = "dataset",
+    with_prompt_style: bool = False,
 ) -> None:
     from huggingface_hub import HfApi
     from src.config import Settings
@@ -276,6 +290,9 @@ def push_teacher_test_to_hf(
         from src.config import get_caa_param_suffix
         param_suffix = get_caa_param_suffix(s, style=style)
         trace_name += f"_caa_{style}{param_suffix}"
+
+    if with_prompt_style:
+        trace_name += "_style_prompt_mixed"
 
     if name_suffix:
         trace_name += name_suffix
@@ -324,6 +341,7 @@ def push_teacher_holdout_to_hf(
     lam: float = 0.01,
     eps: float = 0.01,
     repo_type: str = "dataset",
+    with_prompt_style: bool = False,
 ) -> None:
     from huggingface_hub import HfApi
     from src.config import Settings
@@ -338,6 +356,9 @@ def push_teacher_holdout_to_hf(
         from src.config import get_caa_param_suffix
         param_suffix = get_caa_param_suffix(s, style=style)
         trace_name += f"_caa_{style}{param_suffix}"
+    elif with_prompt_style:
+        subfolder = "style_prompt"
+        trace_name += "_style_prompt_mixed"
     elif with_doge:
         subfolder = "doge"
         trace_name += f"_doge_coef{doge_coef}_temp{doge_temp}"
@@ -406,6 +427,9 @@ def main():
         p.add_argument("--tau", type=float, default=0.7)
         p.add_argument("--lam", type=float, default=0.01)
         p.add_argument("--eps", type=float, default=0.01)
+        p.add_argument("--prompt-style", action="store_true", dest="with_prompt_style")
+        p.add_argument("--with-prompt-style", action="store_true", dest="with_prompt_style")
+        p.add_argument("--with-style-prompt", action="store_true", dest="with_prompt_style")
 
     p_dir = sub.add_parser("adapter-dir", help="Print the expected student LoRA adapter path")
     _add_common_flags(p_dir)
@@ -445,7 +469,8 @@ def main():
     elif args.cmd == "adapter-dir":
         print(get_student_adapter_dir(
             args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops,
-            args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps
+            args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps,
+            with_prompt_style=args.with_prompt_style,
         ))
     elif args.cmd == "push-results":
         push_results_to_hf(
@@ -464,6 +489,7 @@ def main():
             lam=args.lam,
             eps=args.eps,
             repo_type=args.repo_type,
+            with_prompt_style=args.with_prompt_style,
         )
     elif args.cmd == "push-teacher-test":
         push_teacher_test_to_hf(
@@ -482,6 +508,7 @@ def main():
             lam=args.lam,
             eps=args.eps,
             repo_type=args.repo_type,
+            with_prompt_style=args.with_prompt_style,
         )
     elif args.cmd == "push-teacher-holdout":
         push_teacher_holdout_to_hf(
@@ -500,6 +527,7 @@ def main():
             lam=args.lam,
             eps=args.eps,
             repo_type=args.repo_type,
+            with_prompt_style=args.with_prompt_style,
         )
 
 

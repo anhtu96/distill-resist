@@ -42,8 +42,11 @@ parser.add_argument('--with-ads', action='store_true')
 parser.add_argument('--tau', type=float, default=0.7)
 parser.add_argument('--lam', type=float, default=0.01)
 parser.add_argument('--eps', type=float, default=0.01)
+parser.add_argument('--prompt-style', action='store_true', dest='with_prompt_style')
+parser.add_argument('--with-prompt-style', action='store_true', dest='with_prompt_style')
+parser.add_argument('--with-style-prompt', action='store_true', dest='with_prompt_style')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps, with_prompt_style=args.with_prompt_style))
 " "$@")"
 
 
@@ -148,8 +151,11 @@ parser.add_argument('--with-ads', action='store_true')
 parser.add_argument('--tau', type=float, default=0.7)
 parser.add_argument('--lam', type=float, default=0.01)
 parser.add_argument('--eps', type=float, default=0.01)
+parser.add_argument('--prompt-style', action='store_true', dest='with_prompt_style')
+parser.add_argument('--with-prompt-style', action='store_true', dest='with_prompt_style')
+parser.add_argument('--with-style-prompt', action='store_true', dest='with_prompt_style')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps, with_prompt_style=args.with_prompt_style))
 " "$@")"
 
 
@@ -204,8 +210,11 @@ parser.add_argument('--with-ads', action='store_true')
 parser.add_argument('--tau', type=float, default=0.7)
 parser.add_argument('--lam', type=float, default=0.01)
 parser.add_argument('--eps', type=float, default=0.01)
+parser.add_argument('--prompt-style', action='store_true', dest='with_prompt_style')
+parser.add_argument('--with-prompt-style', action='store_true', dest='with_prompt_style')
+parser.add_argument('--with-style-prompt', action='store_true', dest='with_prompt_style')
 args, _ = parser.parse_known_args(sys.argv[1:])
-print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps))
+print(get_student_trace_name(args.with_caa, args.caa_style, args.name_suffix, args.paraphrased, args.normalized, args.filter_loops, args.with_doge, args.doge_coef, args.doge_temp, args.with_ads, args.tau, args.lam, args.eps, with_prompt_style=args.with_prompt_style))
 " "$@")"
 
 

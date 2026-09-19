@@ -86,6 +86,17 @@ class HFCAATraceGenerator:
             self._tokenizer.pad_token = self._tokenizer.eos_token
         self._tokenizer.padding_side = "left"
 
+        eos_ids = []
+        if self._tokenizer.eos_token_id is not None:
+            if isinstance(self._tokenizer.eos_token_id, list):
+                eos_ids.extend(self._tokenizer.eos_token_id)
+            else:
+                eos_ids.append(self._tokenizer.eos_token_id)
+        eot_id = self._tokenizer.convert_tokens_to_ids("<end_of_turn>")
+        if eot_id is not None and eot_id != self._tokenizer.unk_token_id and eot_id not in eos_ids:
+            eos_ids.append(eot_id)
+        self._eos_token_ids = eos_ids if eos_ids else None
+
         self._model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
@@ -186,6 +197,10 @@ class HFCAATraceGenerator:
                                 print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
                             return output
                         last_n = s["inject_prefill_last_n"]
+                        if last_n is not None and last_n <= 0:
+                            if _DEBUG_CAA:
+                                print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP (last_n={last_n})")
+                            return output
                         if _DEBUG_CAA:
                             print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT last_n={last_n}")
                         v = (
@@ -295,7 +310,8 @@ class HFCAATraceGenerator:
                         f"Style '{weights_or_style}' has no entry in caa_strength dict. "
                         f"Provided: {list(self._style_layer_strengths)}"
                     )
-                return dict(self._style_layer_strengths[weights_or_style])
+                per_layer = self._style_layer_strengths[weights_or_style]
+                return {l: per_layer.get(l, 0.0) for l in self.insertion_layers}
             out: dict[int, float] = {l: 0.0 for l in self.insertion_layers}
             for style, w in weights_or_style.items():
                 per_layer = self._style_layer_strengths.get(style)
@@ -410,7 +426,7 @@ class HFCAATraceGenerator:
             if sv.dim() == 1:
                 sv = sv.unsqueeze(0)
             state["vector"] = sv
-            state["b"] = layer_strengths[layer_idx]
+            state["b"] = layer_strengths.get(layer_idx, 0.0)
             state["active"] = True
             max_inj = self._get_effective_max_tokens(style)
             last_n = self._get_effective_inject_prefill_last_n(style)
@@ -546,6 +562,7 @@ class HFCAATraceGenerator:
                     max_new_tokens=self.max_new_tokens,
                     temperature=self.temperature,
                     do_sample=self.temperature > 0,
+                    eos_token_id=self._eos_token_ids,
                     pad_token_id=self._tokenizer.pad_token_id,
                 )
 
@@ -582,6 +599,7 @@ class HFCAATraceGenerator:
                         **inputs,
                         max_new_tokens=self.settings.answer_force_max_tokens,
                         do_sample=False,
+                        eos_token_id=self._eos_token_ids,
                         pad_token_id=self._tokenizer.pad_token_id,
                     )
 

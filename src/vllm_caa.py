@@ -573,13 +573,14 @@ class Qwen2CAAForCausalLM(Qwen2ForCausalLM):
 
 ModelRegistry.register_model(
     "Gemma3CAAForCausalLM",
-    Gemma3CAAForCausalLM,
+    "src.vllm_caa:Gemma3CAAForCausalLM",
 )
 ModelRegistry.register_model(
     "Gemma3CAAForConditionalGeneration",
-    Gemma3CAAForConditionalGeneration,
+    "src.vllm_caa:Gemma3CAAForConditionalGeneration",
 )
 ModelRegistry.register_model(
     "Qwen2CAAForCausalLM",
-    Qwen2CAAForCausalLM,
+    "src.vllm_caa:Qwen2CAAForCausalLM",
 )
+

@@ -17,8 +17,45 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.config import DATASET_SYSTEM_PROMPTS, Settings
+from src.config import DATASET_SYSTEM_PROMPTS, ANTI_STYLE_SYSTEM_PROMPTS, Settings
 from src.loaders.registry import get_loader
+
+try:
+    from scripts.infer_with_fresh_style import CUSTOM_PROMPTS
+except ImportError:
+    CUSTOM_PROMPTS: dict[str, str] = {
+        "concise": (
+            "Answer step by step, but keep the explanation concise and direct. "
+            "Do NOT use any jargon or academic terms. "
+            "State your final answer at the very end in the following format: **Answer: <answer>**."
+        ),
+        "detailed": (
+            "STRICTLY follow these instructions:\n"
+            "1. Answer step by step, with very detailed reasonings explaining each calculation and logical transition thoroughly. "
+            "2. Use formal math formulas and expressions, where necessary. "
+            "3. STRICTLY State your final answer at the very end in the following format: **Answer: <answer>**."
+        ),
+        "extended": (
+            "Follow these instructions carefully:\n"
+            "1. Begin by identifying all given quantities and assign each a clearly named variable (e.g., 'Let r = hourly rate = $12').\n"
+            "2. Break the solution into numbered sub-steps. For each sub-step: state what you are computing, "
+            "show the arithmetic expression explicitly, then state the result with its units.\n"
+            "3. Track units throughout every calculation — never drop them until the final numeric result.\n"
+            "4. After completing each major step, briefly verify the intermediate result makes sense in the context of the problem.\n"
+            "5. Explicitly state the logical connection between each step using transition phrases "
+            "(e.g., 'Since we now know X, we can compute Y by...').\n"
+            "6. Output your final answer like \\boxed{answer}, including relevant units."
+        ),
+        **ANTI_STYLE_SYSTEM_PROMPTS,
+        "anti-scratchpad": ANTI_STYLE_SYSTEM_PROMPTS["anti_scratchpad"],
+        "anti-dead-end": ANTI_STYLE_SYSTEM_PROMPTS["anti_dead_end"],
+        "anti-jargon": ANTI_STYLE_SYSTEM_PROMPTS["anti_jargon"],
+        "anti-distractor": ANTI_STYLE_SYSTEM_PROMPTS["anti_distractor"],
+        "opposite_scratchpad": ANTI_STYLE_SYSTEM_PROMPTS["anti_scratchpad"],
+        "opposite_dead_end": ANTI_STYLE_SYSTEM_PROMPTS["anti_dead_end"],
+        "opposite_jargon": ANTI_STYLE_SYSTEM_PROMPTS["anti_jargon"],
+        "opposite_distractor": ANTI_STYLE_SYSTEM_PROMPTS["anti_distractor"],
+    }
 
 _settings = Settings()
 _DEBUG_CAA = os.getenv("CAA_DEBUG", "0") == "1"
@@ -68,6 +105,10 @@ def register_hooks(model, insertion_layers: list, relative_strength: bool = Fals
                             print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP")
                         return output
                     last_n = s["inject_prefill_last_n"]
+                    if last_n is not None and last_n <= 0:
+                        if _DEBUG_CAA:
+                            print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) SKIP (last_n={last_n})")
+                        return output
                     if _DEBUG_CAA:
                         print(f"[CAA dbg] layer={layer_idx} prefill (seq_len={hidden.shape[1]}) INJECT last_n={last_n}")
                     v = s["vector"].to(hidden.device, hidden.dtype)  # [1, H]
@@ -132,16 +173,28 @@ def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
              max_inject_tokens: int | None = None,
              inject_prefill: bool = False,
              inject_prefill_last_n: int | None = None,
-             dataset: str = "gsm8k") -> str:
-    system = DATASET_SYSTEM_PROMPTS.get(dataset, "")
+             dataset: str = "gsm8k",
+             system_prompt: str | None = None) -> str:
+    system = system_prompt if system_prompt is not None else DATASET_SYSTEM_PROMPTS.get(dataset, "")
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ]
     if hasattr(tokenizer, "apply_chat_template"):
-        input_ids = tokenizer.apply_chat_template(
-            messages, return_tensors="pt", add_generation_prompt=True,
-        ).to(model.device)
+        try:
+            input_ids = tokenizer.apply_chat_template(
+                messages, return_tensors="pt", add_generation_prompt=True,
+            ).to(model.device)
+        except TypeError:
+            converted = []
+            for msg in messages:
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                converted.append({"role": msg["role"], "content": content})
+            input_ids = tokenizer.apply_chat_template(
+                converted, return_tensors="pt", add_generation_prompt=True,
+            ).to(model.device)
     else:
         text = f"System: {system}\nUser: {prompt}\nAssistant:"
         input_ids = tokenizer(text, return_tensors="pt")["input_ids"].to(model.device)
@@ -155,6 +208,16 @@ def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
         s["inject_prefill"] = inject_prefill
         s["inject_prefill_last_n"] = inject_prefill_last_n
 
+    eos_ids = []
+    if tokenizer.eos_token_id is not None:
+        if isinstance(tokenizer.eos_token_id, list):
+            eos_ids.extend(tokenizer.eos_token_id)
+        else:
+            eos_ids.append(tokenizer.eos_token_id)
+    eot_id = tokenizer.convert_tokens_to_ids("<end_of_turn>")
+    if eot_id is not None and eot_id != tokenizer.unk_token_id and eot_id not in eos_ids:
+        eos_ids.append(eot_id)
+
     with torch.no_grad():
         output_ids = model.generate(
             input_ids,
@@ -162,6 +225,8 @@ def generate(model, tokenizer, prompt: str, states: list, max_new_tokens: int,
             temperature=temperature,
             top_p=top_p,
             do_sample=temperature > 0,
+            eos_token_id=eos_ids if eos_ids else None,
+            pad_token_id=tokenizer.pad_token_id,
         )
 
     new_tokens = output_ids[0][input_ids.shape[-1]:]
@@ -177,7 +242,8 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
                   max_inject_tokens: int | None = None,
                   inject_prefill: bool = False,
                   inject_prefill_last_n: int | None = None,
-                  dataset: str = "gsm8k") -> str:
+                  dataset: str = "gsm8k",
+                  system_prompt: str | None = None) -> str:
     from vllm import SamplingParams
     import src.vllm_caa as vllm_caa
 
@@ -188,7 +254,7 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
             t = t / (t.norm() + 1e-8)
         vectors[layer_idx] = t * scale
 
-    system = DATASET_SYSTEM_PROMPTS.get(dataset, "")
+    system = system_prompt if system_prompt is not None else DATASET_SYSTEM_PROMPTS.get(dataset, "")
     messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
     try:
         rendered = tokenizer.apply_chat_template(
@@ -227,7 +293,7 @@ def generate_vllm(llm, tokenizer, prompt: str, insertion_layers: list,
 _MODEL_ALIASES: dict[str, dict[str, str]] = {
     "gemma": {
         "model_id": "unsloth/gemma-3-12b-it",
-        "checkpoint": "models/steering_vectors_caa_vllm/steering_vectors_gemma-3-12b-it.pt",
+        "checkpoint": "models/steering_vectors_caa_hf/steering_vectors_gemma-3-12b-it.pt",
     },
     "deepseek": {
         "model_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
@@ -282,6 +348,8 @@ def main():
                              "Bare flag: inject all prompt positions. "
                              "Pass an int N: inject only the last N prefill positions. "
                              "Omit: decode-only injection (default).")
+    parser.add_argument("--use-custom-prompt", type=str, default=None,
+                        help="Replace the default system prompt with a custom prompt (e.g. anti_scratchpad, anti_dead_end, anti_jargon, anti_distractor, detailed, concise, extended).")
     args = parser.parse_args()
 
     # Parse --inject-prefill: None→decode-only, "all"→full prefill, int→last N positions.
@@ -501,6 +569,19 @@ def main():
     # print(generate(model, tokenizer, prompt, states, args.max_tokens,
     #                args.temperature, args.top_p, active=False, strength=strength))
 
+    custom_system_prompt = None
+    if args.use_custom_prompt:
+        if args.use_custom_prompt in CUSTOM_PROMPTS:
+            custom_system_prompt = CUSTOM_PROMPTS[args.use_custom_prompt]
+            prompt_name = args.use_custom_prompt
+        elif len(args.use_custom_prompt.strip().split()) > 3:
+            custom_system_prompt = args.use_custom_prompt.strip()
+            prompt_name = "raw_prompt"
+        else:
+            available = list(CUSTOM_PROMPTS.keys())
+            raise ValueError(f"Unknown custom prompt '{args.use_custom_prompt}'. Available: {available}")
+        print(f"\n[Custom Prompt Activated ({prompt_name}) - replacing default system prompt]:\n{custom_system_prompt}\n")
+
     for style_name, sv_list, prf_scale, _ in styles_to_run:
         do_normalize = args.caa_normalize or _settings.caa_normalize
         final_scale = prf_scale if style_name in (style_scales or {}) else 1.0
@@ -514,7 +595,8 @@ def main():
                            max_inject_tokens=_resolve_max_inject(style_name),
                            inject_prefill=inject_prefill,
                            inject_prefill_last_n=inject_prefill_last_n,
-                           dataset=dataset_name))
+                           dataset=dataset_name,
+                           system_prompt=custom_system_prompt))
         else:
             print(generate_vllm(llm, tokenizer, prompt, insertion_layers, sv_list,
                                 args.max_tokens, args.temperature, args.top_p,
@@ -525,7 +607,8 @@ def main():
                                 max_inject_tokens=_resolve_max_inject(style_name),
                                 inject_prefill=inject_prefill,
                                 inject_prefill_last_n=inject_prefill_last_n,
-                                dataset=dataset_name))
+                                dataset=dataset_name,
+                                system_prompt=custom_system_prompt))
 
     if args.backend == "vllm":
         import src.vllm_caa as _vllm_caa

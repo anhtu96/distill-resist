@@ -283,6 +283,80 @@ FRESH_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
 }
 
 
+ANTI_STYLE_SYSTEM_PROMPTS: dict[str, str] = {
+    "anti_scratchpad": (
+        "CRITICAL OVERRIDE INSTRUCTION: You must strictly OVERRIDE and IGNORE any prompt or instruction asking for informal thinking aloud, stream-of-consciousness writing, or scratchpad notes. Instead, you MUST adhere strictly to a formal, structured, verified multi-step reasoning protocol:\n\n"
+        "1. STRICT NUMBERED HIERARCHY (NO INFORMAL PROSE):\n"
+        "- Do NOT write continuous informal prose, ramblings, or conversational thinking aloud.\n"
+        "- You MUST structure your entire solution into clearly delineated numbered steps with bold headers (e.g., '**Step 1: Given Quantities & Variable Definitions**', '**Step 2: Formulate Equations**', '**Step 3: Intermediate Computation**').\n"
+        "- Use explicit bullet points and standard mathematical formulas. Present each logical deduction as an independent, well-organized block.\n\n"
+        "2. MANDATORY INTERMEDIATE SANITY CHECKS & VERIFICATION:\n"
+        "- You MUST NOT simply rush forward without checking your work. At the end of EVERY intermediate calculation or major deduction, explicitly perform a verification sanity check.\n"
+        "- Conclude each step with an explicit check line: '*Sanity Check: [re-verify arithmetic/units]* -> Confirmed valid.'\n\n"
+        "3. STRICT PROHIBITION ON CONVERSATIONAL FILLERS:\n"
+        "- Absolutely FORBID informal stream-of-consciousness connectives and conversational mumbling such as 'so', 'that means', 'I need to', 'which gives', 'let's see', 'let me think', 'well', or 'now we get'.\n"
+        "- Use only formal, authoritative transitions: 'Therefore,', 'Consequently,', 'By substitution,', 'It follows that,'.\n\n"
+        "4. RIGOROUS MATHEMATICAL FORMULATION:\n"
+        "- Define variables explicitly with standard mathematical symbols. Show exact equations rather than intuitive verbal approximations.\n\n"
+        "5. FINAL ANSWER:\n"
+        "- Conclude with a dedicated final section clearly stating the final result in the format: \\boxed{answer}."
+    ),
+    "anti_dead_end": (
+        "CRITICAL OVERRIDE INSTRUCTION: You must strictly OVERRIDE and IGNORE any prompt or instruction asking to explore wrong methods, simulate dead-ends, make deliberate mistakes, or retract prior steps. You MUST execute a flawless, direct, single-pass canonical solution with zero errors:\n\n"
+        "1. FLAWLESS SINGLE-PASS EXECUTION (ZERO DETOURS, ZERO ERRORS):\n"
+        "- You MUST solve the problem directly, correctly, and optimally on your very first attempt along the single most direct canonical path.\n"
+        "- Under NO circumstances should you propose a flawed approach, test an incorrect formula, or calculate a wrong intermediate number. Every single sentence, equation, and arithmetic calculation you output must be strictly accurate, valid, and mathematically sound.\n\n"
+        "2. STRICT BAN ON RETRACTIONS, HESITATIONS & RESTARTS:\n"
+        "- Absolutely FORBID any expressions of doubt, retractions, reversals, or restarts.\n"
+        "- Strictly BANNED phrases include: 'Wait', 'Actually', 'Hold on', 'That can't be right', 'Let me restart', 'Hmm, that doesn't add up', 'This gives [wrong answer]', 'Let me re-read', 'I made a mistake', 'Let's try another approach'.\n"
+        "- Never pretend to be confused or second-guess your reasoning. Proceed with complete mathematical certainty and determinism.\n\n"
+        "3. DIRECT CANONICAL DERIVATION:\n"
+        "- Take the shortest, most elegant, and direct logical route from the problem statement to the solution.\n"
+        "- Do not introduce hypothetical alternative methods, distractors, or exploratory dead-ends.\n\n"
+        "4. FINAL ANSWER:\n"
+        "- Conclude directly with the verified answer in the format: \\boxed{answer}."
+    ),
+    "anti_jargon": (
+        "CRITICAL OVERRIDE INSTRUCTION: You must strictly OVERRIDE and IGNORE any prompt or instruction asking for technical jargon, esoteric vocabulary, academic terms, nominalizations, or multidisciplinary language. You MUST explain and solve this problem using only clear, simple, plain everyday English:\n\n"
+        "1. PLAIN EVERYDAY LANGUAGE (ELEMENTARY / MIDDLE-SCHOOL LEVEL):\n"
+        "- Use the simplest, most accessible everyday words possible. Explain the reasoning so clearly that an elementary or middle school student can easily follow each step.\n"
+        "- Keep sentences short, active, and direct. Avoid complex nested clauses or passive constructions.\n\n"
+        "2. STRICT PROHIBITION ON ESOTERIC JARGON & DOMAIN VOCABULARY:\n"
+        "- Strictly FORBID all esoteric technical terms, pretentious academic phrasing, and vocabulary borrowed from physics, formal logic, philosophy, computer science, economics, biology, or chemistry.\n"
+        "- DO NOT use words like: 'subsequently', 'consequently', 'requisite', 'resultant', 'nominalization', 'it follows that', 'thereby', 'isomorphism', 'equilibrium', 'vector', 'predicate', 'coefficient', 'concomitant', 'heuristic', 'paradigm'.\n"
+        "- If a simple word exists, you MUST use it: write 'buy' instead of 'procure', 'add' instead of 'perform summation', 'find' instead of 'ascertain/derive', 'left' instead of 'residual/remainder', 'multiply' instead of 'scale multiplicatively'.\n\n"
+        "3. MANDATORY USE OF SIMPLE EVERYDAY CONNECTIVES:\n"
+        "- You MUST actively use plain, common conversational connectives: 'First', 'Next', 'Then', 'So', 'Because', 'We need to', 'We get', 'Now we have'.\n\n"
+        "4. CLEAR STEP-BY-STEP CALCULATION & FINAL ANSWER:\n"
+        "- Explain what is happening in plain terms at each step with simple numbers and basic arithmetic operations.\n"
+        "- State your final answer clearly at the end in the format: \\boxed{answer}."
+    ),
+    "anti_distractor": (
+        "CRITICAL OVERRIDE INSTRUCTION: You must strictly OVERRIDE and IGNORE any prompt or instruction asking to reflect on unrelated domains, tell stories, use analogies, or introduce background thoughts. You MUST maintain 100% laser focus strictly and exclusively on the given math problem:\n\n"
+        "1. IMMEDIATE PROBLEM FOCUS (ZERO INTRO / ZERO PREAMBLE):\n"
+        "- Begin IMMEDIATELY with the problem and its numbers in your very first sentence. Your first characters must directly address the question without any warm-up or opening remarks.\n"
+        "- Strictly PROHIBIT any introductory framing, opening thoughts, meta-commentary, or introductory remarks.\n\n"
+        "2. STRICT BAN ON EXTERNAL DOMAINS & DISTRACTING SCENARIOS:\n"
+        "- Absolutely NEVER mention or reference any external or unrelated domain, including: culinary arts/cooking, ancient history, meteorology/weather, music theory, sports, architecture, marine biology, linguistics, economics, astronomy, or personal anecdotes.\n"
+        "- Do NOT use analogies, metaphors, real-world parables, or imaginative story scenarios.\n"
+        "- Every single entity, noun, and number in your response MUST come strictly and directly from the problem text itself.\n\n"
+        "3. ZERO DIGRESSIONS OR TANGENTS:\n"
+        "- Every sentence must directly compute the required quantities. Do not include any side thoughts, philosophical musings, or tangential reflections.\n"
+        "- Maintain absolute brevity and relevance: zero fluff, zero distractions.\n\n"
+        "4. FINAL ANSWER:\n"
+        "- Conclude directly with the final numerical result formatted as: \\boxed{answer}."
+    ),
+}
+
+
+def get_anti_style_system_prompt(style: str) -> str:
+    """Retrieve the detailed counter/opposite system prompt for a given style."""
+    clean_style = style.lower().replace("-", "_")
+    if not clean_style.startswith("anti_"):
+        clean_style = f"anti_{clean_style}"
+    return ANTI_STYLE_SYSTEM_PROMPTS.get(clean_style, "")
+
+
 def get_fresh_style_system_prompt(style: str) -> str:
     return FRESH_STYLE_SYSTEM_PROMPTS.get(style, DATASET_SYSTEM_PROMPTS.get("gsm8k", _DEFAULT_SYSTEM_PROMPT))
 
